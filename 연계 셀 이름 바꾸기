@@ -1,0 +1,104 @@
+function syncSheetTitle() {
+  const srcSS = SpreadsheetApp.getActiveSpreadsheet();
+
+  // ① "X월 근무현황표" 형식의 시트 자동 탐색
+  const sheets = srcSS.getSheets();
+  let srcSheet = null;
+
+  for (let s of sheets) {
+    if (s.getName().match(/^\d+월 근무현황표$/)) {
+      srcSheet = s;
+      break;
+    }
+  }
+
+  if (!srcSheet) {
+    console.log("근무현황표 시트를 찾을 수 없습니다.");
+    return;
+  }
+
+  // ② Z3(월), X3(연도) 읽기
+  const baseYear = Number(srcSheet.getRange("X3").getValue()); // 예: 2026
+  const baseMonth = Number(srcSheet.getRange("Z3").getValue()); // 예: 3
+
+  if (!baseYear || !baseMonth) {
+    console.log("X3 또는 Z3 값이 없습니다.");
+    return;
+  }
+
+  // ③ 월 +1 처리 (12월이면 다음 해 1월로)
+  const planYear = baseMonth === 12 ? baseYear + 1 : baseYear;
+  const planMonth = baseMonth === 12 ? 1 : baseMonth + 1;
+
+  // ④ 연장근로 계획 파일 열기
+  const TARGET_URL = "https://docs.google.com/spreadsheets/d/1uqWQ3XnPwoOXR5SlqJy7ZO-bxyyC-1XL6v362S4QmGs/edit?gid=209613212#gid=209613212";
+  const targetSS = SpreadsheetApp.openByUrl(TARGET_URL);
+  const targetSheet = targetSS.getSheets()[0]; // 첫 번째 시트 기준
+
+  // ⑤ A1:J1 병합 셀에 제목 입력
+  targetSheet.getRange("A1:J1").merge()
+    .setValue(`${planYear}년 ${planMonth}월 연장근로 계획`);
+
+  // ⑥ C4에 전월 실적 입력
+  targetSheet.getRange("C4").setValue(`전월(${baseMonth}월) 실적`);
+
+  // ⑦ E4에 당월 계획 입력
+  targetSheet.getRange("E4").setValue(`당월(${planMonth}월) 계획`);
+
+  console.log(`✅ 완료: ${planYear}년 ${planMonth}월 연장근로 계획 반영됨`);
+}
+
+function syncTransportTitle() {
+  const srcSS = SpreadsheetApp.getActiveSpreadsheet();
+
+  // ① "X월 근무현황표" 시트 자동 탐색
+  const sheets = srcSS.getSheets();
+  let srcSheet = null;
+
+  for (let s of sheets) {
+    if (s.getName().match(/^\d+월 근무현황표$/)) {
+      srcSheet = s;
+      break;
+    }
+  }
+
+  if (!srcSheet) {
+    console.log("근무현황표 시트를 찾을 수 없습니다.");
+    return;
+  }
+
+  // ② Z3(월) 읽기
+  const baseMonth = Number(srcSheet.getRange("Z3").getValue()); // 예: 3
+
+  if (!baseMonth) {
+    console.log("Z3 값이 없습니다.");
+    return;
+  }
+
+  // ③ 교통비 지급 정산서 파일 열기
+  const TRANSPORT_URL = "https://docs.google.com/spreadsheets/d/16z8tsSrWuu7rd1ViJUIAU9odqCQJrUSiImCBENLfek8/edit";
+  const transportSS = SpreadsheetApp.openByUrl(TRANSPORT_URL);
+
+  // ④ 각 시트별 제목 업데이트 (줄바꿈 \n 유지)
+  const sheetConfigs = [
+    { name: "BTL 생산",  label: "(BTL 생산)" },
+    { name: "제품생산",  label: "(제품생산)" },
+    { name: "품질 CIP",  label: "(품질 CIP)" },
+  ];
+
+  for (const cfg of sheetConfigs) {
+    const sheet = transportSS.getSheetByName(cfg.name);
+    if (!sheet) {
+      console.log(`시트를 찾을 수 없습니다: ${cfg.name}`);
+      continue;
+    }
+
+    // A1:H3 병합 셀에 줄바꿈 포함 제목 입력
+    // setWrap(true) 로 줄바꿈 렌더링 보장
+    const cell = sheet.getRange("A1:H3");
+    cell.setValue(`${baseMonth}월 업무차 교통비 내역\n${cfg.label}`);
+    cell.setWrap(true);
+
+    console.log(`✅ ${cfg.name} 시트 제목 → ${baseMonth}월 업무차 교통비 내역 / ${cfg.label}`);
+  }
+}
