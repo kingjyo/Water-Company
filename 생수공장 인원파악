@@ -1,0 +1,864 @@
+// ============================================================
+//  생수공장 식수·근무 인원 파악표
+//  ※ "식수인원파악" 스프레드시트의 Apps Script 편집기에 붙여넣기
+// ============================================================
+
+const ID_PROD = "1M2ExGG9jwjs_A32yr8JJBH_qbKxpefGS3lkTKUX8e0Y";
+const ID_WORK = "12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY";
+
+const OFF_CODES = ["휴", "무", "사", "퇴", "상", "년", "공"];
+
+const GROUP = {
+  생산: ["김재방", "이정묵", "김영준"],
+  품질: ["박수형", "고혁진", "진성령"],
+  현장: ["김일수", "양공호", "김정운", "강영우", "임상균", "양진복", "강은철", "고남호", "이청훈"]
+};
+
+const OFF_REASON = {
+  "년": "연차", "공": "공휴", "휴": "휴무",
+  "무": "무급휴무", "사": "사직", "퇴": "철야휴무", "상": "상조휴가"
+};
+
+const PROD_ITEMS = [
+  { name: "18.9L",     idx: 0, type: "제품" },
+  { name: "1.5L",      idx: 1, type: "제품" },
+  { name: "0.5L",      idx: 2, type: "제품" },
+  { name: "0.33L",     idx: 3, type: "제품" },
+  { name: "0.12L",     idx: 4, type: "제품" },
+  { name: "0.19L 캔",  idx: 5, type: "탄산" },
+  { name: "1.5L BTL",  idx: 6, type: "BTL"  },
+  { name: "0.5L BTL",  idx: 7, type: "BTL"  },
+  { name: "0.33L BTL", idx: 8, type: "BTL"  },
+  { name: "CAP",       idx: 9, type: "CAP"  }
+];
+
+// ============================================================
+//  메뉴
+// ============================================================
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("🏭 인원파악")
+    .addItem("📋 오늘 파악표 생성", "runDailyReport")
+    .addItem("🔍 날짜 지정 테스트", "runTestByDate")
+    .addToUi();
+}
+
+function runTestByDate() {
+  const ui  = SpreadsheetApp.getUi();
+  const res = ui.prompt("🔍 날짜 지정 테스트", "날짜 입력 (예: 2025-03-05)", ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  const parsed = new Date(res.getResponseText().trim());
+  if (isNaN(parsed.getTime())) { ui.alert("날짜 형식 오류. YYYY-MM-DD 형식으로 입력하세요."); return; }
+  _runReport(parsed);
+  ui.alert("✅ " + Utilities.formatDate(parsed, "Asia/Seoul", "yyyy년 MM월 dd일") + " 완료!");
+}
+
+function runDailyReport() { _runReport(new Date()); }
+
+// ============================================================
+//  메인
+// ============================================================
+function _runReport(today) {
+  const TZ      = "Asia/Seoul";
+  const month   = today.getMonth() + 1;
+  const day     = today.getDate();
+
+  // ── 시트 이름: "yyyy년 M월 dd일 인원 파악" ───────────────
+  const sheetName = Utilities.formatDate(today, TZ, "yyyy년 M월 dd일") + " 인원 파악";
+
+  const ssWork   = SpreadsheetApp.openById(ID_WORK);
+  const ssProd   = SpreadsheetApp.openById(ID_PROD);
+  const ssResult = SpreadsheetApp.getActiveSpreadsheet();
+
+  // ── 이미 해당 일자 시트가 있으면 중단 ────────────────────
+  if (ssResult.getSheetByName(sheetName)) {
+    showAlert("⚠️ '" + sheetName + "' 시트가 이미 존재합니다.\n중복 생성을 건너뜁니다.");
+    return;
+  }
+
+  const workSheet = ssWork.getSheetByName(month + "월");
+  const prodSheet = findProdSheet(ssProd, month);
+
+  if (!workSheet) { showAlert("근무계획 '" + month + "월' 시트를 찾을 수 없습니다."); return; }
+  if (!prodSheet) { showAlert("제품생산 계획 " + month + "월 시트를 찾을 수 없습니다."); return; }
+
+  // ── 새 시트 맨 앞에 삽입 ─────────────────────────────────
+  const ws = ssResult.insertSheet(sheetName, 0);
+
+  const workData = getWorkData(workSheet, day);
+  const prodData = getProdData(prodSheet, day);
+  const lcData   = getLCData(prodSheet, day);
+
+  buildLayout(ws, today, prodData, workData, lcData);
+}
+
+// ============================================================
+//  데이터 수집
+// ============================================================
+function findProdSheet(ss, month) {
+  return ss.getSheets().find(s => s.getName().includes(month + "월")) || null;
+}
+
+function getWorkData(sheet, day) {
+  const dateRow = sheet.getRange("D3:AK3").getValues()[0];
+  const names   = sheet.getRange("C5:C20").getValues();
+  const codes   = sheet.getRange("G5:AK20").getValues();
+
+  let dateIdx = -1;
+  for (let i = 0; i < dateRow.length; i++) {
+    const v = dateRow[i];
+    const d = (v instanceof Date) ? v.getDate() : Number(v);
+    if (d === day) { dateIdx = i; break; }
+  }
+  if (dateIdx < 0) { Logger.log("날짜 열 못 찾음: " + day); return {}; }
+
+  const ci = dateIdx - 3;
+  const result = {};
+  for (let r = 0; r < names.length; r++) {
+    const name = String(names[r][0]).trim();
+    if (!name) continue;
+    result[name] = (ci >= 0 && ci < codes[r].length) ? String(codes[r][ci]).trim() : "";
+  }
+  return result;
+}
+
+function getProdData(sheet, day) {
+  const dayCol  = sheet.getRange("A3:A33").getValues();
+  const prodVal = sheet.getRange("C3:L33").getValues();
+
+  let ri = -1;
+  for (let i = 0; i < dayCol.length; i++) {
+    if (Number(dayCol[i][0]) === day) { ri = i; break; }
+  }
+  if (ri < 0) return [];
+
+  return PROD_ITEMS
+    .filter(item => Number(prodVal[ri][item.idx]) > 0)
+    .map(item => ({ name: item.name, qty: Number(prodVal[ri][item.idx]), type: item.type }));
+}
+
+// L/C 정보 추출
+// 일반제품 라인: idx 1~4 (1.5L, 0.5L, 0.33L, 0.12L) — 18.9L(idx0) 제외
+// BTL 라인: idx 6~8 (1.5BTL, 0.5BTL, 0.33BTL)
+function getLCData(sheet, day) {
+  const dayCol  = sheet.getRange("A3:A33").getValues();
+  const prodVal = sheet.getRange("C3:L33").getValues();
+
+  let ri = -1;
+  for (let i = 0; i < dayCol.length; i++) {
+    if (Number(dayCol[i][0]) === day) { ri = i; break; }
+  }
+  if (ri < 0) return [];
+
+  // 일반제품 라인 (C열=idx0 제외, D~G = idx1~4)
+  const PROD_LINE = [
+    { idx:1, name:"1.5L" }, { idx:2, name:"0.5L" },
+    { idx:3, name:"0.33L" }, { idx:4, name:"0.12L" }
+  ];
+  // BTL 라인 (I~K = idx6~8)
+  const BTL_LINE = [
+    { idx:6, name:"1.5L BTL" }, { idx:7, name:"0.5L BTL" }, { idx:8, name:"0.33L BTL" }
+  ];
+
+  const results = [];
+
+  function findLC(line) {
+    // 당일 해당 라인에 L/C가 있는지 확인
+    const lcItem = line.find(item => {
+      const v = String(prodVal[ri][item.idx] || "");
+      return v.toUpperCase().includes("L/C");
+    });
+    if (!lcItem) return null;
+
+    // 직전 생산 제품: 당일 이전 행에서 해당 라인 중 숫자가 있는 마지막 항목
+    let prevName = null;
+    for (let r = ri - 1; r >= 0; r--) {
+      for (const item of line) {
+        const v = prodVal[r][item.idx];
+        const s = String(v || "");
+        if (v && !s.toUpperCase().includes("L/C") && Number(v) > 0) {
+          prevName = item.name; break;
+        }
+      }
+      if (prevName) break;
+    }
+
+    // 직후 생산 제품: 당일 이후 행에서 해당 라인 중 숫자가 있는 첫 항목
+    let nextName = null;
+    for (let r = ri + 1; r < prodVal.length; r++) {
+      for (const item of line) {
+        const v = prodVal[r][item.idx];
+        const s = String(v || "");
+        if (v && !s.toUpperCase().includes("L/C") && Number(v) > 0) {
+          nextName = item.name; break;
+        }
+      }
+      if (nextName) break;
+    }
+
+    return { prev: prevName, next: nextName };
+  }
+
+  const prodLC = findLC(PROD_LINE);
+  if (prodLC) results.push({ lineType: "제품", ...prodLC });
+
+  const btlLC = findLC(BTL_LINE);
+  if (btlLC) results.push({ lineType: "BTL", ...btlLC });
+
+  return results;
+}
+
+// ============================================================
+//  전체 레이아웃 구성
+// ============================================================
+function buildLayout(ws, today, prodData, workData, lcData) {
+  ws.clearContents();
+  ws.clearFormats();
+
+  const TZ    = "Asia/Seoul";
+  const dayMap = {Sun:"일",Mon:"월",Tue:"화",Wed:"수",Thu:"목",Fri:"금",Sat:"토"};
+  const dayKo  = dayMap[Utilities.formatDate(today, TZ, "EEE")] || "";
+  const dateStr = Utilities.formatDate(today, TZ, "yyyy년 MM월 dd일") + " (" + dayKo + ")";
+
+  const BG = {
+    TITLE : "#4472C4",
+    PROD_H: "#F4B942", PROD_R: "#FFF2CC",
+    WORK_H: "#70AD47", WORK_R: "#E2EFDA",
+    SHFT_H: "#2E75B6", SHFT_R: "#DEEAF1",
+    OFF_H : "#7030A0", OFF_R : "#EAD1DC",
+    MEAL_H: "#00B0F0", MEAL_R: "#DDEBF7",
+    SUM_H : "#595959",
+    WHITE : "#FFFFFF", GRAY  : "#D9D9D9"
+  };
+  const FG = { WHITE: "#FFFFFF", DARK: "#1A1A1A" };
+
+  // ── 열 너비 설정 ──────────────────────────────────────────
+  // A열: 그룹 라벨 — 충분히 넓게
+  ws.setColumnWidth(1, 90);
+
+  // 생산계획 B열~: 품목명 길이 기준
+  const nProd = prodData.length;
+  if (nProd > 0) {
+    prodData.forEach((item, i) => {
+      const charLen = item.name.length;
+      const w = Math.max(80, Math.min(130, charLen * 14 + 25));
+      ws.setColumnWidth(2 + i, w);
+    });
+  } else {
+    ws.setColumnWidth(2, 90);
+  }
+
+  // ★ D열(인원): 숫자 표시 충분히, E열(구분선): 시각적 구분 명확히
+  ws.setColumnWidth(4, 75);   // D: 인원 (넉넉하게)
+  ws.setColumnWidth(5, 60);   // E: 구분선
+
+  // 본표 고정 열
+  ws.setColumnWidth(6,  80);  // F: 교대 구분
+  ws.setColumnWidth(7,  175); // G: 교대 명단
+  ws.setColumnWidth(8,  50);  // H: 교대 인원
+  ws.setColumnWidth(9,  200); // I: 비고
+  ws.setColumnWidth(10, 20);  // J: 구분선
+  ws.setColumnWidth(11, 80);  // K: 비근무 구분
+  ws.setColumnWidth(12, 175); // L: 비근무 명단
+  ws.setColumnWidth(13, 50);  // M: 비근무 인원
+  ws.setColumnWidth(14, 200); // N: 비근무 사유
+  ws.setColumnWidth(15, 20);  // O: 구분선
+  ws.setColumnWidth(16, 90);  // P: 식수 구분
+  ws.setColumnWidth(17, 52);  // Q: 식수 인원
+  ws.setColumnWidth(18, 175); // R: 식수 사유
+  ws.setColumnWidth(19, 85);  // S: 식수 비고
+
+  // ── 행 높이 ───────────────────────────────────────────────
+  ws.setRowHeight(1, 36);
+  ws.setRowHeight(2, 36);
+  ws.setRowHeight(3, 36);
+  ws.setRowHeight(4, 14);
+  ws.setRowHeight(5, 40);
+  ws.setRowHeight(6, 34);
+  ws.setRowHeight(7, 34);
+  for (let r = 8; r <= 12; r++) ws.setRowHeight(r, 41);
+
+  // ════════════════════════════════════════════════════════
+  // 생산계획 영역 (행1~3)
+  // ════════════════════════════════════════════════════════
+  const nCols     = Math.max(nProd, 1);
+  // ★ 제목 병합 범위: 최소 E열(5)까지 확보 — A+B+C+D+E 폭 합산으로 제목이 충분히 보이게
+  const titleEndCol = Math.max(1 + nCols, 5);
+  const lastColLtr = colLetter(titleEndCol);
+
+  mc(ws, "A1:" + lastColLtr + "1",
+     "📦  오늘의 생산계획     " + dateStr,
+     BG.PROD_H, FG.DARK, true, 13);
+
+  sc(ws, 2, 1, "품목", BG.PROD_H, FG.DARK, true, 10);
+  sc(ws, 3, 1, "계획량", BG.PROD_R, FG.DARK, true, 10);
+
+  // ── 품목/계획량 균등 병합 배분 ───────────────────────────
+  // B열(2)~titleEndCol 사이의 총 슬롯 열 수
+  const totalSlotCols = titleEndCol - 1;
+  const itemCount = Math.max(nProd, 1);
+
+  // 균등 분배: Math.floor 기준으로 나누고, 나머지는 앞 항목부터 1씩 추가
+  // 마지막 항목은 남은 열 전체를 가져가 항상 titleEndCol까지 정확히 채움
+  const base = Math.floor(totalSlotCols / itemCount);
+  const extra = totalSlotCols % itemCount; // 앞 extra개 항목에 1 추가
+  const slotWidths = [];
+  for (let i = 0; i < itemCount; i++) {
+    slotWidths.push(base + (i < extra ? 1 : 0));
+  }
+  // 안전장치: 마지막 항목이 titleEndCol까지 정확히 닿도록 보정
+  const sumW = slotWidths.reduce((a, b) => a + b, 0);
+  if (sumW !== totalSlotCols) slotWidths[itemCount - 1] += totalSlotCols - sumW;
+
+  if (nProd === 0) {
+    // 생산 없음: B~titleEndCol 전체 병합
+    const r2 = ws.getRange(2, 2, 1, totalSlotCols);
+    if (totalSlotCols > 1) r2.merge();
+    r2.setValue("생산 없음")
+      .setBackground(BG.PROD_R).setFontColor(FG.DARK)
+      .setHorizontalAlignment("center").setVerticalAlignment("middle")
+      .setFontFamily("맑은 고딕").setFontSize(10).setFontWeight("normal");
+    const r3 = ws.getRange(3, 2, 1, totalSlotCols);
+    if (totalSlotCols > 1) r3.merge();
+    r3.setValue("—")
+      .setBackground(BG.WHITE).setHorizontalAlignment("center")
+      .setVerticalAlignment("middle").setFontFamily("맑은 고딕").setFontSize(10);
+  } else {
+    let startCol = 2;
+    prodData.forEach((item, i) => {
+      const w = Math.max(slotWidths[i], 1); // 최소 1열 보장
+
+      // ★ 행2: 병합 전에 각 셀을 개별적으로 주황색으로 칠함
+      //   (merge() 후 setBackground는 기준셀에만 적용되는 GAS 버그 회피)
+      for (let ci = 0; ci < w; ci++) {
+        ws.getRange(2, startCol + ci, 1, 1).setBackground(BG.PROD_H);
+      }
+      const nameRange = ws.getRange(2, startCol, 1, w);
+      if (w > 1) nameRange.merge();
+      // setValue 등 나머지 속성은 병합 후 기준셀에만 적용해도 정상 동작
+      nameRange.setValue(item.name);
+      nameRange.setFontColor(FG.DARK);
+      nameRange.setFontWeight("bold");
+      nameRange.setFontSize(10);
+      nameRange.setHorizontalAlignment("center");
+      nameRange.setVerticalAlignment("middle");
+      nameRange.setFontFamily("맑은 고딕");
+      nameRange.setWrap(true);
+
+      // 행3: 계획량
+      const qtyRange = ws.getRange(3, startCol, 1, w);
+      if (w > 1) qtyRange.merge();
+      qtyRange.setValue(item.qty)
+        .setBackground(BG.WHITE).setHorizontalAlignment("center")
+        .setVerticalAlignment("middle").setFontFamily("맑은 고딕")
+        .setFontSize(10).setNumberFormat("#,##0");
+      startCol += w;
+    });
+  }
+
+  // ════════════════════════════════════════════════════════
+  // L/C (Line Change) 섹션: I1:M3 (9~13열, 행1~3)
+  // ════════════════════════════════════════════════════════
+  const LC_START = 9;  // I열
+  const LC_END   = 11; // K열 (I~K = 3칸)
+  const LC_COLS  = LC_END - LC_START + 1; // 3칸
+
+  // 행1: "LINE CHANGE" 헤더 (배경색 칠함)
+  const lcHeaderRange = ws.getRange(1, LC_START, 1, LC_COLS);
+  lcHeaderRange.merge();
+  lcHeaderRange.setValue("🔀  LINE CHANGE")
+    .setBackground("#E8D5F5").setFontColor("#4B0082")
+    .setFontWeight("bold").setFontSize(11)
+    .setHorizontalAlignment("center").setVerticalAlignment("middle")
+    .setFontFamily("맑은 고딕");
+
+  // 행2: L/C 내용 (배경 흰색)
+  const lcContentRange = ws.getRange(2, LC_START, 1, LC_COLS);
+  lcContentRange.merge();
+  if (lcData && lcData.length > 0) {
+    const lcText = lcData.map(lc => {
+      const prev = lc.prev || "?";
+      const next = lc.next || "?";
+      return prev + "  →  " + next + "  LINE CHANGE";
+    }).join("\n");
+    lcContentRange.setValue(lcText)
+      .setBackground(BG.WHITE).setFontColor("#4B0082")
+      .setFontWeight("bold").setFontSize(10)
+      .setHorizontalAlignment("center").setVerticalAlignment("middle")
+      .setFontFamily("맑은 고딕").setWrap(true);
+  } else {
+    lcContentRange.setValue("—")
+      .setBackground(BG.WHITE).setFontColor("#888888")
+      .setFontWeight("normal").setFontSize(10)
+      .setHorizontalAlignment("center").setVerticalAlignment("middle")
+      .setFontFamily("맑은 고딕");
+  }
+
+  // 행1~3 중 LC 범위 밖(K+1 이후) 흰색 처리
+  // 행3은 LC 범위 포함 전체 흰색 (테두리도 없음)
+  ws.getRange(3, LC_START, 1, LC_COLS)
+    .setBackground(BG.WHITE)
+    .setBorder(false, false, false, false, false, false);
+
+  // 생산계획~LC 사이 빈 셀: 흰색
+  if (titleEndCol + 1 < LC_START) {
+    ws.getRange(1, titleEndCol + 1, 3, LC_START - titleEndCol - 1)
+      .setBackground(BG.WHITE).setBorder(false, false, false, false, false, false);
+  }
+
+  // SAM 상수 선언 (내용은 데이터 계산 후 채움)
+  const SAM_START = 16; // P열
+  const SAM_END   = 18; // R열
+  const SAM_COLS  = SAM_END - SAM_START + 1; // 3칸
+
+  // LC~SAM 사이 (L~O열) 행1~3: 흰색
+  if (LC_END + 1 < SAM_START) {
+    ws.getRange(1, LC_END + 1, 3, SAM_START - LC_END - 1)
+      .setBackground(BG.WHITE)
+      .setBorder(false, false, false, false, false, false);
+  }
+  // SAM 오른쪽(S열~) 행1~3: 흰색
+  if (SAM_END < 19) {
+    ws.getRange(1, SAM_END + 1, 3, 19 - SAM_END)
+      .setBackground(BG.WHITE)
+      .setBorder(false, false, false, false, false, false);
+  }
+  // 행4: A~titleEndCol 전체 회색, 그 오른쪽은 흰색
+  ws.getRange(4, 1, 1, titleEndCol).setBackground(BG.GRAY);
+  if (titleEndCol < 19) {
+    ws.getRange(4, titleEndCol + 1, 1, 19 - titleEndCol)
+      .setBackground(BG.WHITE)
+      .setBorder(false, false, false, false, false, false);
+  }
+
+  // ════════════════════════════════════════════════════════
+  // 행5: 메인 제목
+  // ════════════════════════════════════════════════════════
+  mc(ws, "A5:S5",
+     "🏭  생수공장 식수·근무 인원 파악표     " + dateStr,
+     BG.TITLE, FG.WHITE, true, 13);
+
+  // ════════════════════════════════════════════════════════
+  // 행6: 섹션 헤더
+  // ════════════════════════════════════════════════════════
+  mc(ws, "A6:D6", "✅ 출근 현황",      BG.WORK_H, FG.WHITE, true);
+  ws.getRange("E6").setBackground(BG.GRAY);
+  mc(ws, "F6:I6", "🔄 교대·연장·야간", BG.SHFT_H, FG.WHITE, true);
+  ws.getRange("J6").setBackground(BG.GRAY);
+  mc(ws, "K6:N6", "🚫 비근무 현황",     BG.OFF_H,  FG.WHITE, true);
+  ws.getRange("O6").setBackground(BG.GRAY);
+  mc(ws, "P6:S6", "🍱 식수 인원",       BG.MEAL_H, FG.DARK,  true);
+
+  // ════════════════════════════════════════════════════════
+  // 행7: 소헤더
+  // ════════════════════════════════════════════════════════
+  sc(ws, 7, 1, "구분",            BG.WORK_H, FG.WHITE, true);
+  mc(ws, "B7:C7", "출근 인원 명단", BG.WORK_H, FG.WHITE, true);
+  sc(ws, 7, 4, "인원",            BG.WORK_H, FG.WHITE, true);
+  ws.getRange(7, 5).setBackground(BG.GRAY);
+  sc(ws, 7, 6,  "구분",           BG.SHFT_H, FG.WHITE, true);
+  sc(ws, 7, 7,  "해당 인원",      BG.SHFT_H, FG.WHITE, true);
+  sc(ws, 7, 8,  "인원",           BG.SHFT_H, FG.WHITE, true);
+  sc(ws, 7, 9,  "비고(사유)",     BG.SHFT_H, FG.WHITE, true);
+  ws.getRange(7, 10).setBackground(BG.GRAY);
+  sc(ws, 7, 11, "구분",            BG.OFF_H, FG.WHITE, true);
+  sc(ws, 7, 12, "비근무 인원 명단",BG.OFF_H, FG.WHITE, true);
+  sc(ws, 7, 13, "인원",            BG.OFF_H, FG.WHITE, true);
+  sc(ws, 7, 14, "사유",            BG.OFF_H, FG.WHITE, true);
+  ws.getRange(7, 15).setBackground(BG.GRAY);
+  sc(ws, 7, 16, "구분",  BG.MEAL_H, FG.DARK, true);
+  sc(ws, 7, 17, "인원",  BG.MEAL_H, FG.DARK, true);
+  sc(ws, 7, 18, "사유",  BG.MEAL_H, FG.DARK, true);
+  sc(ws, 7, 19, "비고",  BG.MEAL_H, FG.DARK, true);
+
+  // ════════════════════════════════════════════════════════
+  // 데이터 계산
+  // ════════════════════════════════════════════════════════
+  const present = {
+    생산: GROUP.생산.filter(n => workData.hasOwnProperty(n) && !OFF_CODES.includes(workData[n])),
+    품질: GROUP.품질.filter(n => workData.hasOwnProperty(n) && !OFF_CODES.includes(workData[n])),
+    현장: GROUP.현장.filter(n => workData.hasOwnProperty(n) && !OFF_CODES.includes(workData[n]))
+  };
+  const absent = {
+    생산: GROUP.생산.filter(n => workData.hasOwnProperty(n) && OFF_CODES.includes(workData[n])),
+    품질: GROUP.품질.filter(n => workData.hasOwnProperty(n) && OFF_CODES.includes(workData[n])),
+    현장: GROUP.현장.filter(n => workData.hasOwnProperty(n) && OFF_CODES.includes(workData[n]))
+  };
+  const jo    = GROUP.품질.filter(n => workData[n] === "조");
+  const yeon  = GROUP.품질.filter(n => workData[n] === "연");
+  const ext   = GROUP.현장.filter(n => ["B","P","L"].includes(workData[n] || ""));
+  const night = GROUP.현장.filter(n => workData[n] === "야");
+
+  const totalPresent = present.생산.length + present.품질.length + present.현장.length;
+
+  const hasBTL = prodData.some(p => p.type === "BTL");
+  const hasCAP = prodData.some(p => p.type === "CAP");
+  const hasTan = prodData.some(p => p.type === "탄산");
+
+  // ★ 12:20 교대 식사 인원 계산
+  //   - BTL 또는 CAP 생산 시: 2명
+  //   - 탄산(0.19L 캔) 생산 시: 1명
+  //   - 둘 다 있으면 합산
+  let shiftCnt = 0;
+  const shiftReasons = [];
+  if (hasBTL || hasCAP) {
+    shiftCnt += 2;
+    const btlNames = prodData.filter(p => p.type === "BTL").map(p => p.name.replace(" BTL", ""));
+    const parts = [];
+    if (btlNames.length) parts.push(btlNames.join(", ") + " BTL");
+    if (hasCAP) parts.push("CAP");
+    shiftReasons.push(parts.join("/") + " 생산");
+  }
+  if (hasTan) {
+    shiftCnt += 1;
+    shiftReasons.push("0.19L 캔 생산");
+  }
+
+  // ════════════════════════════════════════════════════════
+  // 행 8~11: 데이터
+  // ════════════════════════════════════════════════════════
+  const groups = ["생산", "품질", "현장"];
+
+  // ── 출근 현황 A~D ─────────────────────────────────────────
+  groups.forEach((g, i) => {
+    const r  = 8 + i;
+    const bg = (i % 2 === 0) ? BG.WORK_R : BG.WHITE;
+    sc(ws, r, 1, g + "그룹", BG.WORK_H, FG.WHITE, true);
+    ws.getRange(r, 2, 1, 2).merge();
+    dataCell(ws, r, 2, present[g].length ? present[g].join(", ") : "—", bg);
+    dataCell(ws, r, 4, present[g].length || 0, bg, true, 12);
+  });
+  sc(ws, 11, 1, "—", BG.WORK_R, FG.DARK, false);
+  ws.getRange(11, 2, 1, 2).merge();
+  ws.getRange(11, 2).setBackground(BG.WHITE);
+  ws.getRange(11, 4).setBackground(BG.WHITE);
+
+  // ── 교대·연장·야간 F~I ───────────────────────────────────
+  [
+    { lbl:"조출 (품질)", ppl:jo,    note:jo.length    ? cipNote(prodData)             : "—", bg:BG.SHFT_R },
+    { lbl:"연장 (품질)", ppl:yeon,  note:yeon.length  ? cipNote(prodData)             : "—", bg:BG.WHITE  },
+    { lbl:"연장 (현장)", ppl:ext,   note:ext.length   ? shiftNote(workData, prodData) : "—", bg:BG.SHFT_R },
+    { lbl:"야간 (현장)", ppl:night, note:night.length ? nightNote(prodData)           : "—", bg:BG.WHITE  }
+  ].forEach((s, i) => {
+    const r = 8 + i;
+    sc(ws, r, 6, s.lbl, BG.SHFT_H, FG.WHITE, true);
+    dataCell(ws, r, 7, s.ppl.length ? s.ppl.join(", ") : "—", s.bg);
+    dataCell(ws, r, 8, s.ppl.length || "", s.bg, true, 12);
+    dataCell(ws, r, 9, s.note, s.bg);
+  });
+
+  // ── 비근무 K~N ───────────────────────────────────────────
+  groups.forEach((g, i) => {
+    const r  = 8 + i;
+    const bg = (i % 2 === 0) ? BG.OFF_R : BG.WHITE;
+    sc(ws, r, 11, g + "그룹", BG.OFF_H, FG.WHITE, true);
+    const names  = absent[g].map(n => n).join(", ");
+    const reason = absent[g].map(n => n + " " + (OFF_REASON[workData[n]] || workData[n])).join(", ");
+    dataCell(ws, r, 12, names  || "—", bg);
+    dataCell(ws, r, 13, absent[g].length || "", bg, true, 12);
+    dataCell(ws, r, 14, reason || "—", bg);
+  });
+  sc(ws, 11, 11, "—", BG.OFF_R, FG.DARK, false);
+  [12, 13, 14].forEach(c => ws.getRange(11, c).setBackground(BG.WHITE));
+
+  // ── 12:20 식사 인원 (삼익 포함) P1:R2 ───────────────────────
+  // shiftCnt, hasTan 계산 완료 후 실행
+  const samCount = shiftCnt + (hasTan ? 2 : 0);
+  const samBG    = "#FFF0E0";
+  const samHDR   = "#F4A020";
+
+  // 행1: 헤더
+  const samHeaderRange = ws.getRange(1, SAM_START, 1, SAM_COLS);
+  samHeaderRange.merge();
+  samHeaderRange.setValue("🍱  12:20 식사 (삼익 포함)")
+    .setBackground(samHDR).setFontColor("#FFFFFF")
+    .setFontWeight("bold").setFontSize(10)
+    .setHorizontalAlignment("center").setVerticalAlignment("middle")
+    .setFontFamily("맑은 고딕");
+
+  // 행2: 인원 값
+  const samContentRange = ws.getRange(2, SAM_START, 1, SAM_COLS);
+  samContentRange.merge();
+  if (samCount > 0) {
+    const samText = samCount + "명"
+      + (hasTan ? "  (자사 " + shiftCnt + " + 삼익 2)" : "  (자사 " + shiftCnt + "명)");
+    samContentRange.setValue(samText)
+      .setBackground(samBG).setFontColor("#1A1A1A")
+      .setFontWeight("bold").setFontSize(10)
+      .setHorizontalAlignment("center").setVerticalAlignment("middle")
+      .setFontFamily("맑은 고딕").setWrap(true);
+  } else {
+    samContentRange.setValue("—")
+      .setBackground(samBG).setFontColor("#888888")
+      .setFontWeight("normal").setFontSize(10)
+      .setHorizontalAlignment("center").setVerticalAlignment("middle")
+      .setFontFamily("맑은 고딕");
+  }
+
+  // 행3: 흰색
+  ws.getRange(3, SAM_START, 1, SAM_COLS)
+    .setBackground(BG.WHITE)
+    .setBorder(false, false, false, false, false, false);
+
+  // ── 식수 인원 P~S ─────────────────────────────────────────
+  // ★ 11:20 식사: 12:20 식사와 완전히 동일한 로직
+  //   - BTL 또는 CAP 생산 시: 2명
+  //   - 탄산(0.19L 캔) 생산 시: 1명
+  //   - 둘 다이면 합산
+  let meal1120Count = 0;
+  const meal1120Reasons = [];
+  if (hasBTL || hasCAP) {
+    meal1120Count += 2;
+    const btlN = prodData.filter(p => p.type === "BTL").map(p => p.name.replace(" BTL", ""));
+    const parts1120 = [];
+    if (btlN.length) parts1120.push(btlN.join(", ") + " BTL");
+    if (hasCAP) parts1120.push("CAP");
+    meal1120Reasons.push(parts1120.join("/") + " 생산");
+  }
+  if (hasTan) {
+    meal1120Count += 1;
+    meal1120Reasons.push("0.19L 캔 생산");
+  }
+  const meal1120Reason = meal1120Count > 0 ? meal1120Reasons.join(", ") : "—";
+
+  // ★ 12:00 식사: 총출근 - (11:20 교대 + 12:20 교대)
+  const totalShiftMeal = meal1120Count + shiftCnt;
+  const meal1200actual = totalPresent - totalShiftMeal;
+  const meal1200reason = totalShiftMeal > 0
+    ? "교대 " + totalShiftMeal + "명 제외"
+    : "전원 12:00 식사";
+
+  // 출근자가 0명이면 식수 행 전체 "—" 처리
+  const noWorkers = totalPresent === 0;
+
+  [
+    {
+      lbl: "총 출근인원",
+      val: totalPresent,
+      reason: noWorkers ? "—" : "전체 출근자",
+      note: "—",
+      bg: BG.MEAL_R
+    },
+    {
+      lbl: "11:20 식사",
+      val: (!noWorkers && meal1120Count > 0) ? meal1120Count : "—",
+      reason: (!noWorkers && meal1120Count > 0) ? meal1120Reason : "—",
+      note: (!noWorkers && meal1120Count > 0) ? "11:20 교대 식사" : "—",
+      bg: BG.WHITE
+    },
+    {
+      lbl: "12:00 식사",
+      val: noWorkers ? "—" : (totalShiftMeal > 0 ? meal1200actual : totalPresent),
+      reason: noWorkers ? "—" : meal1200reason,
+      note: "—",
+      bg: BG.MEAL_R
+    },
+    {
+      lbl: "12:20 식사",
+      val: (!noWorkers && shiftCnt > 0) ? shiftCnt : "—",
+      reason: (!noWorkers && shiftCnt > 0) ? shiftReasons.join(", ") : "—",
+      note: (!noWorkers && shiftCnt > 0) ? "12:20 교대 식사" : "—",
+      bg: BG.WHITE
+    }
+  ].forEach((m, i) => {
+    const r = 8 + i;
+    sc(ws, r, 16, m.lbl,    BG.MEAL_H, FG.DARK, true);
+    dataCell(ws, r, 17, m.val,    m.bg, true, 12);
+    dataCell(ws, r, 18, m.reason, m.bg);
+    dataCell(ws, r, 19, m.note,   m.bg);
+  });
+
+  // ════════════════════════════════════════════════════════
+  // 행12: 합계
+  // ════════════════════════════════════════════════════════
+  const totalWork  = present.생산.length + present.품질.length + present.현장.length;
+  const totalShift = jo.length + yeon.length + ext.length + night.length;
+  const totalOff   = absent.생산.length + absent.품질.length + absent.현장.length;
+
+  sc(ws, 12, 1, "합 계", BG.SUM_H, FG.WHITE, true);
+  ws.getRange(12, 2, 1, 2).merge();
+  dataCell(ws, 12, 2, "출근: " + totalWork + "명", BG.SUM_H, true, 10, FG.WHITE);
+  dataCell(ws, 12, 4, totalWork, BG.SUM_H, true, 12, FG.WHITE);
+  ws.getRange(12, 5).setBackground(BG.GRAY);
+  sc(ws, 12, 6, "합 계", BG.SUM_H, FG.WHITE, true);
+  dataCell(ws, 12, 7, "교대/연장/야간: " + totalShift + "명", BG.SUM_H, true, 10, FG.WHITE);
+  dataCell(ws, 12, 8, totalShift, BG.SUM_H, true, 12, FG.WHITE);
+  ws.getRange(12, 9).setBackground(BG.SUM_H);
+  ws.getRange(12, 10).setBackground(BG.GRAY);
+  sc(ws, 12, 11, "합 계", BG.SUM_H, FG.WHITE, true);
+  dataCell(ws, 12, 12, "비근무: " + totalOff + "명", BG.SUM_H, true, 10, FG.WHITE);
+  dataCell(ws, 12, 13, totalOff, BG.SUM_H, true, 12, FG.WHITE);
+  ws.getRange(12, 14).setBackground(BG.SUM_H);
+  ws.getRange(12, 15).setBackground(BG.GRAY);
+  mc(ws, "P12:S12",
+     "총 인원: " + (totalWork + totalOff) + "명  (출근 " + totalWork + " / 비근무 " + totalOff + ")",
+     BG.SUM_H, FG.WHITE, true);
+
+  // ════════════════════════════════════════════════════════
+  // 구분선 및 테두리
+  // ════════════════════════════════════════════════════════
+  // 시트 격자선 숨김 (표 범위 밖 격자 제거)
+  ws.setHiddenGridlines(true);
+
+  // 구분선 열: 행4는 E만 회색, J/O는 흰색 (생산계획 영역 밖이므로)
+  ws.getRange("E4:E12").setBackground(BG.GRAY);
+  ws.getRange("J4").setBackground(BG.WHITE);
+  ws.getRange("O4").setBackground(BG.WHITE);
+  ws.getRange("J5:J12").setBackground(BG.GRAY);
+  ws.getRange("O5:O12").setBackground(BG.GRAY);
+
+  // 본표(행5~12) 전체 테두리
+  ws.getRange("A5:S12").setBorder(
+    true, true, true, true, true, true,
+    "#AAAAAA", SpreadsheetApp.BorderStyle.SOLID
+  );
+  // 생산계획(행1~4) 테두리
+  const prodRangeA1 = "A1:" + colLetter(titleEndCol) + "4";
+  ws.getRange(prodRangeA1).setBorder(
+    true, true, true, true, true, true,
+    "#AAAAAA", SpreadsheetApp.BorderStyle.SOLID
+  );
+  // LC 섹션(행1~2만) 테두리
+  ws.getRange(1, LC_START, 2, LC_COLS).setBorder(
+    true, true, true, true, true, true,
+    "#AAAAAA", SpreadsheetApp.BorderStyle.SOLID
+  );
+  // 굵은 외곽선
+  ["A1:" + colLetter(titleEndCol) + "3",
+   "A5:S5","A6:D12","F6:I12","K6:N12","P6:S12"].forEach(r => {
+    ws.getRange(r).setBorder(
+      true, true, true, true, null, null,
+      "#555555", SpreadsheetApp.BorderStyle.SOLID_MEDIUM
+    );
+  });
+  ws.getRange("A1:" + colLetter(titleEndCol) + "4").setBorder(
+    true, true, true, true, null, null,
+    "#555555", SpreadsheetApp.BorderStyle.SOLID_MEDIUM
+  );
+  // LC 섹션 외곽 굵은 테두리 (행1~2만)
+  ws.getRange(1, LC_START, 2, LC_COLS).setBorder(
+    true, true, true, true, null, null,
+    "#7030A0", SpreadsheetApp.BorderStyle.SOLID_MEDIUM
+  );
+  // SAM 섹션(행1~2) 테두리
+  ws.getRange(1, SAM_START, 2, SAM_COLS).setBorder(
+    true, true, true, true, true, true,
+    "#AAAAAA", SpreadsheetApp.BorderStyle.SOLID
+  );
+  ws.getRange(1, SAM_START, 2, SAM_COLS).setBorder(
+    true, true, true, true, null, null,
+    "#F4A020", SpreadsheetApp.BorderStyle.SOLID_MEDIUM
+  );
+}
+
+// ============================================================
+//  비고 문자열 헬퍼
+// ============================================================
+
+// ★ CIP 표기에서 "캔" 제거: "0.19L 캔" → "0.19L"
+function cipNote(prodData) {
+  const items = prodData
+    .filter(p => p.type === "제품" || p.type === "탄산")
+    .map(p => p.name.replace(" 캔", ""));  // "캔" 제거
+  return items.length ? items.join(", ") + " CIP" : "해당 없음";
+}
+
+function shiftNote(workData, prodData) {
+  const codes   = Object.values(workData);
+  const reasons = [];
+  if (codes.includes("P")) {
+    // 18.9L, 0.12L는 연장 사유 아님 (오전/17:30까지만 생산)
+    const EXCLUDE = ["18.9L", "0.12L"];
+    const items = prodData
+      .filter(p => p.type === "제품" && !EXCLUDE.includes(p.name))
+      .map(p => p.name);
+    if (items.length) reasons.push(items.join(", ") + " 제품 생산");
+  }
+  if (codes.includes("B")) {
+    const items = prodData.filter(p => p.type === "BTL").map(p => p.name.replace(" BTL", ""));
+    if (items.length) reasons.push(items.join(", ") + " BTL 생산");
+  }
+  if (codes.includes("L")) reasons.push("L/C 및 정비 연장");
+  return reasons.length ? reasons.join(", ") : "해당 없음";
+}
+
+// ★ nightNote: BTL 이름에서 " BTL" 중복 방지
+function nightNote(prodData) {
+  const btlNames = prodData.filter(p => p.type === "BTL").map(p => p.name.replace(" BTL", ""));
+  const cap = prodData.filter(p => p.type === "CAP");
+  if (!btlNames.length && !cap.length) return "해당 없음";
+  const parts = [];
+  if (btlNames.length) parts.push(btlNames.join(", ") + " BTL");
+  if (cap.length)      parts.push("CAP");
+  return parts.join("/") + " 생산";
+}
+
+// ============================================================
+//  셀 서식 헬퍼
+// ============================================================
+function sc(ws, row, col, value, bg, fg, bold, size) {
+  const c = ws.getRange(row, col);
+  c.setValue(value);
+  if (bg)    c.setBackground(bg);
+  if (fg)    c.setFontColor(fg);
+  c.setFontWeight(bold ? "bold" : "normal");
+  if (size)  c.setFontSize(size);
+  c.setHorizontalAlignment("center");
+  c.setVerticalAlignment("middle");
+  c.setFontFamily("맑은 고딕");
+  c.setWrap(true);
+}
+
+function mc(ws, a1, value, bg, fg, bold, size) {
+  const r = ws.getRange(a1);
+  r.merge();
+  r.setValue(value);
+  if (bg)    r.setBackground(bg);
+  if (fg)    r.setFontColor(fg);
+  r.setFontWeight(bold ? "bold" : "normal");
+  if (size)  r.setFontSize(size);
+  r.setHorizontalAlignment("center");
+  r.setVerticalAlignment("middle");
+  r.setFontFamily("맑은 고딕");
+  r.setWrap(true);
+}
+
+function dataCell(ws, row, col, value, bg, bold, size, fg) {
+  const c = ws.getRange(row, col);
+  if (value !== undefined && value !== null) c.setValue(value);
+  if (bg)    c.setBackground(bg);
+  if (fg)    c.setFontColor(fg);
+  c.setFontWeight(bold ? "bold" : "normal");
+  if (size)  c.setFontSize(size);
+  c.setHorizontalAlignment("center");
+  c.setVerticalAlignment("middle");
+  c.setFontFamily("맑은 고딕");
+  c.setWrap(true);
+}
+
+function colLetter(n) {
+  let s = "";
+  while (n > 0) { s = String.fromCharCode(64 + (n % 26 || 26)) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+
+function showAlert(msg) {
+  try { SpreadsheetApp.getUi().alert(msg); } catch(e) { Logger.log(msg); }
+}
+
+// ============================================================
+//  디버깅: 행2 셀 배경색 확인 (Apps Script 편집기에서 직접 실행)
+//  실행 후 보기 > 로그 (Ctrl+Enter) 에서 확인
+// ============================================================
+function debugRow2Colors() {
+  const ws = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const merges = ws.getRange("A2:S2").getMergedRanges();
+  Logger.log("=== 행2 병합 범위 ===");
+  merges.forEach(r => Logger.log("  병합: " + r.getA1Notation()));
+
+  Logger.log("=== 행2 각 셀 배경색 (A~E) ===");
+  for (let c = 1; c <= 5; c++) {
+    const cell = ws.getRange(2, c);
+    Logger.log("  " + cell.getA1Notation() + " bg=" + cell.getBackground() + " val=" + cell.getValue());
+  }
+}
