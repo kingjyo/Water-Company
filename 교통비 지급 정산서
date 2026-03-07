@@ -1,0 +1,422 @@
+// ───────────────────────────────────────────
+// 메뉴 등록
+// ───────────────────────────────────────────
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('교통비 정산')
+    .addItem('전체 시트 자동 채우기', 'fillAllSheets')
+    .addSeparator()
+    .addItem('BTL 생산 시트만', 'fillBTLSheet')
+    .addItem('제품생산 시트만', 'fillSejeumSheet')
+    .addItem('품질 CIP 시트만', 'fillCIPSheet')
+    .addSeparator()
+    .addItem('도움말', 'showHelp')
+    .addToUi();
+}
+
+// ───────────────────────────────────────────
+// 공통 유틸
+// ───────────────────────────────────────────
+
+function getMonthNumber(ss) {
+  const sheets = ss.getSheets();
+  for (const s of sheets) {
+    if (s.getName().includes('근무현황표')) {
+      const val = s.getRange('Z3').getValue();
+      const matched = String(val).match(/(\d+)/);
+      if (matched) return parseInt(matched[1]);
+    }
+  }
+  for (const s of sheets) {
+    const matched = s.getName().match(/^(\d+)월$/);
+    if (matched) return parseInt(matched[1]);
+  }
+  return null;
+}
+
+/**
+ * X월 시트에서 근무 데이터 파싱
+ * 반환: [ { name, day, type, monthName } ]
+ */
+function parseMonthlyWorkData(ss) {
+  const sheets = ss.getSheets();
+  let monthSheet = null;
+  for (const s of sheets) {
+    if (/^\d+월$/.test(s.getName())) {
+      monthSheet = s;
+      break;
+    }
+  }
+  if (!monthSheet) {
+    SpreadsheetApp.getUi().alert('오류: "X월" 형식의 시트를 찾을 수 없습니다.');
+    return null;
+  }
+
+  const monthName = monthSheet.getName();
+
+  const dayRow   = monthSheet.getRange('G3:AK3').getValues()[0];
+  const nameCol  = monthSheet.getRange('C5:C20').getValues();
+  const workGrid = monthSheet.getRange('G5:AK20').getValues();
+
+  const records = [];
+  for (let r = 0; r < nameCol.length; r++) {
+    const name = String(nameCol[r][0]).trim();
+    if (!name) continue;
+    for (let c = 0; c < dayRow.length; c++) {
+      const dayVal = dayRow[c];
+      if (!dayVal && dayVal !== 0) continue;
+      const day = parseInt(dayVal);
+      if (isNaN(day)) continue;
+      const type = String(workGrid[r][c]).trim();
+      if (!type) continue;
+      records.push({ name, day, type, monthName });
+    }
+  }
+  return records;
+}
+
+/**
+ * X월 제품생산 계획 시트에서 일자별 생산 데이터 파싱
+ * 반환: { [day]: { C, D, E, F, G, H, I, J, K, L } }
+ */
+function parsePlanData(ss) {
+  let planSheet = null;
+  const sheets = ss.getSheets();
+  for (const s of sheets) {
+    if (s.getName().includes('제품생산 계획')) {
+      planSheet = s;
+      break;
+    }
+  }
+  if (!planSheet) {
+    SpreadsheetApp.getUi().alert('오류: "X월 제품생산 계획" 시트를 찾을 수 없습니다.');
+    return null;
+  }
+
+  const dayCol   = planSheet.getRange('A3:A33').getValues();
+  const dataGrid = planSheet.getRange('C3:L33').getValues();
+
+  const plan = {};
+  for (let r = 0; r < dayCol.length; r++) {
+    const day = parseInt(dayCol[r][0]);
+    if (isNaN(day)) continue;
+    plan[day] = {
+      C: dataGrid[r][0],  // 18.9L 제품
+      D: dataGrid[r][1],  // 1.5L 제품
+      E: dataGrid[r][2],  // 0.5L 제품
+      F: dataGrid[r][3],  // 0.33L 제품
+      G: dataGrid[r][4],  // 0.12L 제품
+      H: dataGrid[r][5],  // (여분)
+      I: dataGrid[r][6],  // 1.5L BTL
+      J: dataGrid[r][7],  // 0.5L BTL
+      K: dataGrid[r][8],  // 0.33L BTL
+      L: dataGrid[r][9],  // CAP
+    };
+  }
+  return plan;
+}
+
+/**
+ * 값이 있는지 판단 (빈칸, 0, "-", null 제외)
+ */
+function hasValue(v) {
+  if (v === null || v === undefined) return false;
+  const s = String(v).trim();
+  return s !== '' && s !== '0' && s !== '-';
+}
+
+/**
+ * "합     계" 행 번호 찾기
+ * A5부터 내려가며 탐색, 못 찾으면 기본값 61 반환
+ */
+function findSumRow(targetSheet) {
+  const aCol = targetSheet.getRange('A5:A70').getValues();
+  for (let i = 0; i < aCol.length; i++) {
+    const val = String(aCol[i][0]).replace(/\s+/g, ' ').trim();
+    if (val === '합 계') {
+      return 5 + i; // 실제 행 번호
+    }
+  }
+  return 61; // 기본값
+}
+
+/**
+ * 데이터 입력 후 빈 행 숨기기, 데이터 있는 행 표시
+ * A5 ~ (합계행 -1) 범위에서 A열이 비어있으면 숨김
+ */
+function autoHideEmptyRows(targetSheet, dataEndRow) {
+  const startRow = 5;
+  const endRow = dataEndRow - 1; // 합계 행 바로 위까지
+
+  if (endRow < startRow) return;
+
+  const aCol = targetSheet.getRange(startRow, 1, endRow - startRow + 1, 1).getValues();
+
+  for (let i = 0; i < aCol.length; i++) {
+    const rowNum = startRow + i;
+    const val = String(aCol[i][0]).trim();
+    if (val === '') {
+      targetSheet.hideRows(rowNum);
+    } else {
+      targetSheet.showRows(rowNum);
+    }
+  }
+}
+
+// ───────────────────────────────────────────
+// 사유 생성 함수들
+// ───────────────────────────────────────────
+
+function getBTLReason(dayPlan) {
+  if (!dayPlan) return 'BTL/CAP 생산';
+  const btlPart = [];
+  if (hasValue(dayPlan.I)) btlPart.push('1.5L BTL');
+  if (hasValue(dayPlan.J)) btlPart.push('0.5L BTL');
+  if (hasValue(dayPlan.K)) btlPart.push('0.33L BTL');
+  const parts = [];
+  if (btlPart.length > 0) parts.push(btlPart.join('/'));
+  if (hasValue(dayPlan.L)) parts.push('CAP');
+  return parts.length > 0 ? parts.join('/') + ' 생산' : 'BTL/CAP 생산';
+}
+
+function getSejeumReason(type, dayPlan) {
+  if (type === 'L') return '정비 연장';
+  if (!dayPlan) return type === 'B' ? 'BTL 생산' : '제품 생산';
+
+  if (type === 'B') {
+    const parts = [];
+    if (hasValue(dayPlan.I)) parts.push('1.5L BTL');
+    if (hasValue(dayPlan.J)) parts.push('0.5L BTL');
+    if (hasValue(dayPlan.K)) parts.push('0.33L BTL');
+    return parts.length > 0 ? parts.join('/') + ' 생산' : 'BTL 생산';
+  }
+
+  if (type === 'P') {
+    if (hasValue(dayPlan.D)) return '1.5L 제품 생산';
+    if (hasValue(dayPlan.E)) return '0.5L 제품 생산';
+    if (hasValue(dayPlan.F)) return '0.33L 제품 생산';
+    if (hasValue(dayPlan.G)) return '0.12L 제품 생산';
+    return '제품 생산';
+  }
+
+  return '연장 근무';
+}
+
+function getCIPReasons(dayPlan, count) {
+  if (!dayPlan) {
+    return Array(count).fill('CIP');
+  }
+
+  const candidates = [];
+  if (hasValue(dayPlan.C)) candidates.push('18.9L 생산라인 CIP');
+  if (hasValue(dayPlan.D)) candidates.push('1.5L 생산라인 CIP');
+  if (hasValue(dayPlan.E)) candidates.push('0.5L 생산라인 CIP');
+  if (hasValue(dayPlan.F)) candidates.push('0.33L 생산라인 CIP');
+  if (hasValue(dayPlan.G)) candidates.push('0.12L 생산라인 CIP');
+
+  if (candidates.length === 0) {
+    return Array(count).fill('CIP');
+  }
+
+  // 같은 사유끼리 뭉치도록 분배
+  const result = [];
+  const baseCount = Math.floor(count / candidates.length);
+  const remainder = count % candidates.length;
+
+  candidates.forEach((reason, idx) => {
+    const assignCount = baseCount + (idx < remainder ? 1 : 0);
+    for (let i = 0; i < assignCount; i++) {
+      result.push(reason);
+    }
+  });
+
+  return result;
+}
+
+// ───────────────────────────────────────────
+// 공통 시트 쓰기
+// ───────────────────────────────────────────
+function writeToSheet(targetSheet, rows, monthName) {
+  // "합     계" 행 찾기
+  const sumRow = findSumRow(targetSheet);
+  const clearEndRow = sumRow - 1;
+
+  // 합계 행 직전까지만 초기화
+  if (clearEndRow >= 5) {
+    targetSheet.getRange(`A5:F${clearEndRow}`).clearContent();
+  }
+
+  // 숨겨진 행 전부 먼저 표시 (초기화)
+  if (clearEndRow >= 5) {
+    targetSheet.showRows(5, clearEndRow - 5 + 1);
+  }
+
+  if (rows.length === 0) {
+    autoHideEmptyRows(targetSheet, sumRow);
+    return;
+  }
+
+  const maxRows = clearEndRow - 5 + 1; // 입력 가능한 최대 행 수
+  for (let i = 0; i < rows.length && i < maxRows; i++) {
+    const rowNum = 5 + i;
+    const { name, day, reason } = rows[i];
+    targetSheet.getRange(`A${rowNum}`).setValue(name);
+    targetSheet.getRange(`B${rowNum}`).setValue(`${monthName} ${day}일`);
+    targetSheet.getRange(`C${rowNum}`).setValue('공장 ↔ 제주시');
+    targetSheet.getRange(`E${rowNum}`).setValue(reason);
+  }
+
+  SpreadsheetApp.flush();
+
+  // 빈 행 자동 숨기기
+  autoHideEmptyRows(targetSheet, sumRow);
+}
+
+// ───────────────────────────────────────────
+// BTL 생산 시트 채우기
+// ───────────────────────────────────────────
+function fillBTLSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const records = parseMonthlyWorkData(ss);
+  if (!records) return;
+  const plan = parsePlanData(ss);
+  if (!plan) return;
+
+  const targetSheet = ss.getSheetByName('BTL 생산');
+  if (!targetSheet) {
+    SpreadsheetApp.getUi().alert('오류: "BTL 생산" 시트를 찾을 수 없습니다.');
+    return;
+  }
+
+  const monthName = records[0]?.monthName || '';
+
+  const filtered = records
+    .filter(r => r.type === '야')
+    .sort((a, b) => a.day - b.day || a.name.localeCompare(b.name));
+
+  const rows = filtered.map(r => ({
+    name: r.name,
+    day: r.day,
+    reason: getBTLReason(plan[r.day])
+  }));
+
+  writeToSheet(targetSheet, rows, monthName);
+  SpreadsheetApp.getUi().alert(`BTL 생산 시트 완료\n총 ${rows.length}건 입력됨`);
+}
+
+// ───────────────────────────────────────────
+// 제품생산 시트 채우기
+// ───────────────────────────────────────────
+function fillSejeumSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const records = parseMonthlyWorkData(ss);
+  if (!records) return;
+  const plan = parsePlanData(ss);
+  if (!plan) return;
+
+  const targetSheet = ss.getSheetByName('제품생산');
+  if (!targetSheet) {
+    SpreadsheetApp.getUi().alert('오류: "제품생산" 시트를 찾을 수 없습니다.');
+    return;
+  }
+
+  const monthName = records[0]?.monthName || '';
+
+  const filtered = records
+    .filter(r => ['B', 'P', 'L'].includes(r.type))
+    .sort((a, b) => a.day - b.day || a.name.localeCompare(b.name));
+
+  const rows = filtered.map(r => ({
+    name: r.name,
+    day: r.day,
+    reason: getSejeumReason(r.type, plan[r.day])
+  }));
+
+  writeToSheet(targetSheet, rows, monthName);
+  SpreadsheetApp.getUi().alert(`제품생산 시트 완료\n총 ${rows.length}건 입력됨`);
+}
+
+// ───────────────────────────────────────────
+// 품질 CIP 시트 채우기
+// ───────────────────────────────────────────
+function fillCIPSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const records = parseMonthlyWorkData(ss);
+  if (!records) return;
+  const plan = parsePlanData(ss);
+  if (!plan) return;
+
+  const targetSheet = ss.getSheetByName('품질 CIP');
+  if (!targetSheet) {
+    SpreadsheetApp.getUi().alert('오류: "품질 CIP" 시트를 찾을 수 없습니다.');
+    return;
+  }
+
+  const monthName = records[0]?.monthName || '';
+
+  const filtered = records
+    .filter(r => r.type === '조' || r.type === '연')
+    .sort((a, b) => {
+      if (a.day !== b.day) return a.day - b.day;
+      if (a.type !== b.type) return a.type === '조' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+  const dayGroups = {};
+  for (const r of filtered) {
+    if (!dayGroups[r.day]) dayGroups[r.day] = [];
+    dayGroups[r.day].push(r);
+  }
+
+  const rows = [];
+  for (const day of Object.keys(dayGroups).map(Number).sort((a, b) => a - b)) {
+    const group = dayGroups[day];
+    const reasons = getCIPReasons(plan[day], group.length);
+    group.forEach((r, i) => {
+      rows.push({ name: r.name, day: r.day, reason: reasons[i] });
+    });
+  }
+
+  writeToSheet(targetSheet, rows, monthName);
+  SpreadsheetApp.getUi().alert(`품질 CIP 시트 완료\n총 ${rows.length}건 입력됨`);
+}
+
+// ───────────────────────────────────────────
+// 전체 실행
+// ───────────────────────────────────────────
+function fillAllSheets() {
+  fillBTLSheet();
+  fillSejeumSheet();
+  fillCIPSheet();
+  SpreadsheetApp.getUi().alert('전체 시트 자동 채우기 완료!');
+}
+
+// ───────────────────────────────────────────
+// 도움말
+// ───────────────────────────────────────────
+function showHelp() {
+  SpreadsheetApp.getUi().alert(
+    '교통비 정산 자동화 사용법\n\n' +
+    '【필요 시트】\n' +
+    '• X월 (예: 3월) - 근무자/날짜/근무타입\n' +
+    '• X월 제품생산 계획 - 일자별 생산 품목\n' +
+    '• BTL 생산, 제품생산, 품질 CIP - 출력 대상\n\n' +
+    '【근무 타입 분류】\n' +
+    '• 야 → BTL 생산 시트 (야간근무)\n' +
+    '• B, P, L → 제품생산 시트 (연장근무)\n' +
+    '• 조, 연 → 품질 CIP 시트 (조기출근/연장)\n\n' +
+    '【C:D 병합 셀】\n' +
+    '• 모든 행에 "공장 ↔ 제주시" 자동 입력\n\n' +
+    '【품질 CIP 정렬 규칙】\n' +
+    '• 같은 날짜면 "조" 먼저, "연" 나중\n' +
+    '• 같은 사유끼리 뭉쳐서 분배\n\n' +
+    '【빈 행 자동 숨기기】\n' +
+    '• 데이터 입력 후 A열 빈 행은 자동으로 숨김\n' +
+    '• "합     계" 행 직전까지만 데이터 초기화\n\n' +
+    '【실행 순서】\n' +
+    '1. X월 시트와 X월 제품생산 계획 시트 데이터 확인\n' +
+    '2. 메뉴 → 전체 시트 자동 채우기 실행\n' +
+    '3. 각 시트 내용 확인 후 필요시 수동 수정\n\n' +
+    '※ "합     계" 셀 기준으로 초기화 범위 자동 감지!'
+  );
+}
