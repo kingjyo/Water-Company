@@ -1,11 +1,37 @@
 /**
  * =====================================================================
- *  생수공장 근태관리 GAS - 통합본
+ * 생수공장 근태관리 GAS - 통합본
  * =====================================================================
+ *
+ * ⚠️ Google Docs 권한 설정 필수 ⚠️
+ * "지정된 권한으로는 DocumentApp.openById을(를) 호출할 수 없습니다" 오류 발생 시:
+ *
+ * [해결 방법]
+ * GAS 에디터 좌측 메뉴 → "프로젝트 설정" → "appsscript.json 편집기에 표시" 체크
+ * appsscript.json 에 아래 항목이 있는지 확인, 없으면 추가:
+ *
+ * {
+ * "oauthScopes": [
+ * "https://www.googleapis.com/auth/spreadsheets",
+ * "https://www.googleapis.com/auth/drive",
+ * "https://www.googleapis.com/auth/documents" ← 이게 필수
+ * ]
+ * }
+ *
+ * 저장 후 스크립트를 다시 실행하면 권한 재승인 팝업이 뜨며 해결됩니다.
  */
 
+/**
+ * DocumentApp 권한을 GAS가 자동 감지하도록 최상단에서 참조.
+ * 이 함수는 직접 호출하지 않아도 됩니다.
+ */
+function _ensureDocumentScope() {
+  // GAS 스코프 자동 감지용 — 삭제하지 마세요
+  DocumentApp.create('_scope_check_delete_me').getId();
+}
+
 // =====================================================================
-//  메뉴
+// 메뉴
 // =====================================================================
 
 function onOpen() {
@@ -28,17 +54,19 @@ function onOpen() {
     .addItem('📄 결과보고 Docs 생성', 'createReportDoc')
     .addSeparator()
     .addItem('도움말 / 범위 확인', 'showHelp')
+    .addSeparator()
+    .addItem('📝 A23~A26 입력', 'fillKeunTaeData') // ← 이것만 추가
     .addToUi();
 }
 
 // =====================================================================
-//  🔄 Z3 셀 변경 시 시트 이름 자동 변경
+// 🔄 Z3 셀 변경 시 시트 이름 자동 변경
 // =====================================================================
 
 function onEdit(e) {
   const range = e.range;
   const sheet = range.getSheet();
-  const ss    = e.source;
+  const ss = e.source;
 
   if (range.getRow() !== 3 || range.getColumn() !== 26) return;
   if (!/^\d+월 근무현황표$/.test(sheet.getName().trim())) return;
@@ -50,8 +78,8 @@ function onEdit(e) {
   }
 
   const targetPatterns = [
-    { pattern: /^\d+월 결과보고$/,   newName: `${newMonth}월 결과보고`   },
-    { pattern: /^\d+월 근태$/,       newName: `${newMonth}월 근태`       },
+    { pattern: /^\d+월 결과보고$/, newName: `${newMonth}월 결과보고` },
+    { pattern: /^\d+월 근태$/, newName: `${newMonth}월 근태` },
     { pattern: /^\d+월 근무현황표$/, newName: `${newMonth}월 근무현황표` },
   ];
 
@@ -68,150 +96,170 @@ function onEdit(e) {
 }
 
 // =====================================================================
-//  🚀 올인원 원터치 실행
+// 🚀 올인원 원터치 실행
 // =====================================================================
 
 function runAllInOne() {
-  const ui     = SpreadsheetApp.getUi();
+  const ui = SpreadsheetApp.getUi();
   const destSS = SpreadsheetApp.getActiveSpreadsheet();
-  const logs   = [];
+  const logs = [];
 
   try {
     // ── 공통: 월/년도/일수 정보 읽기 ────────────────────────────────
     const statusSheetName = findSheetByPattern(destSS, /^\d+월 근무현황표$/);
     if (!statusSheetName) throw new Error('"X월 근무현황표" 시트를 찾을 수 없습니다.');
-    const statusSheet  = destSS.getSheetByName(statusSheetName);
+    const statusSheet = destSS.getSheetByName(statusSheetName);
     const currentMonth = Number(statusSheet.getRange('Z3').getValue());
-    const currentYear  = Number(statusSheet.getRange('X3').getValue());
+    const currentYear = Number(statusSheet.getRange('X3').getValue());
     validateMonth(currentMonth, statusSheet.getRange('Z3').getValue());
     if (!currentYear || isNaN(currentYear)) throw new Error(`X3 셀의 년도 값이 올바르지 않습니다: "${statusSheet.getRange('X3').getValue()}"`);
 
-    const nextMonth   = (currentMonth % 12) + 1;
-    const nextYear    = nextMonth === 1 ? currentYear + 1 : currentYear;
+    const nextMonth = (currentMonth % 12) + 1;
+    const nextYear = nextMonth === 1 ? currentYear + 1 : currentYear;
     const currentDays = getLastDayOfMonth(currentYear, currentMonth);
-    const nextDays    = getLastDayOfMonth(nextYear, nextMonth);
+    const nextDays = getLastDayOfMonth(nextYear, nextMonth);
 
     logs.push(`📅 ${currentYear}년 ${currentMonth}월 (${currentDays}일까지) / 차월: ${nextYear}년 ${nextMonth}월 (${nextDays}일까지)`);
+
+    // ── STEP 0. X월 결과보고 전월값 이전 (D28→D25, D29→D26) ─────────
+    logs.push('[ STEP 0 ] X월 결과보고 전월값 이전');
+    const resultSheetName = findSheetByPattern(destSS, /^\d+월 결과보고$/);
+    if (!resultSheetName) {
+      logs.push(' ⚠️ "X월 결과보고" 시트 없음 — 건너뜀');
+    } else {
+      const resultSheet = destSS.getSheetByName(resultSheetName);
+      const valD28 = resultSheet.getRange('D28').getValue();
+      const valD29 = resultSheet.getRange('D29').getValue();
+      resultSheet.getRange('D25').setValue(valD28);
+      resultSheet.getRange('D26').setValue(valD29);
+      SpreadsheetApp.flush();
+      logs.push(` ✅ [${resultSheetName}] D28(${valD28}) → D25, D29(${valD29}) → D26 완료`);
+    }
 
     // ── STEP 1. 당월 근무계획 가져오기 ──────────────────────────────
     logs.push('[ STEP 1 ] 당월 근무계획 가져오기');
     const srcCurrent = loadSourceData(currentMonth);
     const currentTargets = [
-      { sheetName: statusSheetName,                              nameStartRow: 8, nameMaxRow: 23, dataStartCol: 3 },
-      { sheetName: findSheetByPattern(destSS, /^간식정산$/),     nameStartRow: 8, nameMaxRow: 17, dataStartCol: 3 },
+      { sheetName: statusSheetName, nameStartRow: 8, nameMaxRow: 23, dataStartCol: 3 },
+      { sheetName: findSheetByPattern(destSS, /^간식정산$/), nameStartRow: 8, nameMaxRow: 17, dataStartCol: 3 },
       { sheetName: findSheetByPattern(destSS, /^연장야근정산$/), nameStartRow: 8, nameMaxRow: 23, dataStartCol: 3 },
     ];
     for (const target of currentTargets) {
-      if (!target.sheetName) { logs.push('  ⚠️ 시트 없음 — 건너뜀'); continue; }
+      if (!target.sheetName) { logs.push(' ⚠️ 시트 없음 — 건너뜀'); continue; }
       const sheet = destSS.getSheetByName(target.sheetName);
       const { updated, skipped, log } = writeToSheet({
         sheet,
-        srcNameMap:   srcCurrent.srcNameMap,
-        srcDateMap:   srcCurrent.srcDateMap,
-        srcDataGrid:  srcCurrent.srcDataGrid,
+        srcNameMap: srcCurrent.srcNameMap,
+        srcDateMap: srcCurrent.srcDateMap,
+        srcDataGrid: srcCurrent.srcDataGrid,
         nameStartRow: target.nameStartRow,
-        nameMaxRow:   target.nameMaxRow,
+        nameMaxRow: target.nameMaxRow,
         dataStartCol: target.dataStartCol,
       });
-      logs.push(`  ✅ [${target.sheetName}] ${updated}개 입력` + (skipped > 0 ? ` / ${skipped}명 미매칭` : ''));
+      logs.push(` ✅ [${target.sheetName}] ${updated}개 입력` + (skipped > 0 ? ` / ${skipped}명 미매칭` : ''));
       logs.push(...log);
       applyColumnVisibility(sheet, currentDays);
-      logs.push(`  📐 [${target.sheetName}] ${currentDays}일 이후 열 숨김 처리`);
+      logs.push(` 📐 [${target.sheetName}] ${currentDays}일 이후 열 숨김 처리`);
     }
 
     // ── STEP 2. 차월 근무계획 가져오기 ──────────────────────────────
     logs.push('[ STEP 2 ] 차월 근무계획 가져오기');
     const nextSheetName = findSheetByPattern(destSS, /^차월 근무계획$/);
     if (!nextSheetName) {
-      logs.push('  ⚠️ "차월 근무계획" 시트 없음 — 건너뜀');
+      logs.push(' ⚠️ "차월 근무계획" 시트 없음 — 건너뜀');
     } else {
       const srcNext = loadSourceData(nextMonth);
       const { updated, skipped, log } = writeToSheet({
-        sheet:        destSS.getSheetByName(nextSheetName),
-        srcNameMap:   srcNext.srcNameMap,
-        srcDateMap:   srcNext.srcDateMap,
-        srcDataGrid:  srcNext.srcDataGrid,
+        sheet: destSS.getSheetByName(nextSheetName),
+        srcNameMap: srcNext.srcNameMap,
+        srcDateMap: srcNext.srcDateMap,
+        srcDataGrid: srcNext.srcDataGrid,
         nameStartRow: 8,
-        nameMaxRow:   23,
+        nameMaxRow: 23,
         dataStartCol: 3,
       });
-      logs.push(`  ✅ [${nextSheetName}] ${updated}개 입력` + (skipped > 0 ? ` / ${skipped}명 미매칭` : ''));
+      logs.push(` ✅ [${nextSheetName}] ${updated}개 입력` + (skipped > 0 ? ` / ${skipped}명 미매칭` : ''));
       logs.push(...log);
       applyColumnVisibility(destSS.getSheetByName(nextSheetName), nextDays);
-      logs.push(`  📐 [${nextSheetName}] ${nextDays}일 이후 열 숨김 처리`);
+      logs.push(` 📐 [${nextSheetName}] ${nextDays}일 이후 열 숨김 처리`);
     }
 
     // ── STEP 3. 특수문자 외 → 1: 근무현황표(당월) + 차월 근무계획 ──
     logs.push('[ STEP 3 ] 특수문자 외 → 1');
-    const specialList_AG23 = ["휴", "무", "공", "년", "야", "퇴", "사", "상", "반"];
+    const specialList_AG23 = ["휴", "무", "공", "년", "야", "퇴", "사", "상", "반", "출", "청", "근"];
     const step3Targets = [
       { sheetName: statusSheetName, days: currentDays },
-      { sheetName: nextSheetName,   days: nextDays    },
+      { sheetName: nextSheetName, days: nextDays },
     ];
     for (const t of step3Targets) {
-      if (!t.sheetName) { logs.push('  ⚠️ 시트 없음 — 건너뜀'); continue; }
+      if (!t.sheetName) { logs.push(' ⚠️ 시트 없음 — 건너뜀'); continue; }
       const sheet = destSS.getSheetByName(t.sheetName);
-      if (!sheet)  { logs.push(`  ⚠️ [${t.sheetName}] 시트 없음 — 건너뜀`); continue; }
+      if (!sheet) { logs.push(` ⚠️ [${t.sheetName}] 시트 없음 — 건너뜀`); continue; }
       const endCol = colIndexToLetter(2 + t.days);
-      processFillOne(sheet.getRange(`C8:${endCol}23`), specialList_AG23, true);
-      logs.push(`  ✅ [${t.sheetName}] C8:${endCol}23 완료 (${t.days}일)`);
+      const lastRow = getDataLastRow(sheet, 8, 23);
+      processFillOne(sheet.getRange(`C8:${endCol}${lastRow}`), specialList_AG23, true);
+      logs.push(` ✅ [${t.sheetName}] C8:${endCol}${lastRow} 완료 (${t.days}일)`);
     }
 
     // ── STEP 4. 특수 외 → 1 (당월 일수 기준): 간식정산 ─────────────
     logs.push('[ STEP 4 ] 특수 외 → 1 — 간식정산');
     const snackSheetName = findSheetByPattern(destSS, /^간식정산$/);
     if (!snackSheetName) {
-      logs.push('  ⚠️ "간식정산" 시트 없음 — 건너뜀');
+      logs.push(' ⚠️ "간식정산" 시트 없음 — 건너뜀');
     } else {
       const endCol = colIndexToLetter(2 + currentDays);
+      const snackSheet = destSS.getSheetByName(snackSheetName);
+      const lastRow = getDataLastRow(snackSheet, 8, 17);
       processFillOne(
-        destSS.getSheetByName(snackSheetName).getRange(`C8:${endCol}17`),
-        ["휴", "공", "야", "퇴", "무", "년", "사", "상", "반"],
+        snackSheet.getRange(`C8:${endCol}${lastRow}`),
+        ["휴", "공", "야", "퇴", "무", "년", "사", "상", "반", "출", "청", "근"],
         true
       );
-      logs.push(`  ✅ [${snackSheetName}] C8:${endCol}17 완료 (${currentDays}일)`);
+      logs.push(` ✅ [${snackSheetName}] C8:${endCol}${lastRow} 완료 (${currentDays}일)`);
     }
 
     // ── STEP 5. PBL→연 & 연/야 외 지우기 (당월 일수 기준): 연장야근정산
     logs.push('[ STEP 5 ] PBL→연 & 연/야 외 지우기 — 연장야근정산');
     const overtimeSheetName = findSheetByPattern(destSS, /^연장야근정산$/);
     if (!overtimeSheetName) {
-      logs.push('  ⚠️ "연장야근정산" 시트 없음 — 건너뜀');
+      logs.push(' ⚠️ "연장야근정산" 시트 없음 — 건너뜀');
     } else {
       const nightText = processPBLtoYeonAndClear(destSS.getSheetByName(overtimeSheetName), currentDays);
-      const endCol    = colIndexToLetter(2 + currentDays);
-      logs.push(`  ✅ [${overtimeSheetName}] C8:${endCol}23 완료 / AD27: ${nightText}`);
+      const endCol = colIndexToLetter(2 + currentDays);
+      const lastRow = getDataLastRow(destSS.getSheetByName(overtimeSheetName), 8, 23);
+      logs.push(` ✅ [${overtimeSheetName}] C8:${endCol}${lastRow} 완료 / AD27: ${nightText}`);
     }
 
     // ── STEP 6. 누계처리: X월 근태 ──────────────────────────────────
     logs.push('[ STEP 6 ] 누계처리 (K→L, M→N, O→P) — X월 근태');
     const attendSheetName = findSheetByPattern(destSS, new RegExp(`^${currentMonth}월 근태$`));
     if (!attendSheetName) {
-      logs.push(`  ⚠️ "${currentMonth}월 근태" 시트 없음 — 건너뜀`);
+      logs.push(` ⚠️ "${currentMonth}월 근태" 시트 없음 — 건너뜀`);
     } else {
       const { updatedCount, skippedCount } = processAccumulate(destSS.getSheetByName(attendSheetName));
-      logs.push(`  ✅ [${attendSheetName}] ${updatedCount}개 업데이트 / ${skippedCount}개 건너뜀`);
+      logs.push(` ✅ [${attendSheetName}] ${updatedCount}개 업데이트 / ${skippedCount}개 건너뜀`);
     }
 
     // ── STEP 7. 휴무 소진내역 업데이트 ──────────────────────────────
     logs.push('[ STEP 7 ] 휴무 소진내역 업데이트');
     const leaveSheetName = findSheetByPattern(destSS, /^휴무 소진내역$/);
     if (!leaveSheetName) {
-      logs.push('  ⚠️ "휴무 소진내역" 시트 없음 — 건너뜀');
+      logs.push(' ⚠️ "휴무 소진내역" 시트 없음 — 건너뜀');
     } else if (!attendSheetName) {
-      logs.push(`  ⚠️ "${currentMonth}월 근태" 시트 없음 — 건너뜀`);
+      logs.push(` ⚠️ "${currentMonth}월 근태" 시트 없음 — 건너뜀`);
     } else {
       const { row, dataStartCol } = getLeaveHistoryTarget(currentMonth);
       const attendSheet = destSS.getSheetByName(attendSheetName);
-      const valM23      = attendSheet.getRange('M23').getValue();
-      const valO23      = attendSheet.getRange('O23').getValue();
-      const valK23      = attendSheet.getRange('K23').getValue();
-      const leaveSheet  = destSS.getSheetByName(leaveSheetName);
-      [valM23, valO23, valK23, valM23, valO23].forEach((v, i) => {
+      const sumRow = getAttendSumRow(attendSheet, 7, 30); // A열 "계" 행 탐지
+      const valM = attendSheet.getRange(sumRow, 13).getValue();
+      const valO = attendSheet.getRange(sumRow, 15).getValue();
+      const valK = attendSheet.getRange(sumRow, 11).getValue();
+      const leaveSheet = destSS.getSheetByName(leaveSheetName);
+      [valM, valO, valK, valM, valO].forEach((v, i) => {
         leaveSheet.getRange(row, dataStartCol + i).setValue(v);
       });
       SpreadsheetApp.flush();
-      logs.push(`  ✅ [${leaveSheetName}] ${currentMonth}월 ${row}행 업데이트 완료`);
+      logs.push(` ✅ [${leaveSheetName}] ${currentMonth}월 ${row}행 업데이트 완료 (근태 합계행: ${sumRow}행)`);
     }
 
     // ── 완료 알림 ────────────────────────────────────────────────────
@@ -227,7 +275,7 @@ function runAllInOne() {
 }
 
 // =====================================================================
-//  📄 결과보고 Google Docs 생성
+// 📄 결과보고 Google Docs 생성
 // =====================================================================
 
 function createReportDoc() {
@@ -238,17 +286,17 @@ function createReportDoc() {
     // ── 년도/월 읽기 ─────────────────────────────────────────────────
     const statusSheetName = findSheetByPattern(destSS, /^\d+월 근무현황표$/);
     if (!statusSheetName) throw new Error('"X월 근무현황표" 시트를 찾을 수 없습니다.');
-    const statusSheet  = destSS.getSheetByName(statusSheetName);
+    const statusSheet = destSS.getSheetByName(statusSheetName);
     const currentMonth = Number(statusSheet.getRange('Z3').getValue());
-    const currentYear  = Number(statusSheet.getRange('X3').getValue());
+    const currentYear = Number(statusSheet.getRange('X3').getValue());
     validateMonth(currentMonth, statusSheet.getRange('Z3').getValue());
     if (!currentYear || isNaN(currentYear)) throw new Error('X3 셀의 년도 값이 올바르지 않습니다.');
 
     const nextMonth = (currentMonth % 12) + 1;
-    const nextYear  = nextMonth === 1 ? currentYear + 1 : currentYear;
-    const YY        = String(currentYear).slice(2);
-    const nextYY    = String(nextYear).slice(2);
-    const YYYY      = String(currentYear);
+    const nextYear = nextMonth === 1 ? currentYear + 1 : currentYear;
+    const YY = String(currentYear).slice(2);
+    const nextYY = String(nextYear).slice(2);
+    const YYYY = String(currentYear);
 
     // ── 1. X월 결과보고 A12:M12 — getDisplayValues() 로 서식 그대로 ─
     const resultSheetName = findSheetByPattern(destSS, /^\d+월 결과보고$/);
@@ -259,11 +307,11 @@ function createReportDoc() {
     // ── 2. 휴무 소진내역 X월 행 + 누계 행 ───────────────────────────
     const leaveSheetName = findSheetByPattern(destSS, /^휴무 소진내역$/);
     if (!leaveSheetName) throw new Error('"휴무 소진내역" 시트를 찾을 수 없습니다.');
-    const leaveSheet        = destSS.getSheetByName(leaveSheetName);
+    const leaveSheet = destSS.getSheetByName(leaveSheetName);
     const { row: leaveRow } = getLeaveHistoryTarget(currentMonth);
     // getDisplayValues() → 백분율(5%, 100%) 서식 그대로
-    const leaveMonthRow = leaveSheet.getRange(leaveRow,     2, 1, 13).getDisplayValues()[0];
-    const leaveCumRow   = leaveSheet.getRange(leaveRow + 1, 2, 1, 13).getDisplayValues()[0];
+    const leaveMonthRow = leaveSheet.getRange(leaveRow, 2, 1, 13).getDisplayValues()[0];
+    const leaveCumRow = leaveSheet.getRange(leaveRow + 1, 2, 1, 13).getDisplayValues()[0];
 
     // ── 3. 연장근무 발생 보고 C16:G20 ───────────────────────────────
     const overtimeReportName = findSheetByPattern(destSS, /^연장근무 발생 보고$/);
@@ -274,7 +322,7 @@ function createReportDoc() {
 
     // ── 4. 교통비 지급 정산서 C3:D6 ─────────────────────────────────
     const TRAFFIC_SS_ID = '16z8tsSrWuu7rd1ViJUIAU9odqCQJrUSiImCBENLfek8';
-    const trafficSheet  = SpreadsheetApp.openById(TRAFFIC_SS_ID)
+    const trafficSheet = SpreadsheetApp.openById(TRAFFIC_SS_ID)
                                         .getSheetByName('교통비 발생 내역');
     if (!trafficSheet) throw new Error('교통비 지급 정산서에서 "교통비 발생 내역" 시트를 찾을 수 없습니다.');
     // getDisplayValues() → 188,820 천단위 콤마 서식 그대로
@@ -289,18 +337,18 @@ function createReportDoc() {
 
     // ── 템플릿 복사 → 새 Docs 파일 생성 ────────────────────────────
     const TEMPLATE_ID = '1Q9wBfik-DWFxBsFc6V4FZ9P0Gr2-xIvJsd0O0Xdt9fE';
-    const docTitle    = `[보고] 생수공장 ${YY}년 ${currentMonth}월 근무실적 및 ${nextYY}년 ${nextMonth}월 계획`;
-    const newDoc      = DriveApp.getFileById(TEMPLATE_ID).makeCopy(docTitle);
-    const doc         = DocumentApp.openById(newDoc.getId());
-    const body        = doc.getBody();
+    const docTitle = `[보고] 생수공장 ${YY}년 ${currentMonth}월 근무실적 및 ${nextYY}년 ${nextMonth}월 계획`;
+    const newDoc = DriveApp.getFileById(TEMPLATE_ID).makeCopy(docTitle);
+    const doc = DocumentApp.openById(newDoc.getId());
+    const body = doc.getBody();
 
     // ── 플레이스홀더 텍스트 치환 ────────────────────────────────────
     // YYYY/nextYYYY 먼저, YY/nextYY 나중에 (부분 치환 방지)
-    body.replaceText('\\{\\{YYYY\\}\\}',     YYYY);
-    body.replaceText('\\{\\{nextYY\\}\\}',   nextYY);
-    body.replaceText('\\{\\{YY\\}\\}',       YY);
-    body.replaceText('\\{\\{X\\+1\\}\\}',    String(nextMonth));
-    body.replaceText('\\{\\{X\\}\\}',        String(currentMonth));
+    body.replaceText('\\{\\{YYYY\\}\\}', YYYY);
+    body.replaceText('\\{\\{nextYY\\}\\}', nextYY);
+    body.replaceText('\\{\\{YY\\}\\}', YY);
+    body.replaceText('\\{\\{X\\+1\\}\\}', String(nextMonth));
+    body.replaceText('\\{\\{X\\}\\}', String(currentMonth));
 
     // ── 표 데이터 채우기 ─────────────────────────────────────────────
     const tables = body.getTables();
@@ -336,7 +384,7 @@ function createReportDoc() {
 }
 
 // =====================================================================
-//  🔧 Docs 표 채우기 유틸 함수들
+// 🔧 Docs 표 채우기 유틸 함수들
 // =====================================================================
 
 /**
@@ -354,8 +402,8 @@ function fillTableLastRow(table, values) {
  */
 function fillTableLastTwoRows(table, row1Values, row2Values) {
   const totalRows = table.getNumRows();
-  const row1      = table.getRow(totalRows - 2);
-  const row2      = table.getRow(totalRows - 1);
+  const row1 = table.getRow(totalRows - 2);
+  const row2 = table.getRow(totalRows - 1);
   for (let c = 0; c < row1Values.length && c < row1.getNumCells(); c++) {
     row1.getCell(c).setText(String(row1Values[c]));
   }
@@ -381,7 +429,7 @@ function fillTableBlock(table, data, startRow, startCol) {
 }
 
 // =====================================================================
-//  📋 휴무 소진내역 업데이트
+// 📋 휴무 소진내역 업데이트
 // =====================================================================
 
 function updateLeaveHistory() {
@@ -397,16 +445,19 @@ function updateLeaveHistory() {
     const attendSheetName = findSheetByPattern(destSS, new RegExp(`^${currentMonth}월 근태$`));
     if (!attendSheetName) throw new Error(`"${currentMonth}월 근태" 시트를 찾을 수 없습니다.`);
     const attendSheet = destSS.getSheetByName(attendSheetName);
-    const valM23 = attendSheet.getRange('M23').getValue();
-    const valO23 = attendSheet.getRange('O23').getValue();
-    const valK23 = attendSheet.getRange('K23').getValue();
+
+    // 근태 시트 A열에서 "계" 행을 동적으로 탐지 (7~22행 범위)
+    const sumRow = getAttendSumRow(attendSheet, 7, 30);
+    const valM = attendSheet.getRange(sumRow, 13).getValue(); // M열
+    const valO = attendSheet.getRange(sumRow, 15).getValue(); // O열
+    const valK = attendSheet.getRange(sumRow, 11).getValue(); // K열
 
     const leaveSheetName = findSheetByPattern(destSS, /^휴무 소진내역$/);
     if (!leaveSheetName) throw new Error('"휴무 소진내역" 시트를 찾을 수 없습니다.');
     const leaveSheet = destSS.getSheetByName(leaveSheetName);
 
     const { row, dataStartCol } = getLeaveHistoryTarget(currentMonth);
-    [valM23, valO23, valK23, valM23, valO23].forEach((v, i) => {
+    [valM, valO, valK, valM, valO].forEach((v, i) => {
       leaveSheet.getRange(row, dataStartCol + i).setValue(v);
     });
 
@@ -414,9 +465,10 @@ function updateLeaveHistory() {
     ui.alert(
       `📋 휴무 소진내역 업데이트 완료\n\n` +
       `• 대상: ${currentMonth}월 (${row}행)\n` +
-      `• M23(연차실시): ${valM23}\n` +
-      `• O23(공휴실시): ${valO23}\n` +
-      `• K23(주휴실시): ${valK23}`
+      `• 근태 합계 행: ${sumRow}행\n` +
+      `• M${sumRow}(연차실시): ${valM}\n` +
+      `• O${sumRow}(공휴실시): ${valO}\n` +
+      `• K${sumRow}(주휴실시): ${valK}`
     );
 
   } catch (e) {
@@ -426,7 +478,7 @@ function updateLeaveHistory() {
 }
 
 // =====================================================================
-//  📥 당월 근무계획 가져오기
+// 📥 당월 근무계획 가져오기
 // =====================================================================
 
 function importWorkPlan() {
@@ -438,14 +490,14 @@ function importWorkPlan() {
     if (!statusSheetName) throw new Error('"X월 근무현황표" 시트를 찾을 수 없습니다.');
     const statusSheet = destSS.getSheetByName(statusSheetName);
     const targetMonth = Number(statusSheet.getRange('Z3').getValue());
-    const targetYear  = Number(statusSheet.getRange('X3').getValue());
+    const targetYear = Number(statusSheet.getRange('X3').getValue());
     validateMonth(targetMonth, statusSheet.getRange('Z3').getValue());
     const lastDay = getLastDayOfMonth(targetYear, targetMonth);
 
     const { srcNameMap, srcDateMap, srcDataGrid } = loadSourceData(targetMonth);
     const targets = [
-      { sheetName: statusSheetName,                              nameStartRow: 8, nameMaxRow: 23, dataStartCol: 3 },
-      { sheetName: findSheetByPattern(destSS, /^간식정산$/),     nameStartRow: 8, nameMaxRow: 17, dataStartCol: 3 },
+      { sheetName: statusSheetName, nameStartRow: 8, nameMaxRow: 23, dataStartCol: 3 },
+      { sheetName: findSheetByPattern(destSS, /^간식정산$/), nameStartRow: 8, nameMaxRow: 17, dataStartCol: 3 },
       { sheetName: findSheetByPattern(destSS, /^연장야근정산$/), nameStartRow: 8, nameMaxRow: 23, dataStartCol: 3 },
     ];
 
@@ -459,7 +511,7 @@ function importWorkPlan() {
       const { updated, skipped, log } = writeToSheet({
         sheet, srcNameMap, srcDateMap, srcDataGrid,
         nameStartRow: target.nameStartRow,
-        nameMaxRow:   target.nameMaxRow,
+        nameMaxRow: target.nameMaxRow,
         dataStartCol: target.dataStartCol,
       });
       applyColumnVisibility(sheet, lastDay);
@@ -482,7 +534,7 @@ function importWorkPlan() {
 }
 
 // =====================================================================
-//  📥 차월 근무계획 가져오기
+// 📥 차월 근무계획 가져오기
 // =====================================================================
 
 function importNextMonthWorkPlan() {
@@ -492,14 +544,14 @@ function importNextMonthWorkPlan() {
 
     const statusSheetName = findSheetByPattern(destSS, /^\d+월 근무현황표$/);
     if (!statusSheetName) throw new Error('"X월 근무현황표" 시트를 찾을 수 없습니다.');
-    const statusSheet  = destSS.getSheetByName(statusSheetName);
+    const statusSheet = destSS.getSheetByName(statusSheetName);
     const currentMonth = Number(statusSheet.getRange('Z3').getValue());
-    const currentYear  = Number(statusSheet.getRange('X3').getValue());
+    const currentYear = Number(statusSheet.getRange('X3').getValue());
     validateMonth(currentMonth, statusSheet.getRange('Z3').getValue());
 
     const nextMonth = (currentMonth % 12) + 1;
-    const nextYear  = nextMonth === 1 ? currentYear + 1 : currentYear;
-    const nextDays  = getLastDayOfMonth(nextYear, nextMonth);
+    const nextYear = nextMonth === 1 ? currentYear + 1 : currentYear;
+    const nextDays = getLastDayOfMonth(nextYear, nextMonth);
 
     const nextSheetName = findSheetByPattern(destSS, /^차월 근무계획$/);
     if (!nextSheetName) throw new Error('"차월 근무계획" 시트를 찾을 수 없습니다.');
@@ -527,7 +579,7 @@ function importNextMonthWorkPlan() {
 }
 
 // =====================================================================
-//  🔧 공통 유틸 함수들
+// 🔧 공통 유틸 함수들
 // =====================================================================
 
 function getLastDayOfMonth(year, month) {
@@ -546,18 +598,18 @@ function colIndexToLetter(colIndex) {
 }
 
 function applyColumnVisibility(sheet, lastDay) {
-  const COL_C  = 3;
+  const COL_C = 3;
   const COL_AG = 33;
   sheet.showColumns(COL_C, COL_AG - COL_C + 1);
-  const lastUsedCol  = COL_C + lastDay - 1;
+  const lastUsedCol = COL_C + lastDay - 1;
   const hideStartCol = lastUsedCol + 1;
-  const hideCount    = COL_AG - lastUsedCol;
+  const hideCount = COL_AG - lastUsedCol;
   if (hideCount > 0) sheet.hideColumns(hideStartCol, hideCount);
 }
 
 function getLeaveHistoryTarget(month) {
-  const rowMap       = { 1:4, 2:10, 3:16, 4:22, 5:28, 6:34, 7:4, 8:10, 9:16, 10:22, 11:28, 12:34 };
-  const row          = rowMap[month];
+  const rowMap = { 1:4, 2:10, 3:16, 4:22, 5:28, 6:34, 7:4, 8:10, 9:16, 10:22, 11:28, 12:34 };
+  const row = rowMap[month];
   const dataStartCol = month <= 6 ? 4 : 18;
   if (!row) throw new Error(`월 매핑을 찾을 수 없습니다: ${month}월`);
   return { row, dataStartCol };
@@ -565,17 +617,17 @@ function getLeaveHistoryTarget(month) {
 
 function loadSourceData(targetMonth) {
   const SOURCE_SS_ID = '12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY';
-  const sourceSS     = SpreadsheetApp.openById(SOURCE_SS_ID);
-  const sourceSheet  = sourceSS.getSheetByName(`${targetMonth}월`);
+  const sourceSS = SpreadsheetApp.openById(SOURCE_SS_ID);
+  const sourceSheet = sourceSS.getSheetByName(`${targetMonth}월`);
   if (!sourceSheet) throw new Error(`근무계획 스프레드시트에서 "${targetMonth}월" 시트를 찾을 수 없습니다.`);
 
-  const srcDateRow  = sourceSheet.getRange('G3:AK3').getValues()[0];
-  const srcNameCol  = sourceSheet.getRange('C5:C20').getValues();
+  const srcDateRow = sourceSheet.getRange('G3:AK3').getValues()[0];
+  const srcNameCol = sourceSheet.getRange('C5:C20').getValues();
   const srcDataGrid = sourceSheet.getRange('G5:AK20').getValues();
 
   const srcNameMap = {};
   for (let i = 0; i < srcNameCol.length; i++) {
-    const raw     = srcNameCol[i][0];
+    const raw = srcNameCol[i][0];
     const nameKey = (raw == null ? '' : String(raw)).replace(/\s/g, '');
     if (nameKey === '합계' || nameKey === '') break;
     srcNameMap[nameKey] = i;
@@ -591,7 +643,7 @@ function loadSourceData(targetMonth) {
 }
 
 function writeToSheet({ sheet, srcNameMap, srcDateMap, srcDataGrid, nameStartRow, nameMaxRow, dataStartCol }) {
-  const destNames   = readWorkerNames(sheet, nameStartRow, nameMaxRow);
+  const destNames = readWorkerNames(sheet, nameStartRow, nameMaxRow);
   const destDateRow = sheet.getRange('C5:AG5').getValues()[0];
 
   const destDateMap = {};
@@ -600,18 +652,21 @@ function writeToSheet({ sheet, srcNameMap, srcDateMap, srcDataGrid, nameStartRow
     if (!isNaN(d) && d > 0) destDateMap[d] = c;
   }
 
-  if (destNames.length > 0) {
-    sheet.getRange(nameStartRow, dataStartCol, destNames.length, destDateRow.length).clearContent();
+  // 실제 인원이 있는 마지막 행까지만 clearContent (합계 행 보호)
+  const safeLastRow = getDataLastRow(sheet, nameStartRow, nameMaxRow);
+  const clearRows = safeLastRow - nameStartRow + 1;
+  if (clearRows > 0) {
+    sheet.getRange(nameStartRow, dataStartCol, clearRows, destDateRow.length).clearContent();
   }
 
   let updated = 0;
   let skipped = 0;
-  const log   = [];
+  const log = [];
 
   for (const { name, rowIndex } of destNames) {
     const nameKey = name.replace(/\s/g, '');
     if (!(nameKey in srcNameMap)) {
-      log.push(`   ⚠️ "${name}" → 근무계획에 없음`);
+      log.push(` ⚠️ "${name}" → 근무계획에 없음`);
       skipped++;
       continue;
     }
@@ -621,7 +676,7 @@ function writeToSheet({ sheet, srcNameMap, srcDateMap, srcDataGrid, nameStartRow
       const day = Number(dateStr);
       if (!(day in srcDateMap)) continue;
       const cellValue = srcDataGrid[srcRowIdx][srcDateMap[day]];
-      const strVal    = (cellValue == null || cellValue === '') ? '' : String(cellValue).trim();
+      const strVal = (cellValue == null || cellValue === '') ? '' : String(cellValue).trim();
       sheet.getRange(nameStartRow + rowIndex, dataStartCol + destColIdx).setValue(strVal);
       updated++;
     }
@@ -634,13 +689,50 @@ function writeToSheet({ sheet, srcNameMap, srcDateMap, srcDataGrid, nameStartRow
 function readWorkerNames(sheet, startRow, maxRow) {
   const result = [];
   for (let row = startRow; row <= maxRow; row++) {
-    const raw     = sheet.getRange(row, 2).getValue();
-    const nameKey = (raw == null ? '' : String(raw)).replace(/\s/g, '');
-    if (nameKey === '합계') break;
-    if (nameKey === '')    break;
-    result.push({ name: String(raw).trim(), rowIndex: row - startRow });
+    const rawB = sheet.getRange(row, 2).getValue();
+    const rawA = sheet.getRange(row, 1).getValue();
+    // A,B 병합셀이면 A열에서 값이 나오므로 양쪽 모두 확인
+    const keyB = (rawB == null ? '' : String(rawB)).replace(/\s/g, '');
+    const keyA = (rawA == null ? '' : String(rawA)).replace(/\s/g, '');
+    if (keyA === '합계' || keyB === '합계') break;
+    if (keyA === '' && keyB === '') break;
+    // 이름은 B열 우선, 없으면 A열
+    const nameRaw = rawB !== '' && rawB != null ? rawB : rawA;
+    result.push({ name: String(nameRaw).trim(), rowIndex: row - startRow });
   }
   return result;
+}
+
+/**
+ * sheet의 B열(col 2)에서 "합 계" 패턴(공백 0개 이상)을 찾아
+ * 그 직전 행 번호를 반환한다.
+ * "합 계" 행을 찾지 못하면 nameMaxRow를 그대로 반환한다.
+ */
+/**
+ * 근태/연장야근정산 시트 전용: A열에서 셀 값이 "계" 또는 "합계" 인 행 번호를 반환.
+ * 공백 제거 후 비교하므로 "합 계", "계 " 등 모두 매칭.
+ * 못 찾으면 fallbackRow 반환.
+ */
+function getAttendSumRow(sheet, startRow, maxRow) {
+  for (let row = startRow; row <= maxRow; row++) {
+    const val = sheet.getRange(row, 1).getValue();
+    const key = (val == null ? '' : String(val)).replace(/\s/g, '');
+    if (key === '계' || key === '합계') return row;
+  }
+  return maxRow; // fallback
+}
+
+function getDataLastRow(sheet, nameStartRow, nameMaxRow) {
+  // A,B 병합셀 구조이므로 A열(col 1)과 B열(col 2) 모두 확인
+  // 병합셀은 첫 번째 셀(A열)에서만 getValue()가 반환됨
+  for (let row = nameStartRow; row <= nameMaxRow; row++) {
+    const valA = sheet.getRange(row, 1).getValue();
+    const valB = sheet.getRange(row, 2).getValue();
+    const keyA = (valA == null ? '' : String(valA)).replace(/\s/g, '');
+    const keyB = (valB == null ? '' : String(valB)).replace(/\s/g, '');
+    if (keyA === '합계' || keyB === '합계') return row - 1;
+  }
+  return nameMaxRow;
 }
 
 function findSheetByPattern(ss, pattern) {
@@ -661,42 +753,44 @@ function getCurrentYearMonth(ss) {
   if (!statusSheetName) throw new Error('"X월 근무현황표" 시트를 찾을 수 없습니다.');
   const statusSheet = ss.getSheetByName(statusSheetName);
   const month = Number(statusSheet.getRange('Z3').getValue());
-  const year  = Number(statusSheet.getRange('X3').getValue());
+  const year = Number(statusSheet.getRange('X3').getValue());
   validateMonth(month, month);
   if (!year || isNaN(year)) throw new Error('X3 셀의 년도 값이 올바르지 않습니다.');
   return { year, month };
 }
 
 // =====================================================================
-//  기존 기능들 (단독 메뉴용 + 올인원 내부 공유)
+// 기존 기능들 (단독 메뉴용 + 올인원 내부 공유)
 // =====================================================================
 
 function fillOneExceptSpecial_AG23() {
-  const ui     = SpreadsheetApp.getUi();
+  const ui = SpreadsheetApp.getUi();
   const destSS = SpreadsheetApp.getActiveSpreadsheet();
   const { year, month } = getCurrentYearMonth(destSS);
   const lastDay = getLastDayOfMonth(year, month);
-  const endCol  = colIndexToLetter(2 + lastDay);
-  const sheet   = SpreadsheetApp.getActiveSheet();
-  processFillOne(sheet.getRange(`C8:${endCol}23`), ["휴", "무", "공", "년", "야", "퇴", "사", "상", "반"], true);
-  ui.alert(`완료\nC8:${endCol}23 → 특수문자 외 1로 변경 + 배경 하얀색\n(${year}년 ${month}월 기준, ${lastDay}일까지)`);
+  const endCol = colIndexToLetter(2 + lastDay);
+  const sheet = SpreadsheetApp.getActiveSheet();
+  const lastRow = getDataLastRow(sheet, 8, 23);
+  processFillOne(sheet.getRange(`C8:${endCol}${lastRow}`), ["휴", "무", "공", "년", "야", "퇴", "사", "상", "반", "출", "청", "근"], true);
+  ui.alert(`완료\nC8:${endCol}${lastRow} → 특수문자 외 1로 변경 + 배경 하얀색\n(${year}년 ${month}월 기준, ${lastDay}일까지)`);
 }
 
 function fillOneExceptSpecial_AG17() {
-  const ui     = SpreadsheetApp.getUi();
+  const ui = SpreadsheetApp.getUi();
   const destSS = SpreadsheetApp.getActiveSpreadsheet();
   const { year, month } = getCurrentYearMonth(destSS);
   const lastDay = getLastDayOfMonth(year, month);
-  const endCol  = colIndexToLetter(2 + lastDay);
-  const sheet   = SpreadsheetApp.getActiveSheet();
-  processFillOne(sheet.getRange(`C8:${endCol}17`), ["휴", "공", "야", "퇴", "무", "년", "사", "상", "반"], true);
-  ui.alert(`완료\nC8:${endCol}17 → 특수문자 외 1로 변경 + 배경 하얀색\n(${year}년 ${month}월 기준, ${lastDay}일까지)`);
+  const endCol = colIndexToLetter(2 + lastDay);
+  const sheet = SpreadsheetApp.getActiveSheet();
+  const lastRow = getDataLastRow(sheet, 8, 17);
+  processFillOne(sheet.getRange(`C8:${endCol}${lastRow}`), ["휴", "공", "야", "퇴", "무", "년", "사", "상", "반", "출", "청", "근"], true);
+  ui.alert(`완료\nC8:${endCol}${lastRow} → 특수문자 외 1로 변경 + 배경 하얀색\n(${year}년 ${month}월 기준, ${lastDay}일까지)`);
 }
 
 function processFillOne(range, specialList, fillOne = true) {
-  const values      = range.getValues();
+  const values = range.getValues();
   const backgrounds = range.getBackgrounds();
-  const special     = new Set(specialList.map(s => s.trim()));
+  const special = new Set(specialList.map(s => s.trim()));
 
   for (let r = 0; r < values.length; r++) {
     for (let c = 0; c < values[r].length; c++) {
@@ -714,11 +808,11 @@ function processFillOne(range, specialList, fillOne = true) {
 }
 
 function convertPBLtoYeonAndClear() {
-  const destSS          = SpreadsheetApp.getActiveSpreadsheet();
+  const destSS = SpreadsheetApp.getActiveSpreadsheet();
   const { year, month } = getCurrentYearMonth(destSS);
-  const lastDay         = getLastDayOfMonth(year, month);
-  const sheet           = SpreadsheetApp.getActiveSheet();
-  const nightText       = processPBLtoYeonAndClear(sheet, lastDay);
+  const lastDay = getLastDayOfMonth(year, month);
+  const sheet = SpreadsheetApp.getActiveSheet();
+  const nightText = processPBLtoYeonAndClear(sheet, lastDay);
   SpreadsheetApp.getUi().alert(
     `완료\n• P, B, L → "연" 변환\n• "연", "야" 외 전부 공란\n• 배경색 하얀색\n` +
     `• AD27: ${nightText}\n(${year}년 ${month}월 기준, ${lastDay}일까지)`
@@ -726,12 +820,13 @@ function convertPBLtoYeonAndClear() {
 }
 
 function processPBLtoYeonAndClear(sheet, lastDay) {
-  const endCol      = colIndexToLetter(2 + lastDay);
-  const dataRange   = sheet.getRange(`C8:${endCol}23`);
-  const values      = dataRange.getValues();
+  const endCol = colIndexToLetter(2 + lastDay);
+  const lastRow = getDataLastRow(sheet, 8, 23);
+  const dataRange = sheet.getRange(`C8:${endCol}${lastRow}`);
+  const values = dataRange.getValues();
   const backgrounds = dataRange.getBackgrounds();
-  const pbl         = new Set(["P", "B", "L"]);
-  const keepers     = new Set(["연", "야"]);
+  const pbl = new Set(["P", "B", "L"]);
+  const keepers = new Set(["연", "야"]);
 
   for (let r = 0; r < values.length; r++) {
     for (let c = 0; c < values[r].length; c++) {
@@ -755,8 +850,13 @@ function processPBLtoYeonAndClear(sheet, lastDay) {
   dataRange.setHorizontalAlignment('center');
   dataRange.setVerticalAlignment('middle');
 
+  // 야간 인원 합계 셀: 연장야근정산 A열에서 "합계" 행을 찾아 +3행, AD열(30열)
+  // 예) 합계 행=23 → 입력행=26 → AD26
+  // 합계 행=22 → 입력행=25 → AD25 (15명으로 줄었을 때)
+  const overtimeSumRow = getAttendSumRow(sheet, 8, 30); // A열 "계"/"합계" 탐지
+  const nightInputRow = overtimeSumRow + 3;
   const nightText = `(${nightCount}인 × 3식)`;
-  sheet.getRange('AD27').setValue(nightText);
+  sheet.getRange(nightInputRow, 30).setValue(nightText); // 30 = AD열
   SpreadsheetApp.flush();
   return nightText;
 }
@@ -774,7 +874,13 @@ function accumulateCumulative() {
 
 function processAccumulate(sheet) {
   const startRow = 7;
-  const endRow   = 22;
+  // A열에서 "계" 행을 찾아 그 직전 행까지만 누계처리
+  const sumRow = getAttendSumRow(sheet, startRow, 30);
+  const endRow = sumRow - 1;
+
+  // 현재 시트가 1월 근태인지 확인 (시트명에 "1월" 포함 여부)
+  const sheetName = sheet.getName();
+  const isJanuary = /^1월 근태$/.test(sheetName.trim());
 
   const columnPairs = [
     { current: "K", cumulative: "L" },
@@ -790,16 +896,23 @@ function processAccumulate(sheet) {
   for (const pair of columnPairs) {
     for (let row = startRow; row <= endRow; row++) {
       const currentCell = sheet.getRange(`${pair.current}${row}`);
-      const cumulCell   = sheet.getRange(`${pair.cumulative}${row}`);
-      const currentVal  = currentCell.getValue();
-      const currentStr  = (currentVal == null || currentVal === '') ? '' : String(currentVal).trim();
+      const cumulCell = sheet.getRange(`${pair.cumulative}${row}`);
+      const currentVal = currentCell.getValue();
+      const currentStr = (currentVal == null || currentVal === '') ? '' : String(currentVal).trim();
 
       if (currentStr === '') { skippedCount++; continue; }
       const addValue = (currentStr === '-') ? 0 : Number(currentStr);
       if (isNaN(addValue)) { skippedCount++; continue; }
 
+      // 1월이면 기존 누계와 무관하게 당월 값만 단순 입력 (0+9 → 9)
+      if (isJanuary) {
+        cumulCell.setValue(addValue);
+        updatedCount++;
+        continue;
+      }
+
       const existingFormula = cumulCell.getFormula();
-      const existingValue   = cumulCell.getValue();
+      const existingValue = cumulCell.getValue();
       let baseStr;
 
       if (existingFormula && existingFormula.startsWith('=')) {
@@ -819,23 +932,300 @@ function processAccumulate(sheet) {
 }
 
 function debugSheetNames() {
-  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
   const names = ss.getSheets().map(s => `"${s.getName()}"`);
   SpreadsheetApp.getUi().alert('전체 시트 목록:\n\n' + names.join('\n'));
+}
+
+/**
+ * 근태 시트 A열 값 확인용 디버그 함수
+ * 메뉴에서 직접 실행하거나 필요할 때 호출
+ */
+function debugAttendSumRow() {
+  const destSS = SpreadsheetApp.getActiveSpreadsheet();
+  const statusSheetName = findSheetByPattern(destSS, /^\d+월 근무현황표$/);
+  const currentMonth = Number(destSS.getSheetByName(statusSheetName).getRange('Z3').getValue());
+  const attendSheetName = findSheetByPattern(destSS, new RegExp(`^${currentMonth}월 근태$`));
+  if (!attendSheetName) { SpreadsheetApp.getUi().alert('근태 시트 없음'); return; }
+  const sheet = destSS.getSheetByName(attendSheetName);
+
+  let log = `[${attendSheetName}] A열 스캔 결과 (7~30행):\n\n`;
+  for (let row = 7; row <= 30; row++) {
+    const val = sheet.getRange(row, 1).getValue();
+    const key = (val == null ? '' : String(val)).replace(/\s/g, '');
+    const mark = (key === '계' || key === '합계') ? ' ◀ 합계행 감지!' : '';
+    if (val !== '') log += ` ${row}행: "${val}" (공백제거:"${key}")${mark}\n`;
+  }
+  const sumRow = getAttendSumRow(sheet, 7, 30);
+  log += `\n→ 최종 감지된 합계행: ${sumRow}행`;
+  log += `\n→ M${sumRow}: ${sheet.getRange(sumRow, 13).getValue()}`;
+  log += `\n→ O${sumRow}: ${sheet.getRange(sumRow, 15).getValue()}`;
+  log += `\n→ K${sumRow}: ${sheet.getRange(sumRow, 11).getValue()}`;
+  SpreadsheetApp.getUi().alert(log);
+}
+
+// =====================================================================
+// 📝 A23~A26 입력
+// =====================================================================
+
+function fillKeunTaeData() {
+  try {
+    const keunTaeSS = SpreadsheetApp.getActiveSpreadsheet();
+    let keunTaeSheet = null;
+    for (let s of keunTaeSS.getSheets()) {
+      if (s.getName().includes('근무현황표')) { keunTaeSheet = s; break; }
+    }
+    if (!keunTaeSheet) throw new Error('근무현황표 시트를 찾을 수 없습니다.');
+
+    const month = Number(keunTaeSheet.getRange('Z3').getValue());
+    if (!month || isNaN(month)) throw new Error('Z3 셀에서 월 값을 읽을 수 없습니다.');
+
+    const workSS = SpreadsheetApp.openById('12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY');
+    let workSheet = null;
+    for (let s of workSS.getSheets()) {
+      if (s.getName().includes(month + '월')) { workSheet = s; break; }
+    }
+    if (!workSheet) throw new Error(
+      `${month}월 근무계획 시트를 찾을 수 없습니다.\n` +
+      `시트 목록: ${workSS.getSheets().map(s => s.getName()).join(', ')}`
+    );
+
+    const workData = workSheet.getRange('G3:AK20').getValues();
+    const dateRow = workData[0];
+    const staffRows = workData.slice(2);
+
+    const prodSS = SpreadsheetApp.openById('1M2ExGG9jwjs_A32yr8JJBH_qbKxpefGS3lkTKUX8e0Y');
+    let prodSheet = null;
+    for (let s of prodSS.getSheets()) {
+      const name = s.getName();
+      if (name.includes(month + '월') && name.includes('제품생산 계획')) {
+        prodSheet = s; break;
+      }
+    }
+    if (!prodSheet) throw new Error(
+      `${month}월 제품생산 계획 시트를 찾을 수 없습니다.\n` +
+      `시트 목록: ${prodSS.getSheets().map(s => s.getName()).join(', ')}`
+    );
+
+    const prodData = prodSheet.getRange('A3:K33').getValues();
+    const prodMap = {};
+    for (let row of prodData) {
+      const day = Number(row[0]);
+      if (!day) continue;
+      prodMap[day] = {
+        d15: row[3], e05: row[4], f033: row[5],
+        i15b: row[8], j05b: row[9], k033b: row[10],
+      };
+    }
+
+    const nightDays = {}, pDays = {}, bDays = {}, lDays = {};
+
+    for (let ci = 0; ci < dateRow.length; ci++) {
+      const day = Number(dateRow[ci]);
+      if (!day) continue;
+      for (let sr of staffRows) {
+        const val = sr[ci];
+        if (val === '야') nightDays[day] = (nightDays[day] || 0) + 1;
+        if (val === 'P') pDays[day] = (pDays[day] || 0) + 1;
+        if (val === 'B') bDays[day] = (bDays[day] || 0) + 1;
+        if (val === 'L') lDays[day] = (lDays[day] || 0) + 1;
+      }
+    }
+
+    // A23
+    const nightTypeSet = new Set();
+    let nightTotalDays = 0, nightTotalPeople = 0;
+    for (let day of Object.keys(nightDays).map(Number).sort((a,b) => a-b)) {
+      nightTotalDays++;
+      nightTotalPeople += nightDays[day];
+      const prod = prodMap[day];
+      if (prod) {
+        if (Number(prod.d15) > 0) nightTypeSet.add('1.5L');
+        if (Number(prod.e05) > 0) nightTypeSet.add('0.5L');
+        if (Number(prod.f033) > 0) nightTypeSet.add('0.33L');
+      }
+    }
+    const nightTypes = ['1.5L', '0.5L', '0.33L'].filter(t => nightTypeSet.has(t));
+    const a23 = nightTotalDays > 0
+      ? `○ ${nightTypes.join(', ')} 야간 병제작 (${nightTotalDays}일, ${nightTotalPeople}명)` : '';
+
+    // A24
+    const pTypeSet = new Set();
+    let pTotalDays = 0, pTotalPeople = 0;
+    for (let day of Object.keys(pDays).map(Number).sort((a,b) => a-b)) {
+      pTotalDays++;
+      pTotalPeople += pDays[day];
+      const prod = prodMap[day];
+      if (prod) {
+        if (Number(prod.d15) > 0) pTypeSet.add('1.5L');
+        if (Number(prod.e05) > 0) pTypeSet.add('0.5L');
+        if (Number(prod.f033) > 0) pTypeSet.add('0.33L');
+      }
+    }
+    const pTypes = ['1.5L', '0.5L', '0.33L'].filter(t => pTypeSet.has(t));
+    const a24 = pTotalDays > 0
+      ? `○ ${pTypes.join(', ')} 제품 생산 연장 (${pTotalDays}일, ${pTotalPeople}명)` : '';
+
+    // A25
+    const bTypeSet = new Set();
+    let bTotalDays = 0, bTotalPeople = 0;
+    for (let day of Object.keys(bDays).map(Number).sort((a,b) => a-b)) {
+      bTotalDays++;
+      bTotalPeople += bDays[day];
+      const prod = prodMap[day];
+      if (prod) {
+        if (Number(prod.i15b) > 0) bTypeSet.add('1.5L');
+        if (Number(prod.j05b) > 0) bTypeSet.add('0.5L');
+        if (Number(prod.k033b) > 0) bTypeSet.add('0.33L');
+      }
+    }
+    const bTypes = ['1.5L', '0.5L', '0.33L'].filter(t => bTypeSet.has(t));
+    const a25 = bTotalDays > 0
+      ? `○ ${bTypes.join(', ')} 병 생산 연장 (${bTotalDays}일, ${bTotalPeople}명)` : '';
+
+    // A26
+    let lTotalDays = 0, lTotalPeople = 0;
+    for (let day of Object.keys(lDays).map(Number).sort((a,b) => a-b)) {
+      lTotalDays++;
+      lTotalPeople += lDays[day];
+    }
+    const a26 = lTotalDays > 0
+      ? `○ 정비 연장 (${lTotalDays}일, ${lTotalPeople}명)` : '';
+
+    // 출력 시트 찾기
+    const outSheet = keunTaeSS.getSheetByName('연장근무 발생 보고');
+    if (!outSheet) throw new Error('"연장근무 발생 보고" 시트를 찾을 수 없습니다.');
+
+    outSheet.getRange('A23').setValue(a23);
+    outSheet.getRange('D16').setValue(nightTotalPeople * 4);
+    outSheet.getRange('A24').setValue(a24);
+    outSheet.getRange('A25').setValue(a25);
+    outSheet.getRange('A26').setValue(a26);
+
+    SpreadsheetApp.getUi().alert('✅ 완료!\n\nA23~A26 입력이 완료되었습니다.');
+
+  } catch (e) {
+    SpreadsheetApp.getUi().alert('❌ 오류 발생:\n' + e.message);
+  }
+}
+
+// ── 디버깅 함수 ──────────────────────────────────────────────────────
+function debugKeunTaeData() {
+  const keunTaeSS = SpreadsheetApp.getActiveSpreadsheet();
+
+  // 1. 시트 목록 확인
+  Logger.log('=== 근태 정산내역 시트 목록 ===');
+  keunTaeSS.getSheets().forEach(s => Logger.log(` "${s.getName()}" (gid=${s.getSheetId()})`));
+
+  // 2. 기준월 확인
+  let keunTaeSheet = null;
+  for (let s of keunTaeSS.getSheets()) {
+    if (s.getName().includes('근무현황표')) { keunTaeSheet = s; break; }
+  }
+  if (!keunTaeSheet) { Logger.log('❌ 근무현황표 시트 없음'); return; }
+  const month = Number(keunTaeSheet.getRange('Z3').getValue());
+  Logger.log(`=== 기준월: ${month}월 ===`);
+
+  // 3. 근무계획 시트 확인
+  const workSS = SpreadsheetApp.openById('12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY');
+  Logger.log('=== 근무계획 시트 목록 ===');
+  workSS.getSheets().forEach(s => Logger.log(` "${s.getName()}"`));
+
+  let workSheet = null;
+  for (let s of workSS.getSheets()) {
+    if (s.getName().includes(month + '월')) { workSheet = s; break; }
+  }
+  if (!workSheet) { Logger.log(`❌ ${month}월 근무계획 시트 없음`); return; }
+  Logger.log(`=== 선택된 근무계획 시트: ${workSheet.getName()} ===`);
+
+  // 4. 근무계획 데이터 확인 (야/P/B/L 집계)
+  const workData = workSheet.getRange('G3:AK20').getValues();
+  const dateRow = workData[0];
+  const staffRows = workData.slice(2);
+  Logger.log('=== 일자행(G3:AK3) ===');
+  Logger.log(dateRow.join(', '));
+
+  const nightDays = {}, pDays = {}, bDays = {}, lDays = {};
+  for (let ci = 0; ci < dateRow.length; ci++) {
+    const day = Number(dateRow[ci]);
+    if (!day) continue;
+    for (let sr of staffRows) {
+      const val = sr[ci];
+      if (val === '야') nightDays[day] = (nightDays[day] || 0) + 1;
+      if (val === 'P') pDays[day] = (pDays[day] || 0) + 1;
+      if (val === 'B') bDays[day] = (bDays[day] || 0) + 1;
+      if (val === 'L') lDays[day] = (lDays[day] || 0) + 1;
+    }
+  }
+  Logger.log('=== 야간(야) 집계 ===');
+  Logger.log(JSON.stringify(nightDays));
+  Logger.log('=== 제품생산연장(P) 집계 ===');
+  Logger.log(JSON.stringify(pDays));
+  Logger.log('=== BTL연장(B) 집계 ===');
+  Logger.log(JSON.stringify(bDays));
+  Logger.log('=== 정비연장(L) 집계 ===');
+  Logger.log(JSON.stringify(lDays));
+
+  // 5. 제품생산 계획 시트 확인
+  const prodSS = SpreadsheetApp.openById('1ibZaOX0NKni6vRTVE0i2Wb5AXNHn9D72F5CFWSxH3qQ');
+  Logger.log('=== 제품생산 계획 시트 목록 ===');
+  prodSS.getSheets().forEach(s => Logger.log(` "${s.getName()}"`));
+
+  let prodSheet = null;
+  for (let s of prodSS.getSheets()) {
+    const name = s.getName();
+    if (name.includes(month + '월') && name.includes('제품생산 계획')) {
+      prodSheet = s; break;
+    }
+  }
+  if (!prodSheet) { Logger.log(`❌ ${month}월 제품생산 계획 시트 없음`); return; }
+  Logger.log(`=== 선택된 제품생산 시트: ${prodSheet.getName()} ===`);
+
+  // 6. 야간 날짜별 생산 종류 확인
+  const prodData = prodSheet.getRange('A3:K33').getValues();
+  const prodMap = {};
+  for (let row of prodData) {
+    const day = Number(row[0]);
+    if (!day) continue;
+    prodMap[day] = { d15: row[3], e05: row[4], f033: row[5], i15b: row[8], j05b: row[9], k033b: row[10] };
+  }
+
+  Logger.log('=== 야간 날짜별 생산 종류 ===');
+  for (let day of Object.keys(nightDays).map(Number).sort((a,b) => a-b)) {
+    const prod = prodMap[day];
+    Logger.log(` ${day}일: 야간인원=${nightDays[day]}, 생산=${prod ? JSON.stringify(prod) : '없음'}`);
+  }
+
+  Logger.log('=== P 날짜별 생산 종류 ===');
+  for (let day of Object.keys(pDays).map(Number).sort((a,b) => a-b)) {
+    const prod = prodMap[day];
+    Logger.log(` ${day}일: P인원=${pDays[day]}, 생산=${prod ? JSON.stringify(prod) : '없음'}`);
+  }
+
+  Logger.log('=== B 날짜별 생산 종류 ===');
+  for (let day of Object.keys(bDays).map(Number).sort((a,b) => a-b)) {
+    const prod = prodMap[day];
+    Logger.log(` ${day}일: B인원=${bDays[day]}, 생산=${prod ? JSON.stringify(prod) : '없음'}`);
+  }
+
+  // 7. 출력 시트 확인
+  Logger.log('=== 출력 시트 확인 ("연장근무 발생 보고") ===');
+  const outSheet = keunTaeSS.getSheetByName('연장근무 발생 보고');
+  Logger.log(outSheet ? `✅ 출력 시트: "${outSheet.getName()}"` : '❌ 출력 시트 못 찾음');
 }
 
 function showHelp() {
   SpreadsheetApp.getUi().alert(
     "근태관리 메뉴 사용법\n\n" +
     "【 🚀 올인원 원터치 실행 】\n" +
-    "  7단계 자동 순서 실행:\n" +
-    "  1. 당월 근무계획 가져오기 + 미사용 날짜 열 숨기기\n" +
-    "  2. 차월 근무계획 가져오기 + 미사용 날짜 열 숨기기\n" +
-    "  3. 근무현황표 + 차월 근무계획 → 특수문자 외 1 채우기\n" +
-    "  4. 간식정산 → 특수 외 1 채우기\n" +
-    "  5. 연장야근정산 → PBL→연 & 연/야 외 지우기\n" +
-    "  6. X월 근태 → 누계처리\n" +
-    "  7. 휴무 소진내역 업데이트\n\n" +
+    " 7단계 자동 순서 실행:\n" +
+    " 1. 당월 근무계획 가져오기 + 미사용 날짜 열 숨기기\n" +
+    " 2. 차월 근무계획 가져오기 + 미사용 날짜 열 숨기기\n" +
+    " 3. 근무현황표 + 차월 근무계획 → 특수문자 외 1 채우기\n" +
+    " 4. 간식정산 → 특수 외 1 채우기\n" +
+    " 5. 연장야근정산 → PBL→연 & 연/야 외 지우기\n" +
+    " 6. X월 근태 → 누계처리\n" +
+    " 7. 휴무 소진내역 업데이트\n\n" +
     "【 개별 기능 】\n" +
     "• 특수문자 외 → 1 채우기 — 현재 시트 / 당월 일수 기준\n" +
     "• 특수 외 → 1 (AG17) — 현재 시트 / 당월 일수 기준\n" +
@@ -846,11 +1236,11 @@ function showHelp() {
     "• 📄 결과보고 Docs 생성\n\n" +
     "【 자동 기능 】\n" +
     "• Z3 셀 값 변경 시 시트 이름 자동 변경\n" +
-    "  (X월 결과보고 / X월 근태 / X월 근무현황표)\n\n" +
+    " (X월 결과보고 / X월 근태 / X월 근무현황표)\n\n" +
     "※ 년도: X월 근무현황표 X3 셀 / 월: Z3 셀 기준\n" +
     "※ 윤년(2월 29일) 자동 처리\n" +
     "※ 해당 월 일수 초과 열 자동 숨김\n" +
-    "※ 작업자 성명 B열 '합  계' 직전까지 자동 감지\n" +
+    "※ 작업자 성명 B열 '합 계' 직전까지 자동 감지\n" +
     "※ 이름 띄어쓰기 차이 자동 처리\n" +
     "※ 시트명 앞뒤 공백 자동 처리\n\n" +
     "모든 기능은 처리 범위 배경을 하얀색으로 초기화합니다."
