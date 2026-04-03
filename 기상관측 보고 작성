@@ -71,75 +71,76 @@ function fillWeatherReport() {
   reportSheet.getRange("E4").setValue(minTemp);
 
   // F4: 강우량 합계
-  const rainfalls = mValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
-  const totalRainfall = rainfalls.reduce((a, b) => a + b, 0);
+  const mNums = mValues.map(r => (r[0] !== "" && !isNaN(r[0])) ? Number(r[0]) : 0);
+  const totalRainfall = mNums.reduce((a, b) => a + b, 0);
   reportSheet.getRange("F4").setValue(totalRainfall);
 
-  // G4 & H4: 연속 24개 행 강우량 합 최댓값
-  const mNums = mValues.map(r => (r[0] !== "" && !isNaN(r[0])) ? Number(r[0]) : 0);
+  // G4 & H4: 연속 강우 이벤트 중 합계가 가장 큰 구간
+  // 0 초과값이 연속되는 구간을 이벤트로 묶기
+  const events = [];
+  let inRain = false;
+  let eventStart = -1;
 
-  let maxSum = -Infinity;
-  const candidates = [];
-
-  for (let i = 0; i <= mNums.length - 24; i++) {
+  for (let i = 0; i < mNums.length; i++) {
+    if (mNums[i] > 0 && !inRain) {
+      // 강우 시작
+      inRain = true;
+      eventStart = i;
+    } else if (mNums[i] <= 0 && inRain) {
+      // 강우 종료 → 이벤트 저장
+      let sum = 0;
+      for (let j = eventStart; j < i; j++) sum += mNums[j];
+      events.push({ startIdx: eventStart, endIdx: i - 1, sum });
+      inRain = false;
+    }
+  }
+  // 데이터 끝까지 비가 계속 내리는 경우
+  if (inRain) {
     let sum = 0;
-    for (let j = i; j < i + 24; j++) {
-      sum += mNums[j];
-    }
-    if (sum > maxSum) maxSum = sum;
-    candidates.push({ startIdx: i, sum });
+    for (let j = eventStart; j < mNums.length; j++) sum += mNums[j];
+    events.push({ startIdx: eventStart, endIdx: mNums.length - 1, sum });
   }
 
-  const topCandidates = candidates
-    .filter(c => c.sum === maxSum)
-    .map(c => {
-      let firstRainy = -1;
-      let lastRainy = -1;
-      for (let j = c.startIdx; j < c.startIdx + 24; j++) {
-        if (mNums[j] > 0) {
-          if (firstRainy === -1) firstRainy = j;
-          lastRainy = j;
-        }
-      }
-      const span = (firstRainy === -1) ? 0 : (lastRainy - firstRainy);
-      return { ...c, firstRainy, lastRainy, span };
-    });
-
-  topCandidates.sort((a, b) => a.span - b.span || a.startIdx - b.startIdx);
-  const best = topCandidates[0];
-
-  reportSheet.getRange("G4").setValue(maxSum);
-
-  if (best.firstRainy === -1) {
+  if (events.length === 0) {
+    reportSheet.getRange("G4").setValue(0);
     reportSheet.getRange("H4").setValue("강우 없음");
-  } else {
-    function formatDate(d) {
-      const mo = d.getMonth() + 1;
-      const day = String(d.getDate()).padStart(2, "0");
-      return `${mo}/${day}`;
-    }
-    function formatTime(d) {
-      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-    }
-
-    const earliest = new Date(aValues[best.firstRainy][0]);
-    const latest = new Date(aValues[best.lastRainy][0]);
-
-    const sameDay = earliest.getFullYear() === latest.getFullYear()
-                 && earliest.getMonth() === latest.getMonth()
-                 && earliest.getDate() === latest.getDate();
-
-    let displayText;
-    if (sameDay) {
-      displayText = `${formatDate(earliest)}\n${formatTime(earliest)} ~ ${formatTime(latest)}`;
-    } else {
-      displayText = `${formatDate(earliest)} ${formatTime(earliest)} ~\n${formatDate(latest)} ${formatTime(latest)}`;
-    }
-
-    const h4Range = reportSheet.getRange("H4");
-    h4Range.setValue(displayText);
-    h4Range.setWrap(true);
+    SpreadsheetApp.getUi().alert("✅ 보고용 표 작성 완료!");
+    return;
   }
+
+  // 합계 최댓값 이벤트 선택 (동일 시 먼저 발생한 이벤트)
+  events.sort((a, b) => b.sum - a.sum || a.startIdx - b.startIdx);
+  const best = events[0];
+
+  reportSheet.getRange("G4").setValue(best.sum);
+
+  // H4: 이벤트 첫 시각 ~ 마지막 시각
+  function formatDate(d) {
+    const mo = d.getMonth() + 1;
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${mo}/${day}`;
+  }
+  function formatTime(d) {
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  }
+
+  const earliest = new Date(aValues[best.startIdx][0]);
+  const latest = new Date(aValues[best.endIdx][0]);
+
+  const sameDay = earliest.getFullYear() === latest.getFullYear()
+               && earliest.getMonth() === latest.getMonth()
+               && earliest.getDate() === latest.getDate();
+
+  let displayText;
+  if (sameDay) {
+    displayText = `${formatDate(earliest)}\n${formatTime(earliest)} ~ ${formatTime(latest)}`;
+  } else {
+    displayText = `${formatDate(earliest)} ${formatTime(earliest)} ~\n${formatDate(latest)} ${formatTime(latest)}`;
+  }
+
+  const h4Range = reportSheet.getRange("H4");
+  h4Range.setValue(displayText);
+  h4Range.setWrap(true);
 
   SpreadsheetApp.getUi().alert("✅ 보고용 표 작성 완료!");
 }
@@ -281,9 +282,8 @@ function createWeatherReport() {
     if (i === 6 && cellValue.includes("\n")) {
       const lines = cellValue.split("\n");
       const firstLineHasDate = /^\d+\/\d+\s/.test(lines[0]);
-      // non-breaking space(\u00A0)로 들여쓰기 - 일반 공백은 Docs 단락 시작에서 무시됨
       const indent = firstLineHasDate
-        ? "\u00A0\u00A0\u00A0\u00A0" // 날짜 두 개: 4칸
+        ? "\u00A0\u00A0\u00A0\u00A0\u00A0" // 날짜 두 개: 5칸
         : "\u00A0\u00A0\u00A0"; // 같은 날: 3칸
       cellValue = lines[0] + "\n" + indent + lines[1];
     }
