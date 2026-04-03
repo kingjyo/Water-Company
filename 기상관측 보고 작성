@@ -1,0 +1,315 @@
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("🌤️ 기상 보고")
+    .addItem("보고용 표 작성", "fillWeatherReport")
+    .addItem("보고서 문서 생성", "createWeatherReport")
+    .addSeparator()
+    .addItem("작성 결과 초기화", "clearReport")
+    .addToUi();
+}
+
+function clearReport() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const reportSheet = ss.getSheetByName("보고용 표");
+
+  if (!reportSheet) {
+    SpreadsheetApp.getUi().alert("'보고용 표' 시트를 찾을 수 없습니다.");
+    return;
+  }
+
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.alert("초기화 확인", "보고용 표의 B4:H4 내용을 지우겠습니까?", ui.ButtonSet.YES_NO);
+
+  if (response === ui.Button.YES) {
+    reportSheet.getRange("B4:H4").clearContent();
+    ui.alert("초기화 완료!");
+  }
+}
+
+function fillWeatherReport() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const dataSheet = ss.getSheetByName("기상관측 데이터");
+  const reportSheet = ss.getSheetByName("보고용 표");
+
+  if (!dataSheet || !reportSheet) {
+    SpreadsheetApp.getUi().alert("시트를 찾을 수 없습니다. 시트 이름을 확인하세요.");
+    return;
+  }
+
+  const lastRow = dataSheet.getLastRow();
+  if (lastRow < 5) {
+    SpreadsheetApp.getUi().alert("기상관측 데이터 시트에 데이터가 없습니다.");
+    return;
+  }
+
+  const dataRowCount = lastRow - 4;
+
+  const aValues = dataSheet.getRange(5, 1, dataRowCount, 1).getValues();
+  const cValues = dataSheet.getRange(5, 3, dataRowCount, 1).getValues();
+  const dValues = dataSheet.getRange(5, 4, dataRowCount, 1).getValues();
+  const eValues = dataSheet.getRange(5, 5, dataRowCount, 1).getValues();
+  const mValues = dataSheet.getRange(5, 13, dataRowCount, 1).getValues();
+
+  // B4: 이번 달
+  const firstDate = new Date(aValues[0][0]);
+  const month = firstDate.getMonth() + 1;
+  reportSheet.getRange("B4").setValue(month + "월");
+
+  // C4: 평균온도의 평균
+  const avgTemps = cValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
+  const avgTemp = avgTemps.length > 0 ? avgTemps.reduce((a, b) => a + b, 0) / avgTemps.length : 0;
+  reportSheet.getRange("C4").setValue(avgTemp);
+
+  // D4: 최대온도 중 최댓값
+  const maxTemps = dValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
+  const maxTemp = maxTemps.length > 0 ? Math.max(...maxTemps) : 0;
+  reportSheet.getRange("D4").setValue(maxTemp);
+
+  // E4: 최소온도 중 최솟값
+  const minTemps = eValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
+  const minTemp = minTemps.length > 0 ? Math.min(...minTemps) : 0;
+  reportSheet.getRange("E4").setValue(minTemp);
+
+  // F4: 강우량 합계
+  const rainfalls = mValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
+  const totalRainfall = rainfalls.reduce((a, b) => a + b, 0);
+  reportSheet.getRange("F4").setValue(totalRainfall);
+
+  // G4 & H4: 연속 24개 행 강우량 합 최댓값
+  const mNums = mValues.map(r => (r[0] !== "" && !isNaN(r[0])) ? Number(r[0]) : 0);
+
+  let maxSum = -Infinity;
+  const candidates = [];
+
+  for (let i = 0; i <= mNums.length - 24; i++) {
+    let sum = 0;
+    for (let j = i; j < i + 24; j++) {
+      sum += mNums[j];
+    }
+    if (sum > maxSum) maxSum = sum;
+    candidates.push({ startIdx: i, sum });
+  }
+
+  const topCandidates = candidates
+    .filter(c => c.sum === maxSum)
+    .map(c => {
+      let firstRainy = -1;
+      let lastRainy = -1;
+      for (let j = c.startIdx; j < c.startIdx + 24; j++) {
+        if (mNums[j] > 0) {
+          if (firstRainy === -1) firstRainy = j;
+          lastRainy = j;
+        }
+      }
+      const span = (firstRainy === -1) ? 0 : (lastRainy - firstRainy);
+      return { ...c, firstRainy, lastRainy, span };
+    });
+
+  topCandidates.sort((a, b) => a.span - b.span || a.startIdx - b.startIdx);
+  const best = topCandidates[0];
+
+  reportSheet.getRange("G4").setValue(maxSum);
+
+  if (best.firstRainy === -1) {
+    reportSheet.getRange("H4").setValue("강우 없음");
+  } else {
+    function formatDate(d) {
+      const mo = d.getMonth() + 1;
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${mo}/${day}`;
+    }
+    function formatTime(d) {
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    }
+
+    const earliest = new Date(aValues[best.firstRainy][0]);
+    const latest = new Date(aValues[best.lastRainy][0]);
+
+    const sameDay = earliest.getFullYear() === latest.getFullYear()
+                 && earliest.getMonth() === latest.getMonth()
+                 && earliest.getDate() === latest.getDate();
+
+    let displayText;
+    if (sameDay) {
+      displayText = `${formatDate(earliest)}\n${formatTime(earliest)} ~ ${formatTime(latest)}`;
+    } else {
+      displayText = `${formatDate(earliest)} ${formatTime(earliest)} ~\n${formatDate(latest)} ${formatTime(latest)}`;
+    }
+
+    const h4Range = reportSheet.getRange("H4");
+    h4Range.setValue(displayText);
+    h4Range.setWrap(true);
+  }
+
+  SpreadsheetApp.getUi().alert("✅ 보고용 표 작성 완료!");
+}
+
+// 폴더 내에서 키워드 포함 파일 검색 후 URL 반환
+function findFileUrl(searchKeyword, folderId) {
+  try {
+    const fileResult = Drive.Files.list({
+      q: `name contains '${searchKeyword}' and '${folderId}' in parents and trashed = false`,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+      fields: "files(id, name, webViewLink)"
+    });
+
+    if (!fileResult.files || fileResult.files.length === 0) {
+      Logger.log(`파일을 찾지 못했습니다: ${searchKeyword}`);
+      return null;
+    }
+
+    return fileResult.files[0].webViewLink;
+
+  } catch (e) {
+    Logger.log(`파일 검색 오류: ${e.message}`);
+    return null;
+  }
+}
+
+// DOCS 본문에서 특정 텍스트에 링크 적용
+function applyLinkToText(body, searchText, url, skipFirst) {
+  let found = body.findText(searchText);
+  if (skipFirst && found) {
+    found = body.findText(searchText, found);
+  }
+  if (!found) return false;
+  const startOffset = found.getStartOffset();
+  const endOffset = found.getEndOffsetInclusive();
+  found.getElement().asText().setLinkUrl(startOffset, endOffset, url);
+  return true;
+}
+
+function createWeatherReport() {
+  const TEMPLATE_ID = "10SAwz1skAVXBGJdr14I6OtSHsdoysNNhRkQ7ws5RxB8";
+  const WEATHER_FOLDER_ID = "1WFuBum-34qx8qvPgodkB7-AaNuPqk9PU";
+  const RIVER_FOLDER_ID = "1gVXRW61WeE_ZUV53tmqNwinLo39WMVT7";
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const dataSheet = ss.getSheetByName("기상관측 데이터");
+  const reportSheet = ss.getSheetByName("보고용 표");
+
+  if (!dataSheet || !reportSheet) {
+    SpreadsheetApp.getUi().alert("시트를 찾을 수 없습니다.");
+    return;
+  }
+
+  const firstDateVal = dataSheet.getRange("A5").getValue();
+  if (!firstDateVal) {
+    SpreadsheetApp.getUi().alert("기상관측 데이터 시트의 A5에 날짜가 없습니다.");
+    return;
+  }
+  const firstDate = new Date(firstDateVal);
+  const yyyy = firstDate.getFullYear();
+  const m = firstDate.getMonth() + 1;
+  const yy = String(yyyy).slice(-2);
+
+  const b4 = reportSheet.getRange("B4").getDisplayValue();
+  const c4 = reportSheet.getRange("C4").getDisplayValue();
+  const d4 = reportSheet.getRange("D4").getDisplayValue();
+  const e4 = reportSheet.getRange("E4").getDisplayValue();
+  const f4 = reportSheet.getRange("F4").getDisplayValue();
+  const g4 = reportSheet.getRange("G4").getDisplayValue();
+  const h4 = reportSheet.getRange("H4").getDisplayValue();
+
+  if (!b4) {
+    SpreadsheetApp.getUi().alert("보고용 표가 비어 있습니다.\n먼저 '보고용 표 작성'을 실행하세요.");
+    return;
+  }
+
+  // 핵심 키워드로 파일 검색
+  const weatherKeyword = `${yy}년 ${m}월 기상관측`;
+  const riverKeyword = `${yy}년 ${m}월 하천관측`;
+  const weatherUrl = findFileUrl(weatherKeyword, WEATHER_FOLDER_ID);
+  const riverUrl = findFileUrl(riverKeyword, RIVER_FOLDER_ID);
+
+  if (!weatherUrl) {
+    SpreadsheetApp.getUi().alert(`기상관측 파일을 찾지 못했습니다.\n검색 키워드: ${weatherKeyword}\n링크 없이 계속 진행합니다.`);
+  }
+  if (!riverUrl) {
+    SpreadsheetApp.getUi().alert(`하천유출 파일을 찾지 못했습니다.\n검색 키워드: ${riverKeyword}\n링크 없이 계속 진행합니다.`);
+  }
+
+  // 템플릿 복사 → 같은 폴더에 저장
+  const templateFile = DriveApp.getFileById(TEMPLATE_ID);
+  const folder = templateFile.getParents().next();
+  const docTitle = `[보고] ${yyyy}년 ${m}월 생수공장 기상관측시스템 및 하천유출시스템 작동상태`;
+  const newFile = templateFile.makeCopy(docTitle, folder);
+  const doc = DocumentApp.openById(newFile.getId());
+  const body = doc.getBody();
+
+  // 플레이스홀더 텍스트 치환
+  body.replaceText("\\{\\{YYYY\\}\\}", String(yyyy));
+  body.replaceText("\\{\\{M\\}\\}", String(m));
+
+  const header = doc.getHeader();
+  if (header) {
+    header.replaceText("\\{\\{YYYY\\}\\}", String(yyyy));
+    header.replaceText("\\{\\{M\\}\\}", String(m));
+  }
+
+  // "Click" 링크 적용: 첫 번째 → 기상관측, 두 번째 → 하천유출
+  if (weatherUrl) applyLinkToText(body, "Click", weatherUrl, false);
+  if (riverUrl) applyLinkToText(body, "Click", riverUrl, true);
+
+  // 표 찾기: 3행 7열 표
+  const tables = body.getTables();
+  let targetTable = null;
+  for (const table of tables) {
+    if (table.getNumRows() === 3 && table.getRow(0).getNumCells() >= 7) {
+      targetTable = table;
+      break;
+    }
+  }
+
+  if (!targetTable) {
+    doc.saveAndClose();
+    SpreadsheetApp.getUi().alert("템플릿에서 3행 7열 표를 찾지 못했습니다. 템플릿을 확인하세요.");
+    return;
+  }
+
+  const FONT_SIZE = 11;
+  const FONT_FAMILY = "맑은 고딕";
+
+  const dataRow = targetTable.getRow(2);
+  const values = [b4, c4, d4, e4, f4, g4, h4];
+
+  for (let i = 0; i < values.length; i++) {
+    const cell = dataRow.getCell(i);
+
+    let cellValue = values[i];
+    if (i === 6 && cellValue.includes("\n")) {
+      const lines = cellValue.split("\n");
+      const firstLineHasDate = /^\d+\/\d+\s/.test(lines[0]);
+      // non-breaking space(\u00A0)로 들여쓰기 - 일반 공백은 Docs 단락 시작에서 무시됨
+      const indent = firstLineHasDate
+        ? "\u00A0\u00A0\u00A0\u00A0" // 날짜 두 개: 4칸
+        : "\u00A0\u00A0\u00A0"; // 같은 날: 3칸
+      cellValue = lines[0] + "\n" + indent + lines[1];
+    }
+
+    const numParas = cell.getNumChildren();
+    for (let p = numParas - 1; p > 0; p--) {
+      cell.getChild(p).removeFromParent();
+    }
+    cell.getChild(0).asText().setText("");
+
+    const parts = cellValue.split("\n");
+    const mainText = cell.getChild(0).asText();
+    mainText.setText(parts[0]);
+    mainText.setFontSize(FONT_SIZE);
+    mainText.setFontFamily(FONT_FAMILY);
+
+    for (let p = 1; p < parts.length; p++) {
+      const newPara = cell.appendParagraph(parts[p]);
+      const newText = newPara.editAsText();
+      newText.setFontSize(FONT_SIZE);
+      newText.setFontFamily(FONT_FAMILY);
+    }
+  }
+
+  doc.saveAndClose();
+
+  const docUrl = newFile.getUrl();
+  SpreadsheetApp.getUi().alert(`✅ 보고서 생성 완료!\n\n${docTitle}\n\n${docUrl}`);
+}
