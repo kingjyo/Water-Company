@@ -18,10 +18,13 @@ function clearReport() {
   }
 
   const ui = SpreadsheetApp.getUi();
-  const response = ui.alert("초기화 확인", "보고용 표의 B4:H4 내용을 지우겠습니까?", ui.ButtonSet.YES_NO);
+  const response = ui.alert("초기화 확인", "보고용 표 내용을 지우겠습니까?", ui.ButtonSet.YES_NO);
 
   if (response === ui.Button.YES) {
-    reportSheet.getRange("B4:H4").clearContent();
+    reportSheet.getRange("D3:D5").clearContent();
+    reportSheet.getRange("C6:D14").clearContent();
+    reportSheet.getRange("D15:D17").clearContent();
+    reportSheet.showRows(6, 9);
     ui.alert("초기화 완료!");
   }
 }
@@ -48,99 +51,103 @@ function fillWeatherReport() {
   const cValues = dataSheet.getRange(5, 3, dataRowCount, 1).getValues();
   const dValues = dataSheet.getRange(5, 4, dataRowCount, 1).getValues();
   const eValues = dataSheet.getRange(5, 5, dataRowCount, 1).getValues();
+  const fValues = dataSheet.getRange(5, 6, dataRowCount, 1).getValues();
+  const gValues = dataSheet.getRange(5, 7, dataRowCount, 1).getValues();
   const mValues = dataSheet.getRange(5, 13, dataRowCount, 1).getValues();
 
-  // B4: 이번 달
-  const firstDate = new Date(aValues[0][0]);
-  const month = firstDate.getMonth() + 1;
-  reportSheet.getRange("B4").setValue(month + "월");
-
-  // C4: 평균온도의 평균
-  const avgTemps = cValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
-  const avgTemp = avgTemps.length > 0 ? avgTemps.reduce((a, b) => a + b, 0) / avgTemps.length : 0;
-  reportSheet.getRange("C4").setValue(avgTemp);
-
-  // D4: 최대온도 중 최댓값
-  const maxTemps = dValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
-  const maxTemp = maxTemps.length > 0 ? Math.max(...maxTemps) : 0;
-  reportSheet.getRange("D4").setValue(maxTemp);
-
-  // E4: 최소온도 중 최솟값
-  const minTemps = eValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
-  const minTemp = minTemps.length > 0 ? Math.min(...minTemps) : 0;
-  reportSheet.getRange("E4").setValue(minTemp);
-
-  // F4: 강우량 합계
   const mNums = mValues.map(r => (r[0] !== "" && !isNaN(r[0])) ? Number(r[0]) : 0);
-  const totalRainfall = mNums.reduce((a, b) => a + b, 0);
-  reportSheet.getRange("F4").setValue(totalRainfall);
 
-  // G4 & H4: 연속 강우 이벤트 중 합계가 가장 큰 구간
-  // 0 초과값이 연속되는 구간을 이벤트로 묶기
+  function toFixed1(v) { return v.toFixed(1); }
+  function toInt(v) { return Math.round(v).toString(); }
+
+  // D3: 평균기온 (소수점 1자리, ℃)
+  const avgTemps = cValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
+  const avgTemp = avgTemps.length > 0
+    ? toFixed1(avgTemps.reduce((a, b) => a + b, 0) / avgTemps.length)
+    : "0.0";
+  reportSheet.getRange("D3").setValue(avgTemp + " ℃");
+
+  // D4: 최고기온 (소수점 1자리, ℃)
+  const maxTemps = dValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
+  const maxTemp = maxTemps.length > 0 ? toFixed1(Math.max(...maxTemps)) : "0.0";
+  reportSheet.getRange("D4").setValue(maxTemp + " ℃");
+
+  // D5: 최저기온 (소수점 1자리, ℃)
+  const minTemps = eValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
+  const minTemp = minTemps.length > 0 ? toFixed1(Math.min(...minTemps)) : "0.0";
+  reportSheet.getRange("D5").setValue(minTemp + " ℃");
+
+  // D15: 강우량 월 합계 (정수, mm)
+  const totalRainfall = mNums.reduce((a, b) => a + b, 0);
+  reportSheet.getRange("D15").setValue(toInt(totalRainfall) + " mm");
+
+  // D16: 평균 습도 (소수점 1자리, %)
+  const humidities = fValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
+  const avgHumidity = humidities.length > 0
+    ? toFixed1(humidities.reduce((a, b) => a + b, 0) / humidities.length)
+    : "0.0";
+  reportSheet.getRange("D16").setValue(avgHumidity + " %");
+
+  // D17: 평균 지중온도 (소수점 1자리, ℃)
+  const groundTemps = gValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
+  const avgGroundTemp = groundTemps.length > 0
+    ? toFixed1(groundTemps.reduce((a, b) => a + b, 0) / groundTemps.length)
+    : "0.0";
+  reportSheet.getRange("D17").setValue(avgGroundTemp + " ℃");
+
+  // 연속 강우 이벤트 묶기
   const events = [];
   let inRain = false;
   let eventStart = -1;
 
   for (let i = 0; i < mNums.length; i++) {
     if (mNums[i] > 0 && !inRain) {
-      // 강우 시작
       inRain = true;
       eventStart = i;
     } else if (mNums[i] <= 0 && inRain) {
-      // 강우 종료 → 이벤트 저장
       let sum = 0;
       for (let j = eventStart; j < i; j++) sum += mNums[j];
       events.push({ startIdx: eventStart, endIdx: i - 1, sum });
       inRain = false;
     }
   }
-  // 데이터 끝까지 비가 계속 내리는 경우
   if (inRain) {
     let sum = 0;
     for (let j = eventStart; j < mNums.length; j++) sum += mNums[j];
     events.push({ startIdx: eventStart, endIdx: mNums.length - 1, sum });
   }
 
-  if (events.length === 0) {
-    reportSheet.getRange("G4").setValue(0);
-    reportSheet.getRange("H4").setValue("강우 없음");
-    SpreadsheetApp.getUi().alert("✅ 보고용 표 작성 완료!");
-    return;
+  // 30mm 이상 이벤트만 필터링 후 큰 값 순 정렬
+  const heavyRains = events
+    .filter(e => e.sum >= 30)
+    .sort((a, b) => b.sum - a.sum)
+    .slice(0, 9);
+
+  // 한글 날짜 포맷
+  function formatDateKo(d) {
+    return `${d.getMonth() + 1}월 ${d.getDate()}일 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   }
 
-  // 합계 최댓값 이벤트 선택 (동일 시 먼저 발생한 이벤트)
-  events.sort((a, b) => b.sum - a.sum || a.startIdx - b.startIdx);
-  const best = events[0];
+  // C6:D14 초기화 후 데이터 입력
+  reportSheet.getRange("C6:D14").clearContent();
+  reportSheet.showRows(6, 9);
 
-  reportSheet.getRange("G4").setValue(best.sum);
-
-  // H4: 이벤트 첫 시각 ~ 마지막 시각
-  function formatDate(d) {
-    const mo = d.getMonth() + 1;
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${mo}/${day}`;
-  }
-  function formatTime(d) {
-    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  for (let i = 0; i < heavyRains.length; i++) {
+    const e = heavyRains[i];
+    const earliest = new Date(aValues[e.startIdx][0]);
+    const latest = new Date(aValues[e.endIdx][0]);
+    const rangeStr = `${formatDateKo(earliest)} ~ ${formatDateKo(latest)}`;
+    const sumStr = toInt(e.sum) + " mm"; // 정수 표현
+    reportSheet.getRange(6 + i, 3).setValue(rangeStr);
+    reportSheet.getRange(6 + i, 4).setValue(sumStr);
   }
 
-  const earliest = new Date(aValues[best.startIdx][0]);
-  const latest = new Date(aValues[best.endIdx][0]);
-
-  const sameDay = earliest.getFullYear() === latest.getFullYear()
-               && earliest.getMonth() === latest.getMonth()
-               && earliest.getDate() === latest.getDate();
-
-  let displayText;
-  if (sameDay) {
-    displayText = `${formatDate(earliest)}\n${formatTime(earliest)} ~ ${formatTime(latest)}`;
-  } else {
-    displayText = `${formatDate(earliest)} ${formatTime(earliest)} ~\n${formatDate(latest)} ${formatTime(latest)}`;
+  // 데이터 없는 나머지 행 숨기기
+  if (heavyRains.length < 9) {
+    const hideStart = 6 + heavyRains.length;
+    const hideCount = 9 - heavyRains.length;
+    reportSheet.hideRows(hideStart, hideCount);
   }
-
-  const h4Range = reportSheet.getRange("H4");
-  h4Range.setValue(displayText);
-  h4Range.setWrap(true);
 
   SpreadsheetApp.getUi().alert("✅ 보고용 표 작성 완료!");
 }
@@ -181,6 +188,21 @@ function applyLinkToText(body, searchText, url, skipFirst) {
   return true;
 }
 
+// Docs 표 셀에 값 쓰기 (13pt, 맑은 고딕, 가운데 정렬)
+function writeDocCell(tableRow, colIdx, text, fontSize, fontFamily) {
+  const cell = tableRow.getCell(colIdx);
+  const numParas = cell.getNumChildren();
+  for (let p = numParas - 1; p > 0; p--) {
+    cell.getChild(p).removeFromParent();
+  }
+  const para = cell.getChild(0).asParagraph();
+  const textEl = para.editAsText();
+  textEl.setText(text);
+  textEl.setFontSize(fontSize);
+  textEl.setFontFamily(fontFamily);
+  para.setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+}
+
 function createWeatherReport() {
   const TEMPLATE_ID = "10SAwz1skAVXBGJdr14I6OtSHsdoysNNhRkQ7ws5RxB8";
   const WEATHER_FOLDER_ID = "1WFuBum-34qx8qvPgodkB7-AaNuPqk9PU";
@@ -205,33 +227,38 @@ function createWeatherReport() {
   const m = firstDate.getMonth() + 1;
   const yy = String(yyyy).slice(-2);
 
-  const b4 = reportSheet.getRange("B4").getDisplayValue();
-  const c4 = reportSheet.getRange("C4").getDisplayValue();
+  // 보고용 표 결과값 읽기
+  const d3 = reportSheet.getRange("D3").getDisplayValue();
   const d4 = reportSheet.getRange("D4").getDisplayValue();
-  const e4 = reportSheet.getRange("E4").getDisplayValue();
-  const f4 = reportSheet.getRange("F4").getDisplayValue();
-  const g4 = reportSheet.getRange("G4").getDisplayValue();
-  const h4 = reportSheet.getRange("H4").getDisplayValue();
+  const d5 = reportSheet.getRange("D5").getDisplayValue();
+  const d15 = reportSheet.getRange("D15").getDisplayValue();
+  const d16 = reportSheet.getRange("D16").getDisplayValue();
+  const d17 = reportSheet.getRange("D17").getDisplayValue();
 
-  if (!b4) {
+  // 30mm 이상 강우 데이터 읽기 (표시된 행만)
+  const rainRows = [];
+  for (let row = 6; row <= 14; row++) {
+    if (reportSheet.isRowHiddenByUser(row)) continue;
+    const period = reportSheet.getRange(row, 3).getDisplayValue();
+    const amount = reportSheet.getRange(row, 4).getDisplayValue();
+    if (period || amount) rainRows.push({ period, amount });
+  }
+
+  if (!d3) {
     SpreadsheetApp.getUi().alert("보고용 표가 비어 있습니다.\n먼저 '보고용 표 작성'을 실행하세요.");
     return;
   }
 
-  // 핵심 키워드로 파일 검색
+  // 파일 검색
   const weatherKeyword = `${yy}년 ${m}월 기상관측`;
   const riverKeyword = `${yy}년 ${m}월 하천관측`;
   const weatherUrl = findFileUrl(weatherKeyword, WEATHER_FOLDER_ID);
   const riverUrl = findFileUrl(riverKeyword, RIVER_FOLDER_ID);
 
-  if (!weatherUrl) {
-    SpreadsheetApp.getUi().alert(`기상관측 파일을 찾지 못했습니다.\n검색 키워드: ${weatherKeyword}\n링크 없이 계속 진행합니다.`);
-  }
-  if (!riverUrl) {
-    SpreadsheetApp.getUi().alert(`하천유출 파일을 찾지 못했습니다.\n검색 키워드: ${riverKeyword}\n링크 없이 계속 진행합니다.`);
-  }
+  if (!weatherUrl) SpreadsheetApp.getUi().alert(`기상관측 파일을 찾지 못했습니다.\n검색 키워드: ${weatherKeyword}\n링크 없이 계속 진행합니다.`);
+  if (!riverUrl) SpreadsheetApp.getUi().alert(`하천유출 파일을 찾지 못했습니다.\n검색 키워드: ${riverKeyword}\n링크 없이 계속 진행합니다.`);
 
-  // 템플릿 복사 → 같은 폴더에 저장
+  // 템플릿 복사
   const templateFile = DriveApp.getFileById(TEMPLATE_ID);
   const folder = templateFile.getParents().next();
   const docTitle = `[보고] ${yyyy}년 ${m}월 생수공장 기상관측시스템 및 하천유출시스템 작동상태`;
@@ -239,25 +266,24 @@ function createWeatherReport() {
   const doc = DocumentApp.openById(newFile.getId());
   const body = doc.getBody();
 
-  // 플레이스홀더 텍스트 치환
+  // 플레이스홀더 치환
   body.replaceText("\\{\\{YYYY\\}\\}", String(yyyy));
   body.replaceText("\\{\\{M\\}\\}", String(m));
-
-  const header = doc.getHeader();
-  if (header) {
-    header.replaceText("\\{\\{YYYY\\}\\}", String(yyyy));
-    header.replaceText("\\{\\{M\\}\\}", String(m));
+  const docHeader = doc.getHeader();
+  if (docHeader) {
+    docHeader.replaceText("\\{\\{YYYY\\}\\}", String(yyyy));
+    docHeader.replaceText("\\{\\{M\\}\\}", String(m));
   }
 
-  // "Click" 링크 적용: 첫 번째 → 기상관측, 두 번째 → 하천유출
+  // Click 링크 적용
   if (weatherUrl) applyLinkToText(body, "Click", weatherUrl, false);
   if (riverUrl) applyLinkToText(body, "Click", riverUrl, true);
 
-  // 표 찾기: 3행 7열 표
+  // 보고용 표 찾기: 16행 이상인 첫 번째 표
   const tables = body.getTables();
   let targetTable = null;
   for (const table of tables) {
-    if (table.getNumRows() === 3 && table.getRow(0).getNumCells() >= 7) {
+    if (table.getNumRows() >= 16) {
       targetTable = table;
       break;
     }
@@ -265,48 +291,45 @@ function createWeatherReport() {
 
   if (!targetTable) {
     doc.saveAndClose();
-    SpreadsheetApp.getUi().alert("템플릿에서 3행 7열 표를 찾지 못했습니다. 템플릿을 확인하세요.");
+    SpreadsheetApp.getUi().alert("템플릿에서 보고용 표를 찾지 못했습니다.");
     return;
   }
 
-  const FONT_SIZE = 11;
-  const FONT_FAMILY = "맑은 고딕";
+  const FS = 13;
+  const FF = "Malgun Gothic";
 
-  const dataRow = targetTable.getRow(2);
-  const values = [b4, c4, d4, e4, f4, g4, h4];
+  // 표 구조 (0-based):
+  // 0: 헤더
+  // 1: 평균기온, 2: 최고기온, 3: 최저기온
+  // 4~12: 강우량 이벤트 행 (9행)
+  // 13: 월합계, 14: 평균습도, 15: 평균지중온도
 
-  for (let i = 0; i < values.length; i++) {
-    const cell = dataRow.getCell(i);
+  // 1단계: 기온 결과 입력
+  writeDocCell(targetTable.getRow(1), 2, d3, FS, FF);
+  writeDocCell(targetTable.getRow(2), 2, d4, FS, FF);
+  writeDocCell(targetTable.getRow(3), 2, d5, FS, FF);
 
-    let cellValue = values[i];
-    if (i === 6 && cellValue.includes("\n")) {
-      const lines = cellValue.split("\n");
-      const firstLineHasDate = /^\d+\/\d+\s/.test(lines[0]);
-      const indent = firstLineHasDate
-        ? "\u00A0\u00A0\u00A0\u00A0\u00A0" // 날짜 두 개: 5칸
-        : "\u00A0\u00A0\u00A0"; // 같은 날: 3칸
-      cellValue = lines[0] + "\n" + indent + lines[1];
-    }
-
-    const numParas = cell.getNumChildren();
-    for (let p = numParas - 1; p > 0; p--) {
-      cell.getChild(p).removeFromParent();
-    }
-    cell.getChild(0).asText().setText("");
-
-    const parts = cellValue.split("\n");
-    const mainText = cell.getChild(0).asText();
-    mainText.setText(parts[0]);
-    mainText.setFontSize(FONT_SIZE);
-    mainText.setFontFamily(FONT_FAMILY);
-
-    for (let p = 1; p < parts.length; p++) {
-      const newPara = cell.appendParagraph(parts[p]);
-      const newText = newPara.editAsText();
-      newText.setFontSize(FONT_SIZE);
-      newText.setFontFamily(FONT_FAMILY);
-    }
+  // 2단계: 강우량 이벤트 행 입력 (데이터 있는 행만)
+  for (let i = 0; i < rainRows.length; i++) {
+    writeDocCell(targetTable.getRow(4 + i), 1, rainRows[i].period, FS, FF);
+    writeDocCell(targetTable.getRow(4 + i), 2, rainRows[i].amount, FS, FF);
   }
+
+  // 3단계: 빈 강우량 행만 뒤에서부터 삭제 (4+rainRows.length ~ 12번 행)
+  // 삭제 후 13행(월합계), 14행(습도), 15행(지중온도)는 그대로 유지됨
+  for (let i = 8; i >= rainRows.length; i--) {
+    targetTable.removeRow(4 + i);
+  }
+
+  // 4단계: 삭제 후 재계산된 행 인덱스로 월합계/습도/지중온도 입력
+  // 강우량 행 삭제 후 남은 행 수: 1(헤더) + 3(기온) + rainRows.length(강우) + 1(월합계) + 1(습도) + 1(지중온도)
+  const monthSumRowIdx = 1 + 3 + rainRows.length; // 월합계 행
+  const humidityRowIdx = monthSumRowIdx + 1; // 습도 행
+  const groundTempRowIdx = monthSumRowIdx + 2; // 지중온도 행
+
+  writeDocCell(targetTable.getRow(monthSumRowIdx), 2, d15, FS, FF);
+  writeDocCell(targetTable.getRow(humidityRowIdx), 2, d16, FS, FF);
+  writeDocCell(targetTable.getRow(groundTempRowIdx), 2, d17, FS, FF);
 
   doc.saveAndClose();
 
