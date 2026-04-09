@@ -1,0 +1,241 @@
+/**
+ * =====================================================================
+ * 생수공장 주요 자재 재고 현황 자동화 GAS
+ * =====================================================================
+ *
+ * [동작 방식]
+ * 1. 어제 날짜 시트("X월 Y-1일")를 복사 → 오늘 날짜 시트("X월 Y일") 생성
+ *    (이미 존재하면 생성 생략, 값만 업데이트)
+ * 2. 각 생산일지의 어제(MMDD) 시트에서 마감 재고를 읽어 F4:F22 에 입력
+ * 3. B2 에 "yy.m.d 기준" 형식의 오늘 날짜 입력
+ *
+ * [소스 스프레드시트]
+ * 1. 제품 생산일지    — 1WymbNXGMa8EqZmOmm6l2BPbcQeXlvK_pIfzveYNbyg0
+ * 2. 반제품 생산일지  — 1VCLbzaVfMGuu5WPAuaSumpLWZKPmnfkygpyPqzAKoV4
+ * 3. 탄산음료 생산일지 — 1V2CNYoRY8AaQAcTtiSfHLZKNNI2_Ud9no2qpE5ptYHs
+ */
+
+// =====================================================================
+// 메뉴
+// =====================================================================
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('재고현황')
+    .addItem('📦 현재고 불러오기', 'updateInventory')
+    .addSeparator()
+    .addItem('도움말', 'showInventoryHelp')
+    .addToUi();
+}
+
+// =====================================================================
+// 소스 스프레드시트 ID 상수
+// =====================================================================
+
+const SS_ID_PROD = '1WymbNXGMa8EqZmOmm6l2BPbcQeXlvK_pIfzveYNbyg0'; // 제품 생산일지
+const SS_ID_SEMI = '1VCLbzaVfMGuu5WPAuaSumpLWZKPmnfkygpyPqzAKoV4'; // 반제품 생산일지
+const SS_ID_CARB = '1V2CNYoRY8AaQAcTtiSfHLZKNNI2_Ud9no2qpE5ptYHs'; // 탄산음료 생산일지
+
+// =====================================================================
+// 📦 현재고 불러오기 (메인 함수)
+// =====================================================================
+
+function updateInventory() {
+  const ui = SpreadsheetApp.getUi();
+  const logs = [];
+
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // ── 날짜 계산 ────────────────────────────────────────────────────
+    const today     = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+
+    // 소스 시트명 (MMDD): 각 생산일지의 어제 시트
+    const srcMM = String(yesterday.getMonth() + 1).padStart(2, '0');
+    const srcDD = String(yesterday.getDate()).padStart(2, '0');
+    const srcSheetName = srcMM + srcDD; // 예: "0408"
+
+    // 현재 스프레드시트 시트명: "X월 Y일"
+    const todaySheetName     = `${today.getMonth() + 1}월 ${today.getDate()}일`;
+    const yesterdaySheetName = `${yesterday.getMonth() + 1}월 ${yesterday.getDate()}일`;
+
+    // B2 날짜 라벨
+    const yy = String(today.getFullYear()).slice(2);
+    const m  = String(today.getMonth() + 1);
+    const d  = String(today.getDate());
+    const dateLabel = `${yy}.${m}.${d} 기준`;
+
+    // ── 오늘 시트 생성 또는 기존 시트 사용 ───────────────────────────
+    let todaySheet = ss.getSheetByName(todaySheetName);
+
+    if (todaySheet) {
+      // 이미 존재하면 생성 생략
+      logs.push(`ℹ️ "${todaySheetName}" 시트 이미 존재 → 값만 업데이트`);
+    } else {
+      // 어제 시트를 양식(템플릿)으로 복사
+      let templateSheet = ss.getSheetByName(yesterdaySheetName);
+
+      if (!templateSheet) {
+        // 어제 시트가 없으면 스프레드시트의 마지막 시트를 사용
+        const allSheets = ss.getSheets();
+        templateSheet = allSheets[allSheets.length - 1];
+        logs.push(` ⚠️ "${yesterdaySheetName}" 시트 없음 → "${templateSheet.getName()}" 양식 기준으로 복사`);
+      } else {
+        logs.push(` 📋 "${yesterdaySheetName}" 시트 양식 복사`);
+      }
+
+      todaySheet = templateSheet.copyTo(ss);
+      todaySheet.setName(todaySheetName);
+
+      // 어제 시트 바로 앞에 배치 (최신 날짜가 앞으로 오도록)
+      ss.setActiveSheet(todaySheet);
+      ss.moveActiveSheet(templateSheet.getIndex());
+
+      logs.push(` ✅ "${todaySheetName}" 시트 생성 완료`);
+    }
+
+    // ── Source 1: 제품 생산일지 ──────────────────────────────────────
+    logs.push('');
+    logs.push('[ Source 1 ] 제품 생산일지');
+    const { sheet: prodSheet, sheetName: prodDate } =
+      findMostRecentSheet(SpreadsheetApp.openById(SS_ID_PROD), '제품 생산일지');
+    // ※ GLUE: H39:H40 병합 셀 → 상단 H39 로 읽음
+    const prodMap = {
+      F5:  prodSheet.getRange('H41').getValue(), // PET SHEET
+      F6:  prodSheet.getRange('H42').getValue(), // LID KE
+      F7:  prodSheet.getRange('H44').getValue(), // LID OAL
+      F8:  prodSheet.getRange('H24').getValue(), // 18.9L CAP
+      F9:  prodSheet.getRange('H29').getValue(), // 18.9L CAP SEAL
+      F10: prodSheet.getRange('H39').getValue(), // GLUE (병합셀 상단)
+      F13: prodSheet.getRange('H32').getValue(), // 1.5L(황) 박스
+      F14: prodSheet.getRange('H33').getValue(), // 1.5L(백) 박스
+      F15: prodSheet.getRange('H34').getValue(), // 0.5L(황) 박스
+      F16: prodSheet.getRange('H35').getValue(), // 0.5L(백) 박스
+      F17: prodSheet.getRange('H36').getValue(), // 0.33L(황) 박스
+      F18: prodSheet.getRange('H37').getValue(), // 0.33L(백) 박스
+      F19: prodSheet.getRange('H38').getValue(), // 0.12L 박스
+    };
+    logs.push(` ✅ [${prodDate}] 시트 사용 → 13개 항목 읽기 완료`);
+
+    // ── Source 2: 반제품 생산일지 ────────────────────────────────────
+    logs.push('[ Source 2 ] 반제품 생산일지');
+    const { sheet: semiSheet, sheetName: semiDate } =
+      findMostRecentSheet(SpreadsheetApp.openById(SS_ID_SEMI), '반제품 생산일지');
+    const semiMap = {
+      F4:  semiSheet.getRange('I16').getValue(), // PET RESIN
+      F11: semiSheet.getRange('I17').getValue(), // HDPE
+      F12: semiSheet.getRange('I18').getValue(), // AA 소거제
+    };
+    logs.push(` ✅ [${semiDate}] 시트 사용 → 3개 항목 읽기 완료`);
+
+    // ── Source 3: 탄산음료 생산일지 ──────────────────────────────────
+    logs.push('[ Source 3 ] 탄산음료 생산일지');
+    const { sheet: carbSheet, sheetName: carbDate } =
+      findMostRecentSheet(SpreadsheetApp.openById(SS_ID_CARB), '탄산음료 생산일지');
+    const carbMap = {
+      F20: carbSheet.getRange('H20').getValue(), // 0.19L 하프트레이
+      F21: carbSheet.getRange('H17').getValue(), // 0.19L CAN
+      F22: carbSheet.getRange('H18').getValue(), // 0.19L END
+    };
+    logs.push(` ✅ [${carbDate}] 시트 사용 → 3개 항목 읽기 완료`);
+
+    // ── 오늘 시트에 값 입력 ───────────────────────────────────────────
+    // B2: 날짜 라벨
+    todaySheet.getRange('B2').setValue(dateLabel);
+
+    // F4:F22 전체 입력
+    const allMap = { ...prodMap, ...semiMap, ...carbMap };
+    for (const [cell, value] of Object.entries(allMap)) {
+      todaySheet.getRange(cell).setValue(value == null ? '' : value);
+    }
+
+    SpreadsheetApp.flush();
+
+    ui.alert(
+      `📦 현재고 불러오기 완료\n\n` +
+      `• 오늘 시트: "${todaySheetName}"\n` +
+      `• B2: ${dateLabel}\n` +
+      `• F4:F22: 19개 항목 입력 완료\n\n` +
+      `--- 진행 로그 ---\n` +
+      logs.join('\n')
+    );
+
+  } catch (e) {
+    ui.alert('❌ 오류 발생\n\n' + e.message + '\n\n--- 진행 로그 ---\n' + logs.join('\n'));
+    console.error(e);
+  }
+}
+
+// =====================================================================
+// 🔧 유틸 함수
+// =====================================================================
+
+/**
+ * 지정한 스프레드시트에서 오늘 기준으로 가장 최근 MMDD 시트를 탐색해 반환.
+ * 어제부터 최대 maxDaysBack 일 전까지 역방향으로 탐색.
+ * 해당 범위 내 시트가 없으면 에러 throw.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss  열린 스프레드시트 객체
+ * @param {string} ssLabel  에러 메시지용 이름
+ * @param {number} maxDaysBack  최대 탐색 일수 (기본 14일)
+ * @returns {{ sheet: Sheet, sheetName: string }}
+ */
+function findMostRecentSheet(ss, ssLabel, maxDaysBack = 14) {
+  const today = new Date();
+  for (let i = 1; i <= maxDaysBack; i++) {
+    const target = new Date(today);
+    target.setDate(today.getDate() - i);
+    const mm = String(target.getMonth() + 1).padStart(2, '0');
+    const dd = String(target.getDate()).padStart(2, '0');
+    const sheetName = mm + dd; // MMDD
+    const s = ss.getSheetByName(sheetName);
+    if (s) return { sheet: s, sheetName };
+  }
+  throw new Error(
+    `[${ssLabel}] 최근 ${maxDaysBack}일 이내 MMDD 시트를 찾을 수 없습니다.\n` +
+    `시트 목록: ${ss.getSheets().map(sh => sh.getName()).join(', ')}`
+  );
+}
+
+// =====================================================================
+// 도움말
+// =====================================================================
+
+function showInventoryHelp() {
+  SpreadsheetApp.getUi().alert(
+    '주요 자재 재고 현황 — 사용법\n\n' +
+    '【 📦 현재고 불러오기 】\n' +
+    ' 실행하면 두 가지 작업이 순서대로 진행됩니다.\n\n' +
+    ' 1️⃣ 오늘 날짜 시트 생성\n' +
+    '    어제 시트("X월 Y-1일")를 양식으로 복사하여\n' +
+    '    "X월 Y일" 시트를 자동 생성합니다.\n' +
+    '    (이미 존재하면 생성 생략, 값만 업데이트)\n\n' +
+    ' 2️⃣ 재고 데이터 입력\n' +
+    '    어제(MMDD) 마감 재고를 3개 생산일지에서 읽어\n' +
+    '    오늘 시트의 B2, F4:F22 에 입력합니다.\n\n' +
+    '【 입력 위치 】\n' +
+    '  B2     : yy.m.d 기준 (오늘 날짜)\n' +
+    '  F4     : PET RESIN       ← 반제품 I16\n' +
+    '  F5     : PET SHEET       ← 제품 H41\n' +
+    '  F6     : KE LID          ← 제품 H42\n' +
+    '  F7     : OAL LID         ← 제품 H44\n' +
+    '  F8     : 18.9L CAP       ← 제품 H24\n' +
+    '  F9     : 18.9L CAP SEAL  ← 제품 H29\n' +
+    '  F10    : GLUE            ← 제품 H39 (병합셀)\n' +
+    '  F11    : HDPE            ← 반제품 I17\n' +
+    '  F12    : AA 소거제       ← 반제품 I18\n' +
+    '  F13    : 1.5L(황) 박스   ← 제품 H32\n' +
+    '  F14    : 1.5L(백) 박스   ← 제품 H33\n' +
+    '  F15    : 0.5L(황) 박스   ← 제품 H34\n' +
+    '  F16    : 0.5L(백) 박스   ← 제품 H35\n' +
+    '  F17    : 0.33L(황) 박스  ← 제품 H36\n' +
+    '  F18    : 0.33L(백) 박스  ← 제품 H37\n' +
+    '  F19    : 0.12L 박스      ← 제품 H38\n' +
+    '  F20    : 0.19L 하프트레이 ← 탄산 H20\n' +
+    '  F21    : 0.19L CAN       ← 탄산 H17\n' +
+    '  F22    : 0.19L END       ← 탄산 H18\n\n' +
+    '※ 해당 날짜 시트가 없으면 에러 메시지에 시트 목록이 표시됩니다.'
+  );
+}
