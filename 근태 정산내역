@@ -301,8 +301,10 @@ function createReportDoc() {
     // ── 1. X월 결과보고 A12:M12 — getDisplayValues() 로 서식 그대로 ─
     const resultSheetName = findSheetByPattern(destSS, /^\d+월 결과보고$/);
     if (!resultSheetName) throw new Error('"X월 결과보고" 시트를 찾을 수 없습니다.');
-    const workRow = destSS.getSheetByName(resultSheetName)
-                          .getRange('A12:M12').getDisplayValues()[0];
+    const resultSheet = destSS.getSheetByName(resultSheetName);
+    const workRow = resultSheet.getRange('A12:M12').getDisplayValues()[0];
+    // D18: 간식 식수 (서식 그대로)
+    const valD18 = resultSheet.getRange('D18').getDisplayValue();
 
     // ── 2. 휴무 소진내역 X월 행 + 누계 행 ───────────────────────────
     const leaveSheetName = findSheetByPattern(destSS, /^휴무 소진내역$/);
@@ -349,6 +351,7 @@ function createReportDoc() {
     body.replaceText('\\{\\{YY\\}\\}', YY);
     body.replaceText('\\{\\{X\\+1\\}\\}', String(nextMonth));
     body.replaceText('\\{\\{X\\}\\}', String(currentMonth));
+    body.replaceText('\\{\\{간식\\}\\}', String(valD18));
 
     // ── 표 데이터 채우기 ─────────────────────────────────────────────
     const tables = body.getTables();
