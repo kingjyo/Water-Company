@@ -1,0 +1,91 @@
+/**
+ * 근태 코드를 지정된 규칙으로 변환하고 가운데 정렬까지 처리합니다.
+ * 메뉴: 확장 프로그램 → 근태 코드 변환 → 코드 변환 실행
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('근태 코드 변환')
+    .addItem('코드 변환 실행', 'replaceShiftCodes')
+    .addToUi();
+}
+
+function replaceShiftCodes() {
+  // 변환 규칙 정의
+  const replacementMap = {
+    "년": "V01",
+    "무": "G03",
+    "휴": "G01",
+    "조": "H61",
+    "연": "L11",
+    "야": "R86",
+    "공": "G02",
+    "퇴": "K01",
+    "출": "T01",
+    "예": "E04",
+    "민": "E05",
+    "상": "T08",
+  };
+  
+  const defaultValue = "I61";
+
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+  
+  // 3행부터 데이터가 있어야 함
+  const numRows = lastRow - 2;
+  if (numRows <= 0) {
+    SpreadsheetApp.getUi().alert("3행부터 데이터가 존재해야 합니다.");
+    return;
+  }
+  
+  // A열 : 사번 (3행부터)
+  const idRange = sheet.getRange(3, 1, numRows, 1);
+  const idValues = idRange.getValues();
+
+  // B열부터 마지막 열까지 : 근태 데이터
+  const dataRange = sheet.getRange(3, 2, numRows, lastColumn - 1);
+  const dataValues = dataRange.getValues();
+  
+  let newValues = [];
+
+  for (let i = 0; i < dataValues.length; i++) {
+    let row = [];
+    const empId = String(idValues[i][0]).trim();
+    const isRowWithId = (empId !== "");
+    
+    for (let j = 0; j < dataValues[i].length; j++) {
+      let cellValue = dataValues[i][j];
+      let newValue = cellValue;
+      
+      // 사번이 있는 행(정상 근태 행)에서만 변환 적용
+      if (isRowWithId) {
+        if (typeof cellValue === 'string' || typeof cellValue === 'number') {
+          const key = String(cellValue).trim();
+          
+          if (key !== "" && replacementMap.hasOwnProperty(key)) {
+            newValue = replacementMap[key];
+          } else {
+            newValue = defaultValue;
+          }
+        }
+      }
+      
+      row.push(newValue);
+    }
+    newValues.push(row);
+  }
+
+  // 1. 변환된 값 입력
+  dataRange.setValues(newValues);
+  
+  // 2. 가운데 정렬 적용
+  dataRange.setHorizontalAlignment("center");
+
+  // 완료 알림
+  SpreadsheetApp.getUi().alert(
+    "근태 코드 변환이 완료되었습니다!\n\n" +
+    "• 변환 규칙이 적용되었습니다.\n" +
+    "• 대상 셀 전체 가운데 정렬 처리됨"
+  );
+}
