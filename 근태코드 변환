@@ -1,91 +1,351 @@
 /**
- * 근태 코드를 지정된 규칙으로 변환하고 가운데 정렬까지 처리합니다.
- * 메뉴: 확장 프로그램 → 근태 코드 변환 → 코드 변환 실행
+ * =========================================================================
+ * 근태 코드 변환 + 근무계획 가져오기
+ * =========================================================================
+ *
+ * 【 메뉴 구성 】
+ *  근태 코드 변환
+ *  ├─ 📥 근무계획 가져오기 + 코드 변환  ← 주 기능 (원터치)
+ *  └─ 코드 변환만 실행                  ← 기존 기능 (월 기반 범위 적용)
+ *
+ * 【 스프레드시트 구조 가정 】
+ *  - B1 (병합셀): "2026년 4월" 형식으로 연/월 기입
+ *  - 2행: 날짜 헤더 (B2=1일, C2=2일, … AF2=31일)
+ *  - 3행~: A열=사번, B열~=근태데이터 (B=1일, C=2일, …)
+ *
+ * 【 근무계획 스프레드시트 구조 가정 】
+ *  - 시트명: "4월", "3월" 등
+ *  - G3:AK3: 날짜 행 (1, 2, 3, …)
+ *  - C5~: 작업자 이름 (A~C 병합셀)
+ *  - G5~: 근태 데이터 (연/야/공/퇴/출/예/민/상 등)
+ *  - A~C 병합셀에 "계" 가 있는 행 → 그 직전 행까지 데이터
  */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 상수
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 근무계획 스프레드시트 ID */
+const SOURCE_SS_ID = '12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY';
+
+/** 근태 코드 변환 규칙 */
+const REPLACEMENT_MAP = {
+  "년": "V01",
+  "무": "G03",
+  "휴": "G01",
+  "조": "H61",
+  "연": "L11",
+  "야": "R86",
+  "공": "G02",
+  "퇴": "K01",
+  "출": "T01",
+  "예": "E04",
+  "민": "E05",
+  "상": "T08",
+};
+
+/** 변환 규칙에 없는 코드에 적용할 기본값 */
+const DEFAULT_VALUE = "I61";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 메뉴
+// ─────────────────────────────────────────────────────────────────────────────
+
 function onOpen() {
-  const ui = SpreadsheetApp.getUi();
-  ui.createMenu('근태 코드 변환')
-    .addItem('코드 변환 실행', 'replaceShiftCodes')
+  SpreadsheetApp.getUi()
+    .createMenu('근태 코드 변환')
+    .addItem('📥 근무계획 가져오기 + 코드 변환', 'importAndConvert')
+    .addSeparator()
+    .addItem('코드 변환만 실행', 'replaceShiftCodes')
     .addToUi();
 }
 
-function replaceShiftCodes() {
-  // 변환 규칙 정의
-  const replacementMap = {
-    "년": "V01",
-    "무": "G03",
-    "휴": "G01",
-    "조": "H61",
-    "연": "L11",
-    "야": "R86",
-    "공": "G02",
-    "퇴": "K01",
-    "출": "T01",
-    "예": "E04",
-    "민": "E05",
-    "상": "T08",
-  };
-  
-  const defaultValue = "I61";
+// ─────────────────────────────────────────────────────────────────────────────
+// 유틸 함수
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  const lastRow = sheet.getLastRow();
-  const lastColumn = sheet.getLastColumn();
-  
-  // 3행부터 데이터가 있어야 함
-  const numRows = lastRow - 2;
-  if (numRows <= 0) {
-    SpreadsheetApp.getUi().alert("3행부터 데이터가 존재해야 합니다.");
-    return;
+/**
+ * B1 병합셀의 "2026년 4월" 텍스트에서 연도와 월을 파싱합니다.
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @returns {{ year: number, month: number }}
+ */
+function parseHeaderMonth(sheet) {
+  const raw = String(sheet.getRange('B1').getValue()).trim();
+  const m = raw.match(/(\d{4})년\s*(\d{1,2})월/);
+  if (!m) {
+    throw new Error(
+      `B1 셀에서 연/월을 읽을 수 없습니다: "${raw}"\n"2026년 4월" 형식으로 입력되어 있는지 확인하세요.`
+    );
   }
-  
-  // A열 : 사번 (3행부터)
-  const idRange = sheet.getRange(3, 1, numRows, 1);
-  const idValues = idRange.getValues();
+  return { year: Number(m[1]), month: Number(m[2]) };
+}
 
-  // B열부터 마지막 열까지 : 근태 데이터
-  const dataRange = sheet.getRange(3, 2, numRows, lastColumn - 1);
-  const dataValues = dataRange.getValues();
-  
-  let newValues = [];
+/**
+ * year년 month월의 마지막 날짜를 반환합니다. (윤년 자동 처리)
+ * @param {number} year
+ * @param {number} month
+ * @returns {number}
+ */
+function getLastDayOfMonth(year, month) {
+  return new Date(year, month, 0).getDate();
+}
 
-  for (let i = 0; i < dataValues.length; i++) {
-    let row = [];
-    const empId = String(idValues[i][0]).trim();
-    const isRowWithId = (empId !== "");
-    
-    for (let j = 0; j < dataValues[i].length; j++) {
-      let cellValue = dataValues[i][j];
-      let newValue = cellValue;
-      
-      // 사번이 있는 행(정상 근태 행)에서만 변환 적용
-      if (isRowWithId) {
-        if (typeof cellValue === 'string' || typeof cellValue === 'number') {
-          const key = String(cellValue).trim();
-          
-          if (key !== "" && replacementMap.hasOwnProperty(key)) {
-            newValue = replacementMap[key];
-          } else {
-            newValue = defaultValue;
+/**
+ * 열 번호(1부터 시작)를 엑셀 알파벳으로 변환합니다.
+ * 예) 3 → "C", 32 → "AF", 33 → "AG"
+ * @param {number} n
+ * @returns {string}
+ */
+function colIndexToLetter(n) {
+  let s = '';
+  while (n > 0) {
+    s = String.fromCharCode(65 + (n - 1) % 26) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 근무계획 데이터 로드
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 근무계획 스프레드시트의 지정 월 시트에서 데이터를 로드합니다.
+ *
+ *  핵심 로직:
+ *  - A열 + C열을 5행부터 스캔하여 "계" 또는 "합계" 텍스트가 있는 행을 탐지
+ *  - 탐지된 행의 직전 행까지만 데이터 범위로 사용 (인원 유동 대응)
+ *
+ * @param {number} month  가져올 월 (1~12)
+ * @returns {{
+ *   srcWorkerCount: number,             // 근무계획상 작업자 수
+ *   dateMap:  Object.<number, number>,  // 날짜(1~31) → 열 인덱스(0-based, G열 기준)
+ *   dataGrid: Array.<Array.<*>>         // [행][열] 근태 값 2D 배열 (행=작업자 순서)
+ * }}
+ */
+function loadWorkPlanData(month) {
+  const sourceSS = SpreadsheetApp.openById(SOURCE_SS_ID);
+  const sourceSheet = sourceSS.getSheetByName(`${month}월`);
+  if (!sourceSheet) {
+    throw new Error(
+      `근무계획 스프레드시트에서 "${month}월" 시트를 찾을 수 없습니다.\n` +
+      `시트 목록: ${sourceSS.getSheets().map(s => s.getName()).join(', ')}`
+    );
+  }
+
+  // ── 날짜 헤더 행 (G3:AK3) ─────────────────────────────────────────────
+  const DATE_START_COL = 7;   // G열
+  const DATE_COL_COUNT = 31;  // G~AK (31열)
+  const dateRow = sourceSheet.getRange(3, DATE_START_COL, 1, DATE_COL_COUNT).getValues()[0];
+
+  // ── "계" 행 동적 탐지 ─────────────────────────────────────────────────
+  // A~C는 병합셀이므로 A열과 C열 모두 확인
+  const SCAN_START = 5;
+  const SCAN_MAX   = 35;
+  const scanCount  = SCAN_MAX - SCAN_START + 1;
+
+  const colA = sourceSheet.getRange(SCAN_START, 1, scanCount, 1).getValues();
+  const colC = sourceSheet.getRange(SCAN_START, 3, scanCount, 1).getValues();
+
+  let keiRelIdx = -1;
+  for (let i = 0; i < scanCount; i++) {
+    const vA = String(colA[i][0] ?? '').replace(/\s/g, '');
+    const vC = String(colC[i][0] ?? '').replace(/\s/g, '');
+    if (vA === '계' || vA === '합계' || vC === '계' || vC === '합계') {
+      keiRelIdx = i;
+      break;
+    }
+  }
+
+  // "계" 를 못 찾으면 19행까지를 기본값으로 사용
+  const dataEndRow   = keiRelIdx >= 0 ? SCAN_START + keiRelIdx - 1 : 19;
+  const dataRowCount = dataEndRow - SCAN_START + 1;
+
+  if (dataRowCount <= 0) {
+    throw new Error(
+      `근무계획 데이터 행 범위 오류\n` +
+      `"계" 행 탐지 위치: ${keiRelIdx >= 0 ? SCAN_START + keiRelIdx : '미발견'}`
+    );
+  }
+
+  // ── 근태 데이터 그리드 가져오기 (행 순서 그대로 사용) ────────────────
+  const dataGrid = sourceSheet.getRange(SCAN_START, DATE_START_COL, dataRowCount, DATE_COL_COUNT).getValues();
+
+  // dateMap 구성: 날짜 숫자(1~31) → 열 인덱스(0-based, G열 기준)
+  const dateMap = {};
+  for (let c = 0; c < dateRow.length; c++) {
+    const d = Number(dateRow[c]);
+    if (!isNaN(d) && d >= 1 && d <= 31) dateMap[d] = c;
+  }
+
+  return { srcWorkerCount: dataRowCount, dateMap, dataGrid };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 📥 근무계획 가져오기 + 코드 변환 (메인 기능)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 근무계획 스프레드시트에서 해당 월의 근태 데이터를 가져와
+ * 즉시 코드 변환까지 수행합니다.
+ *
+ *  처리 순서:
+ *  1. B1 셀 파싱 → 연도/월/마지막일 확정
+ *  2. 근무계획 스프레드시트에서 해당 월 데이터 로드
+ *  3. 이름 매칭 (B열 이름 ↔ 근무계획 이름)
+ *  4. 날짜별 코드 변환 후 C열~lastDay열까지 일괄 입력
+ *  5. 가운데 정렬 적용
+ */
+function importAndConvert() {
+  const ui    = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+
+  try {
+    // ── STEP 1. 헤더에서 연/월/마지막일 파싱 ──────────────────────────
+    const { year, month } = parseHeaderMonth(sheet);
+    const lastDay = getLastDayOfMonth(year, month);
+
+    // ── STEP 2. 근무계획 로드 ──────────────────────────────────────────
+    const { srcWorkerCount, dateMap: srcDateMap, dataGrid: srcDataGrid }
+      = loadWorkPlanData(month);
+
+    if (srcWorkerCount === 0) {
+      throw new Error(`근무계획 "${month}월" 시트에서 작업자 데이터를 찾을 수 없습니다.`);
+    }
+
+    // ── STEP 3. 목적지 작업자 행 목록 읽기 ────────────────────────────
+    // A열(col 1)에 사번이 있는 행을 수집 (3행부터)
+    // 근태코드 변환 시트에는 이름 없이 사번만 있으므로 행 순서로 매칭
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 3) throw new Error('3행부터 데이터가 존재해야 합니다.');
+
+    const aColValues = sheet.getRange(3, 1, lastRow - 2, 1).getValues();
+    const destRows = [];
+    for (let i = 0; i < aColValues.length; i++) {
+      const id = String(aColValues[i][0] ?? '').trim();
+      if (id === '') continue; // 빈 행은 건너뜀
+      destRows.push(3 + i);   // 실제 시트 행 번호
+    }
+    if (destRows.length === 0) {
+      throw new Error('A열에서 사번을 찾을 수 없습니다.\n3행부터 A열에 사번이 입력되어 있는지 확인하세요.');
+    }
+
+    // ── STEP 4. 데이터 영역 초기화 ────────────────────────────────────
+    const lastWorkerRow = destRows[destRows.length - 1];
+    // B열(col 2) = 1일, C열(col 3) = 2일, … → 데이터 시작: col 2
+    sheet.getRange(3, 2, lastWorkerRow - 2, lastDay).clearContent();
+
+    // ── STEP 5. 행 순서대로 1:1 매핑 → 코드 변환 후 입력 ─────────────
+    // 근무계획 0번째 작업자 → 목적지 1번째 사번 행
+    // 근무계획 1번째 작업자 → 목적지 2번째 사번 행  … 순서 대응
+    const processCount = Math.min(destRows.length, srcWorkerCount);
+
+    for (let idx = 0; idx < processCount; idx++) {
+      const destRow   = destRows[idx];   // 목적지 시트 행 번호
+      const srcRowIdx = idx;             // 근무계획 그리드 행 인덱스 (0-based)
+
+      // 1일~lastDay일 코드를 배열로 구성
+      const rowData = [];
+      for (let day = 1; day <= lastDay; day++) {
+        let converted = DEFAULT_VALUE;
+        if (day in srcDateMap) {
+          const raw = String(srcDataGrid[srcRowIdx][srcDateMap[day]] ?? '').trim();
+          if (raw !== '') {
+            converted = REPLACEMENT_MAP.hasOwnProperty(raw)
+              ? REPLACEMENT_MAP[raw]
+              : DEFAULT_VALUE;
           }
         }
+        rowData.push(converted);
       }
-      
-      row.push(newValue);
+
+      // B열(1일)부터 lastDay열까지 한 행 일괄 입력
+      sheet.getRange(destRow, 2, 1, lastDay).setValues([rowData]);
     }
-    newValues.push(row);
+
+    // ── STEP 6. 가운데 정렬 적용 ─────────────────────────────────────
+    sheet.getRange(3, 2, lastWorkerRow - 2, lastDay).setHorizontalAlignment('center');
+    SpreadsheetApp.flush();
+
+    // ── STEP 7. 완료 알림 ─────────────────────────────────────────────
+    const lastDayCol = colIndexToLetter(1 + lastDay);  // B=col2=1일, day N → col(1+N)
+    const lastColStr = `${lastDayCol}${lastWorkerRow}`;
+
+    const countMsg = destRows.length !== srcWorkerCount
+      ? `\n• ⚠️ 인원 수 불일치 — 목적지: ${destRows.length}명 / 근무계획: ${srcWorkerCount}명\n  (적은 쪽 기준 ${processCount}명 처리)`
+      : `\n• 전체 ${processCount}명 처리 완료`;
+
+    ui.alert(
+      `📥 ${year}년 ${month}월 근무계획 가져오기 + 코드 변환 완료!\n\n` +
+      `• 처리 기간: ${month}월 1일 ~ ${lastDay}일 (${lastDay}일간)\n` +
+      `• 처리 범위: B3:${lastColStr}` +
+      countMsg
+    );
+
+  } catch (e) {
+    ui.alert('❌ 오류 발생\n\n' + e.message);
+    console.error(e);
   }
+}
 
-  // 1. 변환된 값 입력
-  dataRange.setValues(newValues);
-  
-  // 2. 가운데 정렬 적용
-  dataRange.setHorizontalAlignment("center");
+// ─────────────────────────────────────────────────────────────────────────────
+// 코드 변환만 실행 (기존 기능 — 월 기반 열 범위 적용)
+// ─────────────────────────────────────────────────────────────────────────────
 
-  // 완료 알림
-  SpreadsheetApp.getUi().alert(
-    "근태 코드 변환이 완료되었습니다!\n\n" +
-    "• 변환 규칙이 적용되었습니다.\n" +
-    "• 대상 셀 전체 가운데 정렬 처리됨"
-  );
+/**
+ * 현재 시트에 이미 입력된 근태 문자(연/야/공 등)를 코드로 변환합니다.
+ * B1 셀의 연/월을 읽어 해당 월의 마지막 날까지만 변환합니다.
+ *
+ *  변환 조건:
+ *  - A열에 사번이 있는 행만 변환 대상
+ *  - 변환 규칙에 없는 값(빈 칸 포함) → DEFAULT_VALUE("I61")
+ */
+function replaceShiftCodes() {
+  const ui    = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+
+  try {
+    const { year, month } = parseHeaderMonth(sheet);
+    const lastDay = getLastDayOfMonth(year, month);
+
+    const lastRow = sheet.getLastRow();
+    const numRows = lastRow - 2;
+    if (numRows <= 0) {
+      ui.alert('3행부터 데이터가 존재해야 합니다.');
+      return;
+    }
+
+    // A열: 사번 (3행부터)
+    const idValues = sheet.getRange(3, 1, numRows, 1).getValues();
+
+    // B열~lastDay열: 근태 데이터 (B=1일, C=2일, … → col 2 = day 1)
+    const dataRange  = sheet.getRange(3, 2, numRows, lastDay);
+    const dataValues = dataRange.getValues();
+
+    const newValues = dataValues.map((row, i) => {
+      const empId = String(idValues[i][0] ?? '').trim();
+      if (!empId) return row;   // 사번 없는 행은 변환하지 않음
+      return row.map(cell => {
+        const key = String(cell ?? '').trim();
+        if (key === '') return DEFAULT_VALUE;
+        return REPLACEMENT_MAP.hasOwnProperty(key) ? REPLACEMENT_MAP[key] : DEFAULT_VALUE;
+      });
+    });
+
+    dataRange.setValues(newValues);
+    dataRange.setHorizontalAlignment('center');
+    SpreadsheetApp.flush();
+
+    const lastDayCol = colIndexToLetter(1 + lastDay);  // B=col2=1일, day N → col(1+N)
+    ui.alert(
+      `근태 코드 변환이 완료되었습니다!\n\n` +
+      `• ${year}년 ${month}월 기준 (${lastDay}일까지)\n` +
+      `• 처리 범위: B3:${lastDayCol}${lastRow}\n` +
+      `• 변환 규칙 적용 + 가운데 정렬 완료`
+    );
+
+  } catch (e) {
+    ui.alert('❌ 오류 발생\n\n' + e.message);
+    console.error(e);
+  }
 }
