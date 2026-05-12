@@ -19,9 +19,12 @@ function fixZeroWaterLevelVelocity() {
   for (let i = 0; i < values.length; i++) {
     const waterLevel = values[i][0]; // C열: 수위
     const velocity = values[i][1]; // D열: 유속
+
+    const isAbnormal =
+      (waterLevel <= 0 && velocity > 0) || // 조건1: 수위 0 이하, 유속 0 초과
+      (waterLevel > 0 && waterLevel <= 0.010 && velocity >= 2); // 조건2: 수위 0.001~0.010, 유속 2 이상
     
-    // 수위가 0 이하이고 유속이 0보다 큰 경우
-    if (waterLevel <= 0 && velocity > 0) {
+    if (isAbnormal) {
       const velocityCell = sheet.getRange(i + 2, 4); // D열
       velocityCell.setValue(0);
       velocityCell.setFontColor('#0000FF'); // 파란색
