@@ -1,0 +1,37 @@
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('수위/유속 보정')
+    .addItem('오류 데이터 보정 실행', 'fixZeroWaterLevelVelocity')
+    .addToUi();
+}
+
+function fixZeroWaterLevelVelocity() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  
+  if (lastRow < 2) return;
+  
+  const dataRange = sheet.getRange(2, 3, lastRow - 1, 2); // C2:D마지막행
+  const values = dataRange.getValues();
+  
+  let correctedCount = 0;
+  
+  for (let i = 0; i < values.length; i++) {
+    const waterLevel = values[i][0]; // C열: 수위
+    const velocity = values[i][1]; // D열: 유속
+    
+    // 수위가 0 이하이고 유속이 0보다 큰 경우
+    if (waterLevel <= 0 && velocity > 0) {
+      const velocityCell = sheet.getRange(i + 2, 4); // D열
+      velocityCell.setValue(0);
+      velocityCell.setFontColor('#0000FF'); // 파란색
+      correctedCount++;
+    }
+  }
+
+  if (correctedCount > 0) {
+    SpreadsheetApp.getUi().alert(`수정 완료: ${correctedCount}개의 유속 값이 0으로 보정되었습니다.`);
+  } else {
+    SpreadsheetApp.getUi().alert('보정이 필요한 데이터가 없습니다.');
+  }
+}
