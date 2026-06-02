@@ -137,12 +137,16 @@ function parsePlanData(month) {
 }
 
 /**
- * 값이 있는지 판단 (빈칸, 0, "-", null 제외)
+ * 값이 있는지 판단 (숫자 수치가 입력된 경우만 true)
+ * 빈칸, 0, "-", null, 텍스트(특이사항, L/C 등) 모두 제외
  */
 function hasValue(v) {
   if (v === null || v === undefined) return false;
   const s = String(v).trim();
-  return s !== '' && s !== '0' && s !== '-';
+  if (s === '' || s === '-') return false;
+  // 숫자(정수/소수, 천단위 쉼표 포함)인 경우만 생산 수치로 인정
+  const num = Number(s.replace(/,/g, ''));
+  return !isNaN(num) && num !== 0;
 }
 
 /**

@@ -1,0 +1,73 @@
+function insertImageLinks() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 4) return;
+
+  const FOLDER_ID_참고 = "1LPG2m6W7LdOlMIi9-KdH7ksQA-Yuh1Tu"; // 참고 사진 폴더
+  const FOLDER_ID_도면 = "1TY9Y59j9Q_7YVaeDB5f3dq0n4rwTcTZ3"; // 도면 사진 폴더
+  const folder참고 = DriveApp.getFolderById(FOLDER_ID_참고);
+  const folder도면 = DriveApp.getFolderById(FOLDER_ID_도면);
+
+  // 4행부터 전체 데이터 한 번에 읽기 (A~N열)
+  const data = sheet.getRange(4, 1, lastRow - 3, 14).getValues();
+
+  for (let i = 0; i < data.length; i++) {
+    const 사용장비 = data[i][1]; // B열
+    const 모델명 = data[i][2]; // C열
+    const 모델번호 = data[i][3]; // D열
+    const section = data[i][5]; // F열
+    const 제조사 = data[i][6]; // G열
+    const 위치 = data[i][8]; // I열
+    const k열값 = data[i][10]; // K열: 참고 사진 경로
+    const l열값 = data[i][11]; // L열: 도면 사진 경로
+    const 기존링크M = data[i][12]; // M열: 사진 보기 URL
+    const 기존링크N = data[i][13]; // N열: 도면 보기 URL
+
+    if (!사용장비) continue;
+
+    // 참고 사진 파일명 조합
+    const 참고파일명 = `${사용장비}_${모델명}_${모델번호}_${제조사}_${위치}`;
+    const 참고경로 = `자재창고 부품, 소모품 리스트_Images/${참고파일명}.jpg`;
+
+    // 도면 파일명 조합
+    const 도면파일명 = `${사용장비}_${모델명}_${모델번호}_${section}_${제조사}_${위치}_도면`;
+    const 도면경로 = `자재창고 도면 리스트_Images/${도면파일명}.jpg`;
+
+    // K열 업데이트
+    if (k열값 && !k열값.includes(참고파일명)) {
+      sheet.getRange(i + 4, 11).setValue(참고경로);
+    }
+
+    // L열 업데이트
+    if (l열값 && !l열값.includes(도면파일명)) {
+      sheet.getRange(i + 4, 12).setValue(도면경로);
+    }
+
+    // M열: 참고 사진 URL 삽입
+    if (!기존링크M) {
+      const files = folder참고.searchFiles(
+        `title contains "${참고파일명}" and trashed = false`
+      );
+      if (files.hasNext()) {
+        const file = files.next();
+        const url = `https://drive.google.com/file/d/${file.getId()}/view`;
+        sheet.getRange(i + 4, 13).setFormula(`=HYPERLINK("${url}","사진 보기")`);
+      }
+    }
+
+    // N열: 도면 사진 URL 삽입
+    if (!기존링크N) {
+      const files = folder도면.searchFiles(
+        `title contains "${도면파일명}" and trashed = false`
+      );
+      if (files.hasNext()) {
+        const file = files.next();
+        const url = `https://drive.google.com/file/d/${file.getId()}/view`;
+        sheet.getRange(i + 4, 14).setFormula(`=HYPERLINK("${url}","도면 보기")`);
+      }
+    }
+  }
+
+  // K, L열 숨기기
+  sheet.hideColumns(11, 2);
+}

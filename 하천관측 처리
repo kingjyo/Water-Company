@@ -1,0 +1,136 @@
+function onOpen() {
+SpreadsheetApp.getUi()
+.createMenu('🌧️ 기상관측 처리')
+.addItem('① 정시 행만 남기기 (A열)', 'filterHourlyRows')
+.addItem('② 강우 구간만 남기기 (C열)', 'filterRainfallRange')
+.addItem('① + ② 순서대로 실행', 'runAll')
+.addToUi();
+}
+
+// ① A열: 정시(xx:00:xx)인 행만 남기고, 측정일시를 "23시" 형식으로 변경
+function filterHourlyRows() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+
+  if (lastRow < 2) {
+    SpreadsheetApp.getUi().alert('데이터가 없습니다.');
+    return;
+  }
+
+  // 전체 데이터를 한 번에 읽기
+  const allData = sheet.getRange(2, 1, lastRow - 1, lastCol).getDisplayValues();
+
+  // 정시 행만 필터링 + A열 값 변환
+  const filteredData = [];
+  for (let i = 0; i < allData.length; i++) {
+    const cellValue = allData[i][0].trim();
+    const timeMatch = cellValue.match(/(\d{1,2}):(\d{2}):\d{2}$/);
+    if (timeMatch && timeMatch[2] === '00') {
+      const row = allData[i].slice(); // 행 복사
+      const hour = parseInt(timeMatch[1], 10);
+      row[0] = `${hour}시`; // A열 변환
+      filteredData.push(row);
+    }
+  }
+
+  if (filteredData.length === 0) {
+    SpreadsheetApp.getUi().alert('정시 행이 없습니다.');
+    return;
+  }
+
+  // 기존 데이터 영역 전체 지우고 한 번에 다시 쓰기
+  sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+  sheet.getRange(2, 1, filteredData.length, lastCol).setValues(filteredData);
+
+  // 남은 빈 행 삭제
+  const emptyRowStart = filteredData.length + 2;
+  if (emptyRowStart <= lastRow) {
+    sheet.deleteRows(emptyRowStart, lastRow - emptyRowStart + 1);
+  }
+
+  SpreadsheetApp.getUi().alert(`✅ 정시 행 필터링 완료! (${filteredData.length}행 유지)`);
+}
+
+// ② C열: 수위 1 초과 값이 있으면, 처음 0 초과 ~ 다시 0이 되는 지점까지만 남김
+function filterRainfallRange() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+
+  if (lastRow < 2) {
+    SpreadsheetApp.getUi().alert('데이터가 없습니다.');
+    return;
+  }
+
+  // 전체 데이터 한 번에 읽기
+  const allData = sheet.getRange(2, 1, lastRow - 1, lastCol).getDisplayValues();
+
+  // C열(index 2) 숫자값 파싱
+  const cNums = allData.map(row => {
+    const v = parseFloat(row[2]);
+    return isNaN(v) ? 0 : v;
+  });
+
+  // 0 초과 연속 구간들 찾기
+  const segments = []; // { start, end, hasOverOne }
+  let inSegment = false;
+  let segStart = -1;
+
+  for (let i = 0; i < cNums.length; i++) {
+    if (!inSegment && cNums[i] > 0) {
+      inSegment = true;
+      segStart = i;
+    } else if (inSegment && cNums[i] <= 0) {
+      segments.push({ start: segStart, end: i - 1 });
+      inSegment = false;
+    }
+  }
+  // 마지막 구간이 끝까지 이어지는 경우
+  if (inSegment) {
+    segments.push({ start: segStart, end: cNums.length - 1 });
+  }
+
+  // 1 이상 값을 포함하는 구간만 선별
+  const validSegments = segments.filter(seg => {
+    for (let i = seg.start; i <= seg.end; i++) {
+      if (cNums[i] >= 1) return true;
+    }
+    return false;
+  });
+
+  if (validSegments.length === 0) {
+    SpreadsheetApp.getUi().alert('ℹ️ 수위 1 이상을 포함하는 구간이 없습니다.');
+    return;
+  }
+
+  // 유지할 행 인덱스 집합 만들기
+  const keepSet = new Set();
+  validSegments.forEach(seg => {
+    for (let i = seg.start; i <= seg.end; i++) {
+      keepSet.add(i);
+    }
+  });
+
+  // 유지할 행만 추출
+  const filteredData = allData.filter((_, i) => keepSet.has(i));
+
+  // 기존 데이터 지우고 한 번에 다시 쓰기
+  sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+  sheet.getRange(2, 1, filteredData.length, lastCol).setValues(filteredData);
+
+  // 남은 빈 행 삭제
+  const emptyRowStart = filteredData.length + 2;
+  if (emptyRowStart <= lastRow) {
+    sheet.deleteRows(emptyRowStart, lastRow - emptyRowStart + 1);
+  }
+
+  SpreadsheetApp.getUi().alert(`✅ 강우 구간 필터링 완료!\n유효 구간 ${validSegments.length}개, ${filteredData.length}행 유지`);
+}
+
+// ① + ② 순서대로 실행
+function runAll() {
+filterHourlyRows();
+filterRainfallRange();
+SpreadsheetApp.getUi().alert('✅ 전체 처리 완료!');
+}
