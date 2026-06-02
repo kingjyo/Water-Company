@@ -401,3 +401,38 @@ function applyColumnVisibility(sheet, lastDay) {
     sheet.hideColumns(hideStartCol, hideDays);
   }
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 헬퍼: 달의 일수에 맞게 열 표시/숨김 조정
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 달의 일수에 맞춰 데이터 열(B~AF)의 숨김/표시를 조정합니다.
+ *
+ * 열 구조:
+ *   B열(열번호 2) = 1일
+ *   C열(열번호 3) = 2일
+ *   ...
+ *   AF열(열번호 32) = 31일
+ *
+ * - 1일 ~ lastDay : 숨김 해제 (표시)
+ * - lastDay+1일 ~ 31일 : 숨김 처리
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @param {number} lastDay  해당 달의 마지막 일 (28~31)
+ */
+function applyColumnVisibility(sheet, lastDay) {
+  const DAY_COL_START = 2;  // B열 = 1일 = 열번호 2
+  const MAX_DAY = 31;
+
+  // 1일~lastDay 해당 열: 숨김 해제
+  sheet.showColumns(DAY_COL_START, lastDay);
+
+  // lastDay+1일~31일 해당 열: 숨김
+  const hideDays = MAX_DAY - lastDay;
+  if (hideDays > 0) {
+    const hideStartCol = DAY_COL_START + lastDay;  // lastDay 다음 열번호
+    sheet.hideColumns(hideStartCol, hideDays);
+  }
+}

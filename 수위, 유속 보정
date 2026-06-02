@@ -1,0 +1,97 @@
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('수위/유속 보정')
+    .addItem('오류 데이터 보정 실행', 'fixZeroWaterLevelVelocity')
+    .addItem('10분 단위 데이터 정리', 'filterTenMinuteData')
+    .addToUi();
+}
+
+function fixZeroWaterLevelVelocity() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  
+  if (lastRow < 2) return;
+  
+  const dataRange = sheet.getRange(2, 3, lastRow - 1, 2); // C2:D마지막행
+  const values = dataRange.getValues();
+  
+  let correctedCount = 0;
+  
+  for (let i = 0; i < values.length; i++) {
+    const waterLevel = values[i][0]; // C열: 수위
+    const velocity = values[i][1]; // D열: 유속
+
+    const isAbnormal =
+      (waterLevel <= 0 && velocity > 0) || // 조건1: 수위 0 이하, 유속 0 초과
+      (waterLevel > 0 && waterLevel <= 0.010 && velocity >= 2); // 조건2: 수위 0.001~0.010, 유속 2 이상
+    
+    if (isAbnormal) {
+      const velocityCell = sheet.getRange(i + 2, 4); // D열
+      velocityCell.setValue(0);
+      velocityCell.setFontColor('#0000FF'); // 파란색
+      correctedCount++;
+    }
+  }
+
+  if (correctedCount > 0) {
+    SpreadsheetApp.getUi().alert(`수정 완료: ${correctedCount}개의 유속 값이 0으로 보정되었습니다.`);
+  } else {
+    SpreadsheetApp.getUi().alert('보정이 필요한 데이터가 없습니다.');
+  }
+}
+
+function filterTenMinuteData() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.alert(
+    '10분 단위 데이터 정리',
+    '분(MM)이 00, 10, 20, 30, 40, 50이 아닌 행을 모두 삭제합니다.\n계속 하시겠습니까?',
+    ui.ButtonSet.OK_CANCEL
+  );
+
+  if (response !== ui.Button.OK) return;
+
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+
+  if (lastRow < 2) return;
+
+  // 전체 데이터를 한 번에 읽기
+  const allData = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  const allFormats = sheet.getRange(2, 1, lastRow - 1, lastCol).getFontColors();
+
+  const keepData = [];
+  const keepFormats = [];
+
+  for (let i = 0; i < allData.length; i++) {
+    const cellValue = allData[i][1]; // B열 (index 1)
+    let minute = null;
+
+    if (cellValue instanceof Date) {
+      minute = cellValue.getMinutes();
+    } else if (typeof cellValue === 'string' && cellValue.trim() !== '') {
+      const match = cellValue.trim().match(/^\d{4}-\d{2}-\d{2} \d{2}:(\d{2}):\d{2}$/);
+      if (match) minute = parseInt(match[1], 10);
+    }
+
+    // 10분 단위인 행만 보존
+    if (minute !== null && minute % 10 === 0) {
+      keepData.push(allData[i]);
+      keepFormats.push(allFormats[i]);
+    }
+  }
+
+  const deletedCount = allData.length - keepData.length;
+
+  // 기존 데이터 영역 전체 초기화
+  sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+  sheet.getRange(2, 1, lastRow - 1, lastCol).setFontColor('#000000');
+
+  // 남길 데이터 한 번에 덮어쓰기
+  if (keepData.length > 0) {
+    sheet.getRange(2, 1, keepData.length, lastCol).setValues(keepData);
+    sheet.getRange(2, 1, keepFormats.length, lastCol).setFontColors(keepFormats);
+  }
+
+  ui.alert(`정리 완료: ${deletedCount}개 행이 삭제되었습니다.`);
+}
