@@ -336,3 +336,34 @@ function createWeatherReport() {
   const docUrl = newFile.getUrl();
   SpreadsheetApp.getUi().alert(`✅ 보고서 생성 완료!\n\n${docTitle}\n\n${docUrl}`);
 }
+
+function debugDocTable() {
+  const TEMPLATE_ID = "10SAwz1skAVXBGJdr14I6OtSHsdoysNNhRkQ7ws5RxB8";
+
+  const templateFile = DriveApp.getFileById(TEMPLATE_ID);
+  const folder = templateFile.getParents().next();
+  const testFile = templateFile.makeCopy("DEBUG_TEST_삭제해주세요", folder);
+  const doc = DocumentApp.openById(testFile.getId());
+  const body = doc.getBody();
+
+  const tables = body.getTables();
+  let log = `총 표 개수: ${tables.length}\n\n`;
+
+  tables.forEach((table, tIdx) => {
+    log += `=== 표 ${tIdx} (총 ${table.getNumRows()}행) ===\n`;
+    for (let r = 0; r < table.getNumRows(); r++) {
+      const row = table.getRow(r);
+      let rowText = ` [행 ${r}] `;
+      for (let c = 0; c < row.getNumCells(); c++) {
+        const cellText = row.getCell(c).getText().replace(/\n/g, "↵").substring(0, 30);
+        rowText += `col${c}:"${cellText}" | `;
+      }
+      log += rowText + "\n";
+    }
+    log += "\n";
+  });
+
+  doc.saveAndClose();
+  Logger.log(log);
+  SpreadsheetApp.getUi().alert("디버그 완료!\nApps Script 편집기 → 실행 로그에서 결과 확인하세요.\n\n생성된 'DEBUG_TEST_삭제해주세요' 파일은 수동으로 삭제해주세요.");
+}
