@@ -105,7 +105,7 @@ function syncTransportTitle() {
       continue;
     }
 
-    sheet.getRange("A1:H3")
+    sheet.getRange("A1:G3")
       .setValue(`${baseMonth}월 업무차 교통비 내역\n${cfg.label}`)
       .setWrap(true);
 
