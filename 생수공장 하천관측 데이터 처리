@@ -9,105 +9,123 @@ SpreadsheetApp.getUi()
 
 // ① A열: 정시(xx:00:xx)인 행만 남기고, 측정일시를 "23시" 형식으로 변경
 function filterHourlyRows() {
-const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-const lastRow = sheet.getLastRow();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
 
-if (lastRow < 2) {
-SpreadsheetApp.getUi().alert('데이터가 없습니다.');
-return;
-}
+  if (lastRow < 2) {
+    SpreadsheetApp.getUi().alert('데이터가 없습니다.');
+    return;
+  }
 
-// 아래서 위로 순회하며 비정시 행 삭제
-for (let row = lastRow; row >= 2; row--) {
-const cellValue = sheet.getRange(row, 1).getDisplayValue().trim();
+  // 전체 데이터를 한 번에 읽기
+  const allData = sheet.getRange(2, 1, lastRow - 1, lastCol).getDisplayValues();
 
-// 날짜/시간 형식: "2024-01-15 23:00:00" 또는 "23:00:00" 등
-// 분이 00인지 확인
-const timeMatch = cellValue.match(/(d{1,2}):(d{2}):d{2}$/);
+  // 정시 행만 필터링 + A열 값 변환
+  const filteredData = [];
+  for (let i = 0; i < allData.length; i++) {
+    const cellValue = allData[i][0].trim();
+    const timeMatch = cellValue.match(/(\d{1,2}):(\d{2}):\d{2}$/);
+    if (timeMatch && timeMatch[2] === '00') {
+      const row = allData[i].slice(); // 행 복사
+      const hour = parseInt(timeMatch[1], 10);
+      row[0] = `${hour}시`; // A열 변환
+      filteredData.push(row);
+    }
+  }
 
-if (!timeMatch || timeMatch[2] !== '00') {
-sheet.deleteRow(row);
-}
-}
+  if (filteredData.length === 0) {
+    SpreadsheetApp.getUi().alert('정시 행이 없습니다.');
+    return;
+  }
 
-// 정시 행의 A열 값을 "XX시" 형식으로 변경
-const newLastRow = sheet.getLastRow();
-for (let row = 2; row <= newLastRow; row++) {
-const cellValue = sheet.getRange(row, 1).getDisplayValue().trim();
-const timeMatch = cellValue.match(/(d{1,2}):(d{2}):d{2}$/);
-if (timeMatch) {
-const hour = parseInt(timeMatch[1], 10);
-sheet.getRange(row, 1).setValue(`${hour}시`);
-}
-}
+  // 기존 데이터 영역 전체 지우고 한 번에 다시 쓰기
+  sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+  sheet.getRange(2, 1, filteredData.length, lastCol).setValues(filteredData);
 
-SpreadsheetApp.getUi().alert('✅ 정시 행 필터링 완료!');
+  // 남은 빈 행 삭제
+  const emptyRowStart = filteredData.length + 2;
+  if (emptyRowStart <= lastRow) {
+    sheet.deleteRows(emptyRowStart, lastRow - emptyRowStart + 1);
+  }
+
+  SpreadsheetApp.getUi().alert(`✅ 정시 행 필터링 완료! (${filteredData.length}행 유지)`);
 }
 
 // ② C열: 수위 1 초과 값이 있으면, 처음 0 초과 ~ 다시 0이 되는 지점까지만 남김
 function filterRainfallRange() {
-const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-const lastRow = sheet.getLastRow();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
 
-if (lastRow < 2) {
-SpreadsheetApp.getUi().alert('데이터가 없습니다.');
-return;
-}
+  if (lastRow < 2) {
+    SpreadsheetApp.getUi().alert('데이터가 없습니다.');
+    return;
+  }
 
-// C열 값 읽기 (2행부터)
-const cValues = sheet.getRange(2, 3, lastRow - 1, 1).getValues(); // 0-based index
+  // 전체 데이터 한 번에 읽기
+  const allData = sheet.getRange(2, 1, lastRow - 1, lastCol).getDisplayValues();
 
-// 1 초과 값이 있는지 확인
-const hasOverOne = cValues.some(r => {
-const v = parseFloat(r[0]);
-return !isNaN(v) && v > 1;
-});
+  // C열(index 2) 숫자값 파싱
+  const cNums = allData.map(row => {
+    const v = parseFloat(row[2]);
+    return isNaN(v) ? 0 : v;
+  });
 
-if (!hasOverOne) {
-SpreadsheetApp.getUi().alert('ℹ️ C열에 수위 1 초과 값이 없습니다. 필터링을 건너뜁니다.');
-return;
-}
+  // 0 초과 연속 구간들 찾기
+  const segments = []; // { start, end, hasOverOne }
+  let inSegment = false;
+  let segStart = -1;
 
-// 처음으로 0 초과인 행 찾기
-let startIdx = -1; // cValues 기준 인덱스
-for (let i = 0; i < cValues.length; i++) {
-const v = parseFloat(cValues[i][0]);
-if (!isNaN(v) && v > 0) {
-startIdx = i;
-break;
-}
-}
+  for (let i = 0; i < cNums.length; i++) {
+    if (!inSegment && cNums[i] > 0) {
+      inSegment = true;
+      segStart = i;
+    } else if (inSegment && cNums[i] <= 0) {
+      segments.push({ start: segStart, end: i - 1 });
+      inSegment = false;
+    }
+  }
+  // 마지막 구간이 끝까지 이어지는 경우
+  if (inSegment) {
+    segments.push({ start: segStart, end: cNums.length - 1 });
+  }
 
-// 마지막으로 0이 되는 행 찾기 (startIdx 이후, 1 초과 구간 포함 이후)
-let endIdx = cValues.length - 1; // 기본값: 마지막 행
-for (let i = startIdx + 1; i < cValues.length; i++) {
-const v = parseFloat(cValues[i][0]);
-if (!isNaN(v) && v === 0) {
-endIdx = i;
-break;
-}
-}
+  // 1 이상 값을 포함하는 구간만 선별
+  const validSegments = segments.filter(seg => {
+    for (let i = seg.start; i <= seg.end; i++) {
+      if (cNums[i] >= 1) return true;
+    }
+    return false;
+  });
 
-if (startIdx === -1) {
-SpreadsheetApp.getUi().alert('0 초과 시작 지점을 찾을 수 없습니다.');
-return;
-}
+  if (validSegments.length === 0) {
+    SpreadsheetApp.getUi().alert('ℹ️ 수위 1 이상을 포함하는 구간이 없습니다.');
+    return;
+  }
 
-// 실제 시트 행 번호 (1-based, 헤더=1행이므로 +2)
-const keepStart = startIdx + 2; // 시트 행 번호
-const keepEnd = endIdx + 2; // 시트 행 번호
+  // 유지할 행 인덱스 집합 만들기
+  const keepSet = new Set();
+  validSegments.forEach(seg => {
+    for (let i = seg.start; i <= seg.end; i++) {
+      keepSet.add(i);
+    }
+  });
 
-// 아래서 위로: keepEnd 이후 삭제
-if (keepEnd < lastRow) {
-sheet.deleteRows(keepEnd + 1, lastRow - keepEnd);
-}
+  // 유지할 행만 추출
+  const filteredData = allData.filter((_, i) => keepSet.has(i));
 
-// keepStart 이전 삭제 (2행~keepStart-1행)
-if (keepStart > 2) {
-sheet.deleteRows(2, keepStart - 2);
-}
+  // 기존 데이터 지우고 한 번에 다시 쓰기
+  sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+  sheet.getRange(2, 1, filteredData.length, lastCol).setValues(filteredData);
 
-SpreadsheetApp.getUi().alert(`✅ 강우 구간 필터링 완료! 유지 범위: ${keepStart}행 ~ ${keepEnd}행`);
+  // 남은 빈 행 삭제
+  const emptyRowStart = filteredData.length + 2;
+  if (emptyRowStart <= lastRow) {
+    sheet.deleteRows(emptyRowStart, lastRow - emptyRowStart + 1);
+  }
+
+  SpreadsheetApp.getUi().alert(`✅ 강우 구간 필터링 완료!\n유효 구간 ${validSegments.length}개, ${filteredData.length}행 유지`);
 }
 
 // ① + ② 순서대로 실행
