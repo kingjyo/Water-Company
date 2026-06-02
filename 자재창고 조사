@@ -1,15 +1,63 @@
+// =============================================
+// 커스텀 메뉴 생성 (본인만 보임)
+// =============================================
+function onOpen() {
+  const email = Session.getActiveUser().getEmail();
+  const 내계정 = "youngjoonkim@kas.co.kr";
+
+  if (email !== 내계정) return;
+
+  SpreadsheetApp.getUi()
+    .createMenu('🔧 자재창고 관리')
+    .addItem('📸 사진 URL 업데이트', 'insertImageLinks')
+    .addSeparator()
+    .addItem('🔍 K, L열 숨기기', 'hideKL')
+    .addItem('👁️ K, L열 보이기', 'showKL')
+    .addToUi();
+}
+
+// =============================================
+// K, L열 숨기기 / 보이기
+// =============================================
+function hideKL() {
+  SpreadsheetApp.getActiveSpreadsheet().getActiveSheet().hideColumns(11, 2);
+}
+
+function showKL() {
+  SpreadsheetApp.getActiveSpreadsheet().getActiveSheet().showColumns(11, 2);
+}
+
+// =============================================
+// 폴더 내 파일 전체를 Map으로 읽기
+// =============================================
+function getFolderFileMap(folder) {
+  const map = new Map();
+  const files = folder.getFiles();
+  while (files.hasNext()) {
+    const file = files.next();
+    map.set(file.getName().toLowerCase(), file.getId());
+  }
+  return map;
+}
+
+// =============================================
+// 사진 URL 업데이트
+// =============================================
 function insertImageLinks() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   const lastRow = sheet.getLastRow();
   if (lastRow < 4) return;
 
-  const FOLDER_ID_참고 = "1LPG2m6W7LdOlMIi9-KdH7ksQA-Yuh1Tu"; // 참고 사진 폴더
-  const FOLDER_ID_도면 = "1TY9Y59j9Q_7YVaeDB5f3dq0n4rwTcTZ3"; // 도면 사진 폴더
-  const folder참고 = DriveApp.getFolderById(FOLDER_ID_참고);
-  const folder도면 = DriveApp.getFolderById(FOLDER_ID_도면);
+  const FOLDER_ID_참고 = "1LPG2m6W7LdOlMIi9-KdH7ksQA-Yuh1Tu";
+  const FOLDER_ID_도면 = "1TY9Y59j9Q_7YVaeDB5f3dq0n4rwTcTZ3";
 
-  // 4행부터 전체 데이터 한 번에 읽기 (A~N열)
+  // 폴더 파일 목록 한 번만 읽기
+  const map참고 = getFolderFileMap(DriveApp.getFolderById(FOLDER_ID_참고));
+  const map도면 = getFolderFileMap(DriveApp.getFolderById(FOLDER_ID_도면));
+
   const data = sheet.getRange(4, 1, lastRow - 3, 14).getValues();
+
+  const updates = [];
 
   for (let i = 0; i < data.length; i++) {
     const 사용장비 = data[i][1]; // B열
@@ -18,56 +66,60 @@ function insertImageLinks() {
     const section = data[i][5]; // F열
     const 제조사 = data[i][6]; // G열
     const 위치 = data[i][8]; // I열
-    const k열값 = data[i][10]; // K열: 참고 사진 경로
-    const l열값 = data[i][11]; // L열: 도면 사진 경로
-    const 기존링크M = data[i][12]; // M열: 사진 보기 URL
-    const 기존링크N = data[i][13]; // N열: 도면 보기 URL
+    const k열값 = data[i][10]; // K열
+    const l열값 = data[i][11]; // L열
+    const 기존링크M = data[i][12]; // M열
+    const 기존링크N = data[i][13]; // N열
 
     if (!사용장비) continue;
 
-    // 참고 사진 파일명 조합
     const 참고파일명 = `${사용장비}_${모델명}_${모델번호}_${제조사}_${위치}`;
     const 참고경로 = `자재창고 부품, 소모품 리스트_Images/${참고파일명}.jpg`;
-
-    // 도면 파일명 조합
     const 도면파일명 = `${사용장비}_${모델명}_${모델번호}_${section}_${제조사}_${위치}_도면`;
     const 도면경로 = `자재창고 도면 리스트_Images/${도면파일명}.jpg`;
 
     // K열 업데이트
     if (k열값 && !k열값.includes(참고파일명)) {
-      sheet.getRange(i + 4, 11).setValue(참고경로);
+      updates.push({ row: i + 4, col: 11, value: 참고경로, isFormula: false });
     }
 
     // L열 업데이트
     if (l열값 && !l열값.includes(도면파일명)) {
-      sheet.getRange(i + 4, 12).setValue(도면경로);
+      updates.push({ row: i + 4, col: 12, value: 도면경로, isFormula: false });
     }
 
-    // M열: 참고 사진 URL 삽입
-    if (!기존링크M) {
-      const files = folder참고.searchFiles(
-        `title contains "${참고파일명}" and trashed = false`
-      );
-      if (files.hasNext()) {
-        const file = files.next();
-        const url = `https://drive.google.com/file/d/${file.getId()}/view`;
-        sheet.getRange(i + 4, 13).setFormula(`=HYPERLINK("${url}","사진 보기")`);
+    // M열: 참고 사진 URL
+    if (!기존링크M && 사용장비 && 모델명 && 모델번호 && 제조사 && 위치) {
+      const fileId = map참고.get((참고파일명 + ".jpg").toLowerCase())
+                  || map참고.get((참고파일명 + ".png").toLowerCase())
+                  || map참고.get((참고파일명 + ".jpeg").toLowerCase());
+      if (fileId) {
+        const url = `https://drive.google.com/file/d/${fileId}/view`;
+        updates.push({ row: i + 4, col: 13, value: `=HYPERLINK("${url}","사진 보기")`, isFormula: true });
       }
     }
 
-    // N열: 도면 사진 URL 삽입
-    if (!기존링크N) {
-      const files = folder도면.searchFiles(
-        `title contains "${도면파일명}" and trashed = false`
-      );
-      if (files.hasNext()) {
-        const file = files.next();
-        const url = `https://drive.google.com/file/d/${file.getId()}/view`;
-        sheet.getRange(i + 4, 14).setFormula(`=HYPERLINK("${url}","도면 보기")`);
+    // N열: 도면 사진 URL
+    if (!기존링크N && 사용장비 && 모델명 && 모델번호 && section && 제조사 && 위치) {
+      const fileId = map도면.get((도면파일명 + ".jpg").toLowerCase())
+                  || map도면.get((도면파일명 + ".png").toLowerCase())
+                  || map도면.get((도면파일명 + ".jpeg").toLowerCase());
+      if (fileId) {
+        const url = `https://drive.google.com/file/d/${fileId}/view`;
+        updates.push({ row: i + 4, col: 14, value: `=HYPERLINK("${url}","도면 보기")`, isFormula: true });
       }
     }
   }
 
-  // K, L열 숨기기
+  // 변경사항 한 번에 쓰기
+  for (const u of updates) {
+    if (u.isFormula) {
+      sheet.getRange(u.row, u.col).setFormula(u.value);
+    } else {
+      sheet.getRange(u.row, u.col).setValue(u.value);
+    }
+  }
+
   sheet.hideColumns(11, 2);
+  SpreadsheetApp.getUi().alert('✅ 사진 URL 업데이트 완료!');
 }
