@@ -649,7 +649,10 @@ function setMergedCellValue(sheet, startCellA1, value) {
 function buildTBMCellText(targets, excluded) {
   const lines = [];
   lines.push(`금일 TBM 대상 : ${targets.join(' / ') || '없음'}`);
+  lines.push('');
   lines.push(`금일 TBM 제외 : ${excluded.join(' / ') || '없음'}`);
+  lines.push('');
+  lines.push(`금일 TBM 대상 수 : ${targets.length}명`);
   return lines.join('\n');
 }
 
@@ -664,7 +667,10 @@ function buildCompletionSummary(sheetName, dateString, prodInfo, hazardContent, 
   lines.push('⚠️ 교육 주제: ' + eduContent.title);
   lines.push('');
   lines.push(`👥 금일 TBM 대상 (${tbmTargets.length}명): ${tbmTargets.join(', ') || '없음'}`);
+  lines.push('');
   lines.push(`🚫 금일 TBM 제외 (${tbmExcluded.length}명): ${tbmExcluded.join(', ') || '없음'}`);
+  lines.push('');
+  lines.push(`📊 금일 TBM 대상 수 : ${tbmTargets.length}명`);
   
   return lines.join('\n');
 }
