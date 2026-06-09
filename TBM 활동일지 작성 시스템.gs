@@ -183,9 +183,6 @@ function createTBMForDate(targetDate) {
     // 3. 시트 복사
     const newSheet = sourceSheet.copyTo(tbmSS);
     newSheet.setName(newSheetName);
-    
-    // 복사된 시트를 맨 뒤로 이동
-    tbmSS.moveActiveSheet(tbmSS.getSheets().length);
     tbmSS.setActiveSheet(newSheet);
     
     // 4. 생산계획 스프레드시트에서 오늘 생산 정보 가져오기
@@ -225,6 +222,12 @@ function createTBMForDate(targetDate) {
     const tbmCellText = buildTBMCellText(tbmTargets, tbmExcluded);
     setMergedCellValue(newSheet, 'B26', tbmCellText);
     
+    // ============================================================
+    // 시트 순서 정렬 (최신일 → 맨 왼쪽)
+    // ============================================================
+    sortSheetsByDate(tbmSS);
+    tbmSS.setActiveSheet(newSheet); // 정렬 후 새 시트에 포커스 유지
+
     // ============================================================
     // 완료 메시지
     // ============================================================
