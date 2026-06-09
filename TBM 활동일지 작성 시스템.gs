@@ -328,9 +328,11 @@ function getProductionInfo(targetDate) {
   const colL = String(todayRow[11]).trim();  // L: CAP
   
   // 헬퍼 함수
-  const isHasValue = (val) => {
-    if (!val || val === '' || val === '0' || val === '-') return false;
-    return true;
+  // 숫자 값(생산 수치)인지 확인 - 텍스트 특이사항은 false 반환
+  const isNumericValue = (val) => {
+    if (!val || val === '' || val === '-') return false;
+    const num = Number(String(val).replace(/,/g, ''));
+    return !isNaN(num) && num > 0;
   };
   const isLc = (val) => val.toUpperCase().includes('L/C');
   
@@ -347,40 +349,40 @@ function getProductionInfo(targetDate) {
   let has012L = false;
   const activeProducts = [];
   
-  // C열: 18.9L (L/C 불가)
-  if (isHasValue(colC)) {
+  // C열: 18.9L (L/C 불가, 숫자값만 인정)
+  if (isNumericValue(colC)) {
     activeProducts.push('18.9L');
     has189L = true;
   }
   
-  // D열: 1.5L (L/C = 포장실 LINE CHANGE)
+  // D열: 1.5L (L/C = 포장실 LINE CHANGE, 숫자값만 생산으로 인정)
   if (isLc(colD)) {
     hasPackagingLineChange = true;
-  } else if (isHasValue(colD)) {
+  } else if (isNumericValue(colD)) {
     activeProducts.push('1.5L');
   }
   
-  // E열: 0.5L (L/C = 포장실 LINE CHANGE)
+  // E열: 0.5L (L/C = 포장실 LINE CHANGE, 숫자값만 생산으로 인정)
   if (isLc(colE)) {
     hasPackagingLineChange = true;
-  } else if (isHasValue(colE)) {
+  } else if (isNumericValue(colE)) {
     activeProducts.push('0.5L');
   }
   
-  // F열: 0.33L (L/C = 포장실 LINE CHANGE)
+  // F열: 0.33L (L/C = 포장실 LINE CHANGE, 숫자값만 생산으로 인정)
   if (isLc(colF)) {
     hasPackagingLineChange = true;
-  } else if (isHasValue(colF)) {
+  } else if (isNumericValue(colF)) {
     activeProducts.push('0.33L');
   }
   
-  // H열: 0.19L 캔 (L/C 불가, 순서상 0.33L 다음)
-  if (isHasValue(colH)) {
-    activeProducts.push('0.19L캔');
+  // H열: 0.19L (L/C 불가, 순서상 0.33L 다음, 숫자값만 생산으로 인정)
+  if (isNumericValue(colH)) {
+    activeProducts.push('0.19L');
   }
   
-  // G열: 0.12L (L/C 불가, 마지막 순서)
-  if (isHasValue(colG)) {
+  // G열: 0.12L (L/C 불가, 마지막 순서, 숫자값만 생산으로 인정)
+  if (isNumericValue(colG)) {
     activeProducts.push('0.12L');
     has012L = true;
   }
@@ -400,7 +402,7 @@ function getProductionInfo(targetDate) {
   for (const b of btlMap) {
     if (isLc(b.col)) {
       hasBtlLineChange = true;
-    } else if (isHasValue(b.col)) {
+    } else if (isNumericValue(b.col)) {
       activeBtl.push(b.label);
     }
   }
@@ -409,7 +411,7 @@ function getProductionInfo(targetDate) {
   // CAP 분석 (L열)
   // ─────────────────────────────────────────
   let hasCap = false;
-  if (isHasValue(colL) && !isLc(colL)) {
+  if (isNumericValue(colL) && !isLc(colL)) {
     hasCap = true;
   }
   
