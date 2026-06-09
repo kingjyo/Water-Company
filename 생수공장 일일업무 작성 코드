@@ -184,7 +184,7 @@ function fillDailyReportCore(today) {
   // ════════════════════════════════════════════════════════
   // 13. A23 = 하천유출/기상관측 + 이전 근무일
   // ════════════════════════════════════════════════════════
-  todaySheet.getRange('A23').setValue(` 5. 하천유출/기상관측 ${prevWorkLabel}`);
+  todaySheet.getRange('A23').setValue(` 5. 하천유출/기상관측        ${prevWorkLabel}`);
 
   // ════════════════════════════════════════════════════════
   // 14. D19:I22 = 취감시정 수위 데이터
@@ -383,8 +383,9 @@ function fillSafetySection(todaySheet, workSchedSS, prodPlanSS, ss, today, month
   const amText = pickByDay(amOptions, day * 5 + month * 2);
 
   // 오후 선택 (18.9L 문구 제외)
-  const pmFiltered = PM_OPTIONS.filter(t => t !== prevPm && !t.includes('18.9L'));
-  const pmText = pickByDay(pmFiltered.length > 0 ? pmFiltered : PM_OPTIONS.filter(t => !t.includes('18.9L')), day * 11 + month * 3);
+  const pmFiltered = PM_OPTIONS.filter(t => t !== prevPm && t !== amText && !t.includes('18.9L'));
+  const pmFallback = PM_OPTIONS.filter(t => t !== amText && !t.includes('18.9L'));
+  const pmText = pickByDay(pmFiltered.length > 0 ? pmFiltered : (pmFallback.length > 0 ? pmFallback : PM_OPTIONS.filter(t => !t.includes('18.9L'))), day * 11 + month * 3);
 
   // ── 텍스트 조립 ───────────────────────────────────────
   const fullText =
@@ -1125,7 +1126,11 @@ function buildTodayPrediction(prodPlanSS, workSchedSS, today, month, day, year) 
   for (let i = 0; i < 6; i++) {
     const v = prodRow[i];
     if (typeof v === 'string' && v.trim() !== '') {
-      if (!/^L\/C/i.test(v.trim())) specialNotes.push(v.trim());
+      if (!/^L\/C/i.test(v.trim())) {
+        // 괄호로 감싸진 경우 괄호 제거
+        const cleaned = v.trim().replace(/^\((.+)\)$/, '$1');
+        specialNotes.push(cleaned);
+      }
       continue;
     }
     if (typeof v === 'number' && v > 0) prodItems.push(PROD_NAMES[i]);
@@ -1192,11 +1197,15 @@ function detectLC(planSheet, prodPlanSS, rowIdx, type, month, day, year) {
 // ════════════════════════════════════════════════════════
 function findAdjacentProd(planSheet, prodPlanSS, rowIdx, direction, colStart, colEnd, names, month, year) {
   const colCount = colEnd - colStart + 1;
+
+  // LC 대상 제외 이름 (18.9L, 0.12L은 별도 LINE)
+  const LC_EXCLUDE = new Set(['18.9L', '0.12L']);
+
   let r = direction === 'before' ? rowIdx - 1 : rowIdx + 1;
   while (r >= 3 && r <= 33) {
     const vals = planSheet.getRange(r, colStart, 1, colCount).getValues()[0];
     for (let i = 0; i < vals.length; i++) {
-      if (typeof vals[i] === 'number' && vals[i] > 0) return names[i];
+      if (typeof vals[i] === 'number' && vals[i] > 0 && !LC_EXCLUDE.has(names[i])) return names[i];
     }
     r += direction === 'before' ? -1 : 1;
   }
@@ -1217,7 +1226,7 @@ function findAdjacentProd(planSheet, prodPlanSS, rowIdx, direction, colStart, co
   for (const ar of searchRows) {
     const vals = adjSheet.getRange(ar, colStart, 1, colCount).getValues()[0];
     for (let i = 0; i < vals.length; i++) {
-      if (typeof vals[i] === 'number' && vals[i] > 0) return names[i];
+      if (typeof vals[i] === 'number' && vals[i] > 0 && !LC_EXCLUDE.has(names[i])) return names[i];
     }
   }
   return null;
