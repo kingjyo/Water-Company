@@ -192,7 +192,7 @@ function createTBMForDate(targetDate) {
     const prodInfo = getProductionInfo(targetDate);
     
     // 5. 근무계획 스프레드시트에서 오늘 TBM 대상자 가져오기
-    const tbmTargets = getTBMTargets(targetDate);
+    const { targets: tbmTargets, excluded: tbmExcluded } = getTBMTargets(targetDate);
     
     // 6. 교육 레파토리 인덱스 (스크립트 속성에서 관리)
     const eduIndex = getNextEducationIndex(prodInfo.hasBtlOrCap);
@@ -221,13 +221,14 @@ function createTBMForDate(targetDate) {
     const eduContent = EDUCATION_REPERTOIRE[eduIndex];
     setMergedCellValue(newSheet, 'B17', buildEducationContent(eduContent));
     
-    // B26:J27: 금일 TBM 대상
-    setMergedCellValue(newSheet, 'B26', tbmTargets.join(' / '));
+    // B26:J27: 금일 TBM 대상 / 제외
+    const tbmCellText = buildTBMCellText(tbmTargets, tbmExcluded);
+    setMergedCellValue(newSheet, 'B26', tbmCellText);
     
     // ============================================================
     // 완료 메시지
     // ============================================================
-    const summary = buildCompletionSummary(newSheetName, dateString, prodInfo, hazardContent, eduContent, tbmTargets);
+    const summary = buildCompletionSummary(newSheetName, dateString, prodInfo, hazardContent, eduContent, tbmTargets, tbmExcluded);
     ui.alert('TBM 일지 작성 완료', summary, ui.ButtonSet.OK);
     
   } catch (e) {
@@ -602,7 +603,8 @@ function getTBMTargets(targetDate) {
   // 휴무 코드: 공, 휴, 무, 년, 야, 퇴, 상, 근
   const ABSENT_CODES = ['공', '휴', '무', '년', '야', '퇴', '상', '근'];
   
-  const targets = [];
+  const targets = [];   // TBM 대상 (출근)
+  const excluded = [];  // TBM 제외 (결근/휴무 등)
   
   for (let r = 2; r <= 17; r++) { // data index 2~17 = 5번째~20번째 행
     const row = data[r];
@@ -615,19 +617,18 @@ function getTBMTargets(targetDate) {
     
     const attendance = String(row[dayColIndex]).trim();
     
-    // 결근 코드에 해당하면 TBM 대상 제외
+    // 결근 코드에 해당하면 TBM 제외 목록에 추가
     const isAbsent = ABSENT_CODES.some(code => attendance.includes(code));
+    const displayName = (rank && rank !== '') ? `${name} ${rank}` : name;
     
-    if (!isAbsent) {
-      if (rank && rank !== '') {
-        targets.push(`${name} ${rank}`);
-      } else {
-        targets.push(name);
-      }
+    if (isAbsent) {
+      excluded.push(displayName);
+    } else {
+      targets.push(displayName);
     }
   }
   
-  return targets;
+  return { targets, excluded };
 }
 
 // ============================================================
@@ -645,7 +646,14 @@ function setMergedCellValue(sheet, startCellA1, value) {
 // ============================================================
 // 완료 요약 메시지 생성
 // ============================================================
-function buildCompletionSummary(sheetName, dateString, prodInfo, hazardContent, eduContent, tbmTargets) {
+function buildTBMCellText(targets, excluded) {
+  const lines = [];
+  lines.push(`금일 TBM 대상 : ${targets.join(' / ') || '없음'}`);
+  lines.push(`금일 TBM 제외 : ${excluded.join(' / ') || '없음'}`);
+  return lines.join('\n');
+}
+
+function buildCompletionSummary(sheetName, dateString, prodInfo, hazardContent, eduContent, tbmTargets, tbmExcluded) {
   const lines = [];
   lines.push(`✅ [${sheetName}] 시트 작성 완료`);
   lines.push(`📅 날짜: ${dateString}`);
@@ -655,8 +663,8 @@ function buildCompletionSummary(sheetName, dateString, prodInfo, hazardContent, 
   lines.push('');
   lines.push('⚠️ 교육 주제: ' + eduContent.title);
   lines.push('');
-  lines.push(`👥 TBM 대상 (${tbmTargets.length}명):`);
-  lines.push(tbmTargets.join(', ') || '없음');
+  lines.push(`👥 금일 TBM 대상 (${tbmTargets.length}명): ${tbmTargets.join(', ') || '없음'}`);
+  lines.push(`🚫 금일 TBM 제외 (${tbmExcluded.length}명): ${tbmExcluded.join(', ') || '없음'}`);
   
   return lines.join('\n');
 }
