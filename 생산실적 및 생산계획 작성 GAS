@@ -3,13 +3,18 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('원부재료 관리')
     .addItem('원부재료 사용 및 손실율 데이터 가져오기', 'fetchRawMaterialData')
+    .addSeparator()
+    .addItem('지하수 사용실적 데이터 가져오기', 'fetchGroundwaterData')
     .addToUi();
 }
 
 // ==================== 소스 스프레드시트 매핑 ====================
 // type: 'default' -> D39(사용량월계), E39(손실량월계), D8:D38(사용일수)
+//   ※ D39 행의 A열이 "월계"가 아니면 A열에서 "월계" 행을 자동 탐색
 // type: '0.19L' -> D37(사용량월계), E37(손실량월계), E5:E36(사용일수 산정)
-// type: 'boxglue' -> I39(사용량월계), 손실량 없음("-" 고정)
+//   ※ D37 행의 A열이 "월계"가 아니면 A열에서 "월계" 행을 자동 탐색
+// type: 'boxglue' -> J39(사용량월계), I39(손실량월계)
+//   ※ J39/I39 행의 A열이 "월계"가 아니면 A열에서 "월계" 행을 자동 탐색
 // div1000: true -> 사용량/손실량을 1,000으로 나눠서 입력
 function getItemMap() {
   return {
@@ -112,15 +117,39 @@ function fetchRawMaterialData() {
         let usageTotal, lossTotal, usedDays;
 
         if (item.type === 'boxglue') {
-          // BOX GLUE: I39(사용량월계), 손실량 없음
-          usageTotal = srcSheet.getRange('I39').getValue();
-          lossTotal = 0;
-          usedDays = 0; // I열("-" 고정)
+          // BOX GLUE: J39(사용량월계), I39(손실량월계)
+          // A열 "월계" 보험: J39/I39 행의 A열이 "월계"가 아니면 자동 탐색
+          let boxglueRow = 39;
+          const bgAVal = srcSheet.getRange(boxglueRow, 1).getValue();
+          if (String(bgAVal).trim() !== '월계') {
+            const lastRow = srcSheet.getLastRow();
+            for (let r = 1; r <= lastRow; r++) {
+              if (String(srcSheet.getRange(r, 1).getValue()).trim() === '월계') {
+                boxglueRow = r;
+                break;
+              }
+            }
+          }
+          usageTotal = srcSheet.getRange(boxglueRow, 10).getValue(); // J열
+          lossTotal  = srcSheet.getRange(boxglueRow, 9).getValue();  // I열
+          usedDays = 0;
 
         } else if (item.type === '0.19L') {
           // 0.19L 계열: D37(사용량월계), E37(손실량월계), E5:E36(사용일수 산정)
-          usageTotal = srcSheet.getRange('D37').getValue();
-          lossTotal = srcSheet.getRange('E37').getValue();
+          // A열 "월계" 보험: 37행의 A열이 "월계"가 아니면 자동 탐색
+          let baseRow19 = 37;
+          const aVal19 = srcSheet.getRange(baseRow19, 1).getValue();
+          if (String(aVal19).trim() !== '월계') {
+            const lastRow = srcSheet.getLastRow();
+            for (let r = 1; r <= lastRow; r++) {
+              if (String(srcSheet.getRange(r, 1).getValue()).trim() === '월계') {
+                baseRow19 = r;
+                break;
+              }
+            }
+          }
+          usageTotal = srcSheet.getRange(baseRow19, 4).getValue(); // D열
+          lossTotal  = srcSheet.getRange(baseRow19, 5).getValue(); // E열
 
           const e5e36Values = srcSheet.getRange('E5:E36').getValues();
           usedDays = 0;
@@ -133,8 +162,20 @@ function fetchRawMaterialData() {
 
         } else {
           // default 계열: D39(사용량월계), E39(손실량월계), D8:D38(사용일수 산정)
-          usageTotal = srcSheet.getRange('D39').getValue();
-          lossTotal = srcSheet.getRange('E39').getValue();
+          // A열 "월계" 보험: 39행의 A열이 "월계"가 아니면 자동 탐색
+          let baseRow = 39;
+          const aVal = srcSheet.getRange(baseRow, 1).getValue();
+          if (String(aVal).trim() !== '월계') {
+            const lastRow = srcSheet.getLastRow();
+            for (let r = 1; r <= lastRow; r++) {
+              if (String(srcSheet.getRange(r, 1).getValue()).trim() === '월계') {
+                baseRow = r;
+                break;
+              }
+            }
+          }
+          usageTotal = srcSheet.getRange(baseRow, 4).getValue(); // D열
+          lossTotal  = srcSheet.getRange(baseRow, 5).getValue(); // E열
 
           const d8d38Values = srcSheet.getRange('D8:D38').getValues();
           usedDays = 0;
@@ -179,6 +220,174 @@ function fetchRawMaterialData() {
       msg += '\n\n오류 항목:\n' + errors.join('\n');
     }
     ui.alert('완료', msg, ui.ButtonSet.OK);
+
+  } catch (e) {
+    ui.alert('오류', e.message, ui.ButtonSet.OK);
+  }
+}
+
+// ==================== 지하수 사용실적 스프레드시트 ID 맵 ====================
+// key: 연도(숫자), value: 스프레드시트 ID
+// ※ 연말에 새 연도 스프레드시트가 생기면 여기에 추가하세요.
+function getGroundwaterSSMap() {
+  return {
+    2025: '16Cmq2hmjjeiJxxQsVprtPlMckUOdqMMrzQt8_HzQKfg',
+    2026: '1c5njunIqLbuPFOR4dFnDELSInNVcf6tOP_C-bh5L-q8',
+  };
+}
+
+// ==================== 헬퍼: 특정 연도·월의 말일 행에서 N열·O열 읽기 ====================
+// srcSheet: 지하수 사용량 시트
+// targetMonth: 가져올 월 (1~12)
+// 반환: { product: N열값, process: O열값 } 또는 null(해당 월 데이터 없음)
+function getMonthlyLastRowData(srcSheet, targetMonth) {
+  const lastRow = srcSheet.getLastRow();
+  // A열 전체 읽기 (3행부터 데이터 시작)
+  const aValues = srcSheet.getRange(3, 1, lastRow - 2, 1).getValues();
+
+  let foundRow = -1; // 해당 월의 마지막 데이터 행 (1-indexed, 시트 기준)
+  for (let i = 0; i < aValues.length; i++) {
+    const cellVal = aValues[i][0];
+    if (!cellVal) continue;
+    const dateObj = new Date(cellVal);
+    if (isNaN(dateObj.getTime())) continue;
+    const cellMonth = dateObj.getMonth() + 1; // 1~12
+    if (cellMonth === targetMonth) {
+      foundRow = i + 3; // 시트 행 번호 (1-indexed)
+    } else if (cellMonth > targetMonth) {
+      break; // 날짜 오름차순이므로 초과하면 종료
+    }
+  }
+
+  if (foundRow === -1) return null;
+
+  const nVal = srcSheet.getRange(foundRow, 14).getValue(); // N열
+  const oVal = srcSheet.getRange(foundRow, 15).getValue(); // O열
+  return { product: nVal, process: oVal };
+}
+
+// ==================== 지하수 사용실적 메인 함수 ====================
+function fetchGroundwaterData() {
+  const ui = SpreadsheetApp.getUi();
+
+  try {
+    const destSS = SpreadsheetApp.getActiveSpreadsheet();
+    const reportSheet = destSS.getSheetByName('보고용 표');
+    if (!reportSheet) {
+      ui.alert('오류', '"보고용 표" 시트를 찾을 수 없습니다.', ui.ButtonSet.OK);
+      return;
+    }
+
+    // P3(기준 연도), R3(기준 월) 읽기
+    const yearVal  = reportSheet.getRange('P3').getValue();
+    const monthVal = reportSheet.getRange('R3').getValue();
+    if (!yearVal || !monthVal) {
+      ui.alert('오류', '보고용 표의 P3(연도) 또는 R3(월) 값이 비어 있습니다.', ui.ButtonSet.OK);
+      return;
+    }
+
+    const baseYear  = parseInt(String(yearVal).replace(/[^0-9]/g, ''), 10);
+    const baseMonth = parseInt(String(monthVal).replace(/[^0-9]/g, ''), 10);
+    const prevYear  = baseYear - 1;
+
+    // ── 연도 불일치 경고 (작동은 계속) ──
+    const currentYear = new Date().getFullYear();
+    if (currentYear !== baseYear) {
+      ui.alert(
+        '⚠️ 연도 불일치 경고',
+        '현재 실제 연도(' + currentYear + '년)와\n보고용 표의 기준 연도(' + baseYear + '년)가 다릅니다.\n\n' +
+        'getGroundwaterSSMap() 의 스프레드시트 ID가\n최신 연도에 맞게 등록되어 있는지 확인하세요.\n\n계속 실행합니다.',
+        ui.ButtonSet.OK
+      );
+    }
+
+    // 지하수 사용량 시트명
+    const gwSheetName = '지하수 사용량';
+    const ssMap = getGroundwaterSSMap();
+
+    // ── 전년도 스프레드시트 열기 ──
+    const prevId = ssMap[prevYear];
+    if (!prevId) {
+      ui.alert('오류', prevYear + '년 스프레드시트 ID가 getGroundwaterSSMap()에 등록되어 있지 않습니다.', ui.ButtonSet.OK);
+      return;
+    }
+    const prevSS    = SpreadsheetApp.openById(prevId);
+    const prevSheet = prevSS.getSheetByName(gwSheetName);
+    if (!prevSheet) {
+      ui.alert('오류', prevYear + '년 스프레드시트에 "' + gwSheetName + '" 시트가 없습니다.', ui.ButtonSet.OK);
+      return;
+    }
+
+    // ── 금년도 스프레드시트 열기 ──
+    const currId = ssMap[baseYear];
+    if (!currId) {
+      ui.alert('오류', baseYear + '년 스프레드시트 ID가 getGroundwaterSSMap()에 등록되어 있지 않습니다.', ui.ButtonSet.OK);
+      return;
+    }
+    const currSS    = SpreadsheetApp.openById(currId);
+    const currSheet = currSS.getSheetByName(gwSheetName);
+    if (!currSheet) {
+      ui.alert('오류', baseYear + '년 스프레드시트에 "' + gwSheetName + '" 시트가 없습니다.', ui.ButtonSet.OK);
+      return;
+    }
+
+    // ── 전년도: D5(이번 월 제품수), E5(이번 월 공정수) ──
+    const prevMonthData = getMonthlyLastRowData(prevSheet, baseMonth);
+    if (!prevMonthData) {
+      ui.alert('오류', prevYear + '년 ' + baseMonth + '월 데이터를 찾을 수 없습니다.', ui.ButtonSet.OK);
+      return;
+    }
+    reportSheet.getRange('D5').setValue(prevMonthData.product);
+    reportSheet.getRange('E5').setValue(prevMonthData.process);
+
+    // ── 전년도 누계: I5(1월~기준월 제품수 합계), J5(공정수 합계) ──
+    let prevProductSum = 0;
+    let prevProcessSum = 0;
+    for (let m = 1; m <= baseMonth; m++) {
+      const mData = getMonthlyLastRowData(prevSheet, m);
+      if (mData) {
+        const pNum = Number(mData.product);
+        const oNum = Number(mData.process);
+        if (!isNaN(pNum)) prevProductSum += pNum;
+        if (!isNaN(oNum)) prevProcessSum += oNum;
+      }
+    }
+    reportSheet.getRange('I5').setValue(prevProductSum);
+    reportSheet.getRange('J5').setValue(prevProcessSum);
+
+    // ── 금년도: D6(이번 월 제품수), E6(이번 월 공정수) ──
+    const currMonthData = getMonthlyLastRowData(currSheet, baseMonth);
+    if (!currMonthData) {
+      ui.alert('오류', baseYear + '년 ' + baseMonth + '월 데이터를 찾을 수 없습니다.', ui.ButtonSet.OK);
+      return;
+    }
+    reportSheet.getRange('D6').setValue(currMonthData.product);
+    reportSheet.getRange('E6').setValue(currMonthData.process);
+
+    // ── 금년도 누계: I6(1월~기준월 제품수 합계), J6(공정수 합계) ──
+    let currProductSum = 0;
+    let currProcessSum = 0;
+    for (let m = 1; m <= baseMonth; m++) {
+      const mData = getMonthlyLastRowData(currSheet, m);
+      if (mData) {
+        const pNum = Number(mData.product);
+        const oNum = Number(mData.process);
+        if (!isNaN(pNum)) currProductSum += pNum;
+        if (!isNaN(oNum)) currProcessSum += oNum;
+      }
+    }
+    reportSheet.getRange('I6').setValue(currProductSum);
+    reportSheet.getRange('J6').setValue(currProcessSum);
+
+    ui.alert(
+      '완료',
+      baseYear + '년 ' + baseMonth + '월 기준\n지하수 사용실적 데이터 입력 완료\n\n' +
+      '전년(' + prevYear + '년) D5=' + prevMonthData.product + ', E5=' + prevMonthData.process +
+        ', I5=' + prevProductSum + ', J5=' + prevProcessSum + '\n' +
+      '금년(' + baseYear + '년) D6=' + currMonthData.product + ', E6=' + currMonthData.process +
+        ', I6=' + currProductSum + ', J6=' + currProcessSum,
+      ui.ButtonSet.OK
+    );
 
   } catch (e) {
     ui.alert('오류', e.message, ui.ButtonSet.OK);
