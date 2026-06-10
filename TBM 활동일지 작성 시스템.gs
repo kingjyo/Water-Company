@@ -711,3 +711,29 @@ function checkCurrentIndices() {
     SpreadsheetApp.getUi().ButtonSet.OK
   );
 }
+
+// ============================================================
+// 시트 날짜 순 정렬 (MMDD 내림차순 → 최신이 맨 왼쪽)
+// MMDD 형식이 아닌 시트(서식지, 양식 등)는 맨 뒤로 밀림
+// ============================================================
+function sortSheetsByDate(ss) {
+  const mmddPattern = /^\d{4}$/;
+  const allSheets = ss.getSheets();
+
+  // MMDD 시트: 내림차순 정렬 (숫자 클수록 = 최신일 = 왼쪽)
+  const dateSheets = allSheets
+    .filter(s => mmddPattern.test(s.getName()))
+    .sort((a, b) => parseInt(b.getName()) - parseInt(a.getName()));
+
+  // MMDD 아닌 시트: 원래 순서 유지
+  const otherSheets = allSheets
+    .filter(s => !mmddPattern.test(s.getName()));
+
+  // 최종 순서: [날짜시트(최신→과거)] + [기타시트]
+  const orderedSheets = [...dateSheets, ...otherSheets];
+
+  orderedSheets.forEach((sheet, index) => {
+    ss.setActiveSheet(sheet);
+    ss.moveActiveSheet(index + 1); // 1-based
+  });
+}
