@@ -1,0 +1,186 @@
+// ==================== 메뉴 ====================
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('원부재료 관리')
+    .addItem('원부재료 사용 및 손실율 데이터 가져오기', 'fetchRawMaterialData')
+    .addToUi();
+}
+
+// ==================== 소스 스프레드시트 매핑 ====================
+// type: 'default' -> D39(사용량월계), E39(손실량월계), D8:D38(사용일수)
+// type: '0.19L' -> D37(사용량월계), E37(손실량월계), E5:E36(사용일수 산정)
+// type: 'boxglue' -> I39(사용량월계), 손실량 없음("-" 고정)
+// div1000: true -> 사용량/손실량을 1,000으로 나눠서 입력
+function getItemMap() {
+  return {
+    11: { name: 'PET RESIN', id: '1ZlieWQUMqiFJRn7M9bnHzlr011SEiSNHJ6Fx8YUHF5g', type: 'default' },
+    12: { name: 'H.D.P.E', id: '1OPiFdAnfH4j32HptEXXsMo4YJDfOGA4MKZPsWTY3zOo', type: 'default' },
+    13: { name: 'AA 소거제', id: '17VEiGIZO7PSkmHWg1Uxr3i_6kgeHQNTbCGoCoDGoZM0', type: 'default' },
+    14: { name: 'BOTTLE 1.5L', id: '1yv1PCniYFxpKUukr5zzR27Wm2ZiAN7DAy1vnnPxH7Oc', type: 'default' },
+    15: { name: 'BOTTLE 0.5L', id: '1h5Bn_K7y5yXhJYYkQqhB8HFi5JxpqDFJrUTk4w6xeoQ', type: 'default' },
+    16: { name: 'BOTTLE 0.33L', id: '12nuazSl9b2xsB_fgMr4DXPRnAWi-PhxTCZKcNTfxY6o', type: 'default' },
+    17: { name: 'CAP 1.5L/0.5L/0.33L', id: '1Lj441vtGAnmpDCjzRaiHx3STrFSISDMgn0CMQGVl7tc', type: 'default' },
+    18: { name: 'CAP 18.9L', id: '1KDIJHwo-C-QQLRQHH5YrT2jk47OwDMZhjVsTK2mEXT4', type: 'default' },
+    19: { name: '18.9L 루땡', id: '1_bhibYyNMbXzPiOjMk4Pc7ZBL9kMyiMsrklpyeijyWc', type: 'default' },
+    20: { name: 'BOX 1.5L(황색)', id: '1xTzDxTsYpbeLraMWw72R6q7btBbIFfdtfQ_WJJvhqD8', type: 'default' },
+    21: { name: 'BOX 1.5L(백색)', id: '1cUNqavUSm4u3XHvVN3uvZ9ags5rmei0pm9kwFkm7EKw', type: 'default' },
+    22: { name: 'BOX 0.5L(황색)', id: '1jEg4iUtNZtAZ2Sb7Tz_y6tAnM-EaVMsgAdnTnR4B-nQ', type: 'default' },
+    23: { name: 'BOX 0.5L(백색)', id: '1m7V-LNDKVOWG1yKskXRI7YzcF5dhHiHYExTK7C_v8E4', type: 'default' },
+    24: { name: 'BOX 0.33L(황색)', id: '1DE-BvO_uUlXaVvLgMY8KbrCwpCXdUZ_NrkzAgj0gmmg', type: 'default' },
+    25: { name: 'BOX 0.33L(백색)', id: '1CTvG9VGvYUGDe5MImm_W6zYeXvOTO_XohU-jRfa9874', type: 'default' },
+    26: { name: 'BOX 0.12L', id: '1shVvW-EkjN-J7g1QMtgM7ZFh5lS9vh6NVKcPi2zcuFY', type: 'default' },
+    27: { name: 'BOX GLUE', id: '17KRbH7ZPjxXULH57Oq69oMW4ytlAeecbRb3G4-pBySM', type: 'boxglue' },
+    28: { name: 'PET SHEET', id: '1E_K-sWWleeqWPGPILq-vmLx-e79A0seL29kSiA4OOTQ', type: 'default' },
+    29: { name: 'LID KAL국제', id: '1YJ5gQX7mK8AywQTnHFkE0wzesSitrcc7WLeUDpfgenk', type: 'default' },
+    30: { name: 'LID KAL국내', id: null, type: 'default' },
+    31: { name: 'LID OAL', id: '1CeZBXD-FFeKXRiv6bpRhLGOxTkF07SuU96ylINgx5Q8', type: 'default' },
+    32: { name: '0.19L CAN', id: '1w2XPcLsTqfFyGmDgWdocEvArqDTLQHNRHbLr5pNLuNE', type: '0.19L' },
+    33: { name: '0.19L END', id: '1LKYYTwylyS2fii4ltOxOLA8EKdwvnthhL-_XEVMMKLc', type: '0.19L' },
+    34: { name: '0.19L 식이섬유', id: '1lieNfEgN_aeTx-c9M5JH_dI3FbGJczswIeHPTt1QflE', type: '0.19L', div1000: true },
+    35: { name: '0.19L 하프트레이', id: '1HPO08BJIFyiGuZ2v0BGuSOY4TRvV1dVL-mBVQCxwBV8', type: '0.19L' },
+  };
+}
+
+// ==================== 헬퍼: 0이면 "-", 아니면 수치 반환 ====================
+function zeroToDash(value) {
+  if (value === '' || value === null || value === undefined) return '-';
+  const num = Number(value);
+  if (isNaN(num) || num === 0) return '-';
+  return num;
+}
+
+// ==================== 메인 함수 ====================
+function fetchRawMaterialData() {
+  const ui = SpreadsheetApp.getUi();
+
+  try {
+    const destSS = SpreadsheetApp.getActiveSpreadsheet();
+
+    // 보고용 표 시트에서 연도, 월 읽기
+    const reportSheet = destSS.getSheetByName('보고용 표');
+    if (!reportSheet) {
+      ui.alert('오류', '"보고용 표" 시트를 찾을 수 없습니다.', ui.ButtonSet.OK);
+      return;
+    }
+
+    const yearVal = reportSheet.getRange('P3').getValue();
+    const monthVal = reportSheet.getRange('R3').getValue();
+
+    if (!yearVal || !monthVal) {
+      ui.alert('오류', '보고용 표의 P3(연도) 또는 R3(월) 값이 비어 있습니다.', ui.ButtonSet.OK);
+      return;
+    }
+
+    // 월 -> 시트명 변환 (숫자 또는 "3월" 형태 모두 처리)
+    const monthNum = parseInt(String(monthVal).replace(/[^0-9]/g, ''), 10);
+    const sheetName = monthNum + '월';
+
+    const destSheet = destSS.getSheetByName('원부재료 사용 및 손실율 내역');
+    if (!destSheet) {
+      ui.alert('오류', '"원부재료 사용 및 손실율 내역" 시트를 찾을 수 없습니다.', ui.ButtonSet.OK);
+      return;
+    }
+
+    const itemMap = getItemMap();
+    const rows = Object.keys(itemMap).map(Number).sort((a, b) => a - b);
+
+    let successCount = 0;
+    let skipCount = 0;
+    const errors = [];
+
+    for (const row of rows) {
+      const item = itemMap[row];
+
+      // 소스 ID 없는 품목 -> 해당 셀 비움
+      if (!item.id) {
+        destSheet.getRange(row, 5).clearContent(); // E열
+        destSheet.getRange(row, 6).clearContent(); // F열
+        destSheet.getRange(row, 9).clearContent(); // I열
+        skipCount++;
+        continue;
+      }
+
+      try {
+        const srcSS = SpreadsheetApp.openById(item.id);
+        const srcSheet = srcSS.getSheetByName(sheetName);
+
+        if (!srcSheet) {
+          errors.push(item.name + ': "' + sheetName + '" 시트 없음');
+          continue;
+        }
+
+        let usageTotal, lossTotal, usedDays;
+
+        if (item.type === 'boxglue') {
+          // BOX GLUE: I39(사용량월계), 손실량 없음
+          usageTotal = srcSheet.getRange('I39').getValue();
+          lossTotal = 0;
+          usedDays = 0; // I열("-" 고정)
+
+        } else if (item.type === '0.19L') {
+          // 0.19L 계열: D37(사용량월계), E37(손실량월계), E5:E36(사용일수 산정)
+          usageTotal = srcSheet.getRange('D37').getValue();
+          lossTotal = srcSheet.getRange('E37').getValue();
+
+          const e5e36Values = srcSheet.getRange('E5:E36').getValues();
+          usedDays = 0;
+          for (let i = 0; i < e5e36Values.length; i++) {
+            const v = e5e36Values[i][0];
+            if (v !== '' && v !== null && !isNaN(v) && Number(v) !== 0) {
+              usedDays++;
+            }
+          }
+
+        } else {
+          // default 계열: D39(사용량월계), E39(손실량월계), D8:D38(사용일수 산정)
+          usageTotal = srcSheet.getRange('D39').getValue();
+          lossTotal = srcSheet.getRange('E39').getValue();
+
+          const d8d38Values = srcSheet.getRange('D8:D38').getValues();
+          usedDays = 0;
+          for (let i = 0; i < d8d38Values.length; i++) {
+            const v = d8d38Values[i][0];
+            if (v !== '' && v !== null && !isNaN(v) && Number(v) !== 0) {
+              usedDays++;
+            }
+          }
+        }
+
+        // I열 계산: 손실량 월계 / 사용한 날 수 (0이면 "-")
+        let iVal;
+        if (usedDays > 0 && lossTotal !== '' && lossTotal !== null && !isNaN(lossTotal) && Number(lossTotal) !== 0) {
+          iVal = Number(lossTotal) / usedDays;
+        } else {
+          iVal = '-';
+        }
+
+        // 식이섬유 등 1,000 나눔 처리
+        const divisor = item.div1000 ? 1000 : 1;
+
+        // 0이면 "-" 처리 후 입력
+        const eVal = zeroToDash(Number(usageTotal) / divisor);
+        const fVal = zeroToDash(Number(lossTotal) / divisor);
+
+        destSheet.getRange(row, 5).setValue(eVal); // E열
+        destSheet.getRange(row, 6).setValue(fVal); // F열
+        destSheet.getRange(row, 9).setValue(iVal); // I열
+
+        successCount++;
+
+      } catch (e) {
+        errors.push(item.name + ': ' + e.message);
+      }
+    }
+
+    // 결과 메시지
+    let msg = yearVal + '년 ' + sheetName + ' 데이터 입력 완료\n';
+    msg += '성공: ' + successCount + '건, 건너뜀(소스없음): ' + skipCount + '건';
+    if (errors.length > 0) {
+      msg += '\n\n오류 항목:\n' + errors.join('\n');
+    }
+    ui.alert('완료', msg, ui.ButtonSet.OK);
+
+  } catch (e) {
+    ui.alert('오류', e.message, ui.ButtonSet.OK);
+  }
+}
