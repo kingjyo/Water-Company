@@ -603,11 +603,14 @@ function getTBMTargets(targetDate) {
   // 즉 data[2] ~ data[17]
   // B열 (index 0) = 직급, C열 (index 1) = 성명
   
-  // 휴무 코드: 공, 휴, 무, 년, 야, 퇴, 상, 근
-  const ABSENT_CODES = ['공', '휴', '무', '년', '야', '퇴', '상', '근'];
+  // 휴무 코드: 공, 휴, 무, 년, 야, 퇴, 상, 근, 청(청원휴가)
+  const ABSENT_CODES = ['공', '휴', '무', '년', '야', '퇴', '상', '근', '청'];
+  
+  // 사내교육 대상자: 근무코드에 "교"가 포함되면 TBM 제외
+  const EDU_MEMBERS = ['김재방', '이정묵', '김영준', '박수형', '고혁진', '진성령'];
   
   const targets = [];   // TBM 대상 (출근)
-  const excluded = [];  // TBM 제외 (결근/휴무 등)
+  const excluded = [];  // TBM 제외 (결근/휴무/사내교육 등)
   
   for (let r = 2; r <= 17; r++) { // data index 2~17 = 5번째~20번째 행
     const row = data[r];
@@ -622,9 +625,11 @@ function getTBMTargets(targetDate) {
     
     // 결근 코드에 해당하면 TBM 제외 목록에 추가
     const isAbsent = ABSENT_CODES.some(code => attendance.includes(code));
+    // 사내교육 대상자이고 "교" 코드 포함 시 TBM 제외
+    const isEdu = EDU_MEMBERS.includes(name) && attendance.includes('교');
     const displayName = (rank && rank !== '') ? `${name} ${rank}` : name;
     
-    if (isAbsent) {
+    if (isAbsent || isEdu) {
       excluded.push(displayName);
     } else {
       targets.push(displayName);

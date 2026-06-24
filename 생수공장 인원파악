@@ -6,7 +6,10 @@
 const ID_PROD = "1ibZaOX0NKni6vRTVE0i2Wb5AXNHn9D72F5CFWSxH3qQ";
 const ID_WORK = "12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY";
 
-const OFF_CODES = ["휴", "무", "사", "퇴", "상", "년", "공"];
+const OFF_CODES = ["휴", "무", "사", "퇴", "상", "년", "공", "청"];
+
+// 사내교육 대상자 ("교" 코드 처리 대상)
+const EDU_MEMBERS = ["김재방", "이정묵", "김영준", "박수형", "고혁진", "진성령"];
 
 const GROUP = {
   생산: ["김재방", "이정묵", "김영준"],
@@ -16,7 +19,7 @@ const GROUP = {
 
 const OFF_REASON = {
   "년": "연차", "공": "공휴", "휴": "휴무",
-  "무": "무급휴무", "사": "사직", "퇴": "철야휴무", "상": "상조휴가"
+  "무": "무급휴무", "사": "사직", "퇴": "철야휴무", "상": "상조휴가", "청": "청원휴가"
 };
 
 const PROD_ITEMS = [
@@ -589,16 +592,26 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
   // ════════════════════════════════════════════════════════
   // 데이터 계산
   // ════════════════════════════════════════════════════════
+  // "교" 코드: EDU_MEMBERS에 속한 사람만 사내교육 처리 (비근무)
+  const isEduAbsent = (name) => {
+    const code = workData[name] || "";
+    return EDU_MEMBERS.includes(name) && code.includes("교");
+  };
+
   const present = {
-    생산: GROUP.생산.filter(n => workData.hasOwnProperty(n) && !OFF_CODES.includes(workData[n])),
-    품질: GROUP.품질.filter(n => workData.hasOwnProperty(n) && !OFF_CODES.includes(workData[n])),
-    현장: GROUP.현장.filter(n => workData.hasOwnProperty(n) && !OFF_CODES.includes(workData[n]))
+    생산: GROUP.생산.filter(n => workData.hasOwnProperty(n) && !OFF_CODES.includes(workData[n]) && !isEduAbsent(n)),
+    품질: GROUP.품질.filter(n => workData.hasOwnProperty(n) && !OFF_CODES.includes(workData[n]) && !isEduAbsent(n)),
+    현장: GROUP.현장.filter(n => workData.hasOwnProperty(n) && !OFF_CODES.includes(workData[n]) && !isEduAbsent(n))
   };
   const absent = {
-    생산: GROUP.생산.filter(n => workData.hasOwnProperty(n) && OFF_CODES.includes(workData[n])),
-    품질: GROUP.품질.filter(n => workData.hasOwnProperty(n) && OFF_CODES.includes(workData[n])),
-    현장: GROUP.현장.filter(n => workData.hasOwnProperty(n) && OFF_CODES.includes(workData[n]))
+    생산: GROUP.생산.filter(n => workData.hasOwnProperty(n) && (OFF_CODES.includes(workData[n]) || isEduAbsent(n))),
+    품질: GROUP.품질.filter(n => workData.hasOwnProperty(n) && (OFF_CODES.includes(workData[n]) || isEduAbsent(n))),
+    현장: GROUP.현장.filter(n => workData.hasOwnProperty(n) && (OFF_CODES.includes(workData[n]) || isEduAbsent(n)))
   };
+
+  // 사내교육 인원 (생산+품질 그룹 중 "교" 포함자)
+  const eduAbsent = [...GROUP.생산, ...GROUP.품질].filter(n => isEduAbsent(n));
+
   const jo    = GROUP.품질.filter(n => workData[n] === "조");
   const yeon  = GROUP.품질.filter(n => workData[n] === "연");
   const ext   = GROUP.현장.filter(n => ["B","P","L"].includes(workData[n] || ""));
@@ -661,11 +674,15 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
     const bg = (i % 2 === 0) ? BG.OFF_R : BG.WHITE;
     sc(ws, r, 11, g + "그룹", BG.OFF_H, FG.WHITE, true);
     const names  = absent[g].map(n => n).join(", ");
-    const reason = absent[g].map(n => n + " " + (OFF_REASON[workData[n]] || workData[n])).join(", ");
+    const reason = absent[g].map(n => {
+      if (isEduAbsent(n)) return n + " 사내교육";
+      return n + " " + (OFF_REASON[workData[n]] || workData[n]);
+    }).join(", ");
     dataCell(ws, r, 12, names  || "—", bg);
     dataCell(ws, r, 13, absent[g].length || "", bg, true, 12);
     dataCell(ws, r, 14, reason || "—", bg);
   });
+
   sc(ws, 11, 11, "—", BG.OFF_R, FG.DARK, false);
   [12, 13, 14].forEach(c => ws.getRange(11, c).setBackground(BG.WHITE));
 
