@@ -1,0 +1,146 @@
+function onOpen() {
+  const email = Session.getActiveUser().getEmail();
+  if (email !== 'youngjoonkim@kas.co.kr') return;
+  
+  SpreadsheetApp.getUi()
+    .createMenu('휴무 정리')
+    .addItem('년/메모 셀 초기화', 'clearYeonAndNoteCells')
+    .addItem('요일 및 주말/공휴일 색상 설정', 'fillWeekdaysAndColors')
+    .addToUi();
+}
+
+function clearYeonAndNoteCells() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('미사용연차');
+  const range = sheet.getRange('C12:AG52');
+  
+  const values = range.getValues();
+  const notes = range.getNotes();
+  const numRows = values.length;
+  const numCols = values[0].length;
+  
+  for (let r = 0; r < numRows; r++) {
+    for (let c = 0; c < numCols; c++) {
+      const cellValue = values[r][c];
+      const cellNote = notes[r][c];
+      
+      const hasYeon = (typeof cellValue === 'string') && cellValue.indexOf('년') !== -1;
+      const hasNote = cellNote && cellNote.length > 0;
+      
+      if (hasYeon || hasNote) {
+        const cell = range.getCell(r + 1, c + 1);
+        if (hasYeon) {
+          cell.setValue('');
+        }
+        if (hasNote) {
+          cell.clearNote();
+        }
+        cell.setBackground('#ffffff');
+      }
+    }
+  }
+  
+  SpreadsheetApp.getUi().alert('완료되었습니다.');
+}
+
+function fillWeekdaysAndColors() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('미사용연차');
+  const year = 2026;
+  
+  const weekdayNames = ['일', '월', '화', '수', '목', '금', '토'];
+  const SAT_COLOR = '#c6d9f0';
+  const SUN_COLOR = '#e5b8b7';
+  const NA_COLOR = '#7f7f7f';
+  const WHITE = '#ffffff';
+  
+  // 2026년 7~12월 공휴일 정보
+  // hasSubstitute: true 인 날짜는 대체공휴일이 따로 있으므로 본래 요일색만 칠하고 병합/표기 생략
+  const holidayInfo = {
+    '7-17': { name: '제헌절', hasSubstitute: false },
+    '8-15': { name: '광복절', hasSubstitute: true },
+    '8-17': { name: '광복절 대체공휴일', hasSubstitute: false },
+    '9-24': { name: '추석', hasSubstitute: false },
+    '9-25': { name: '추석', hasSubstitute: false },
+    '9-26': { name: '추석', hasSubstitute: false },
+    '10-3': { name: '개천절', hasSubstitute: true },
+    '10-5': { name: '개천절 대체공휴일', hasSubstitute: false },
+    '10-9': { name: '한글날', hasSubstitute: false },
+    '12-25': { name: '성탄절', hasSubstitute: false }
+  };
+  
+  const monthConfigs = [
+    { headerRow: 11, month: 7, has31: true },
+    { headerRow: 18, month: 8, has31: true },
+    { headerRow: 25, month: 9, has31: false },
+    { headerRow: 32, month: 10, has31: true },
+    { headerRow: 39, month: 11, has31: false },
+    { headerRow: 46, month: 12, has31: true }
+  ];
+  
+  const startColIndex = columnLetterToIndex('C'); // 3
+  const agColIndex = columnLetterToIndex('AG'); // 31일 열
+  
+  monthConfigs.forEach(config => {
+    const { headerRow, month, has31 } = config;
+    
+    // 기존 병합 해제 (재실행 대비)
+    const fullBlock = sheet.getRange(headerRow, startColIndex, 7, agColIndex - startColIndex + 1);
+    fullBlock.breakApart();
+    
+    for (let colIndex = startColIndex; colIndex <= agColIndex; colIndex++) {
+      const day = colIndex - startColIndex + 1;
+      
+      // 31일이 없는 달의 AG열 처리
+      if (!has31 && colIndex === agColIndex) {
+        sheet.getRange(headerRow, colIndex).setBackground(NA_COLOR).setValue('');
+        sheet.getRange(headerRow + 1, colIndex, 6, 1).setBackground(NA_COLOR);
+        continue;
+      }
+      
+      const date = new Date(year, month - 1, day);
+      const dayOfWeek = date.getDay();
+      const weekdayLabel = weekdayNames[dayOfWeek];
+      const dateKey = month + '-' + day;
+      const info = holidayInfo[dateKey];
+      
+      const headerCell = sheet.getRange(headerRow, colIndex);
+      headerCell.setValue(weekdayLabel);
+      
+      // 실제로 "빨간 날"로 표시할지 여부 (대체공휴일이 있는 원래 공휴일은 제외)
+      const isRedHoliday = info && !info.hasSubstitute;
+      
+      let color;
+      if (isRedHoliday || dayOfWeek === 0) {
+        color = SUN_COLOR;
+      } else if (dayOfWeek === 6) {
+        color = SAT_COLOR;
+      } else {
+        color = WHITE;
+      }
+      
+      headerCell.setBackground(color);
+      
+      const belowRange = sheet.getRange(headerRow + 1, colIndex, 6, 1);
+      belowRange.setBackground(color);
+      
+      if (isRedHoliday) {
+        // 6개 행 병합 + 공휴일명 입력 + 가운데 정렬
+        belowRange.merge();
+        belowRange.setValue(info.name);
+        belowRange.setHorizontalAlignment('center');
+        belowRange.setVerticalAlignment('middle');
+      }
+    }
+  });
+  
+  SpreadsheetApp.getUi().alert('요일, 주말, 공휴일 색상 설정이 완료되었습니다.');
+}
+
+function columnLetterToIndex(letter) {
+  let column = 0;
+  for (let i = 0; i < letter.length; i++) {
+    column = column * 26 + (letter.charCodeAt(i) - 64);
+  }
+  return column;
+}
