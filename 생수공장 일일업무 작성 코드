@@ -225,6 +225,7 @@ function fillSafetySection(todaySheet, workSchedSS, prodPlanSS, ss, today, month
 
   const OFF_CODES_TODAY = new Set(['휴','무','야','년','퇴','상','근','공','청','반']);
   let todayWorkers = []; // 오늘 근무하는 사람 이름 목록
+  const yeonWorkers = new Set(); // "연" 코드 포함 → 11:00 출근 (10:00 점검 불가)
 
   if (workSheet) {
     const dateRow = workSheet.getRange('G3:AK3').getValues()[0];
@@ -241,6 +242,10 @@ function fillSafetySection(todaySheet, workSchedSS, prodPlanSS, ss, today, month
         const code = String(codeVals[r][0] || '').trim();
         if (name && !OFF_CODES_TODAY.has(code)) {
           todayWorkers.push(name);
+          // 근무 코드에 "연"이 포함되면 11:00 출근 → 10:00 점검 불가
+          if (code.includes('연')) {
+            yeonWorkers.add(name);
+          }
         }
       }
     }
@@ -250,7 +255,8 @@ function fillSafetySection(todaySheet, workSchedSS, prodPlanSS, ss, today, month
   const AM_CANDIDATES = ['이정묵','박수형','고혁진','진성령'];
   const PM_CANDIDATES = ['김일수','양공호','김정운','강영우','양진복'];
 
-  const amPool = AM_CANDIDATES.filter(n => todayWorkers.includes(n));
+  // 10:00 점검: 근무자 중 "연" 코드 없는 사람만 후보 (11:00 출근자 제외)
+  const amPool = AM_CANDIDATES.filter(n => todayWorkers.includes(n) && !yeonWorkers.has(n));
   const pmPool = PM_CANDIDATES.filter(n => todayWorkers.includes(n));
 
   // 후보가 없으면 전체 후보에서 선택 (안전망)
