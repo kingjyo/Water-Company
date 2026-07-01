@@ -223,7 +223,8 @@ function fillSafetySection(todaySheet, workSchedSS, prodPlanSS, ss, today, month
     ? getWorkerRowRange(workSheet)
     : { firstWorkerRow: 5, lastWorkerRow: 19 };
 
-  const OFF_CODES_TODAY = new Set(['휴','무','야','년','퇴','상','근','공','청','반']);
+  // '반'(반휴)은 실제 출근하여 근무하므로 제외 → todayWorkers에 포함됨
+  const OFF_CODES_TODAY = new Set(['휴','무','야','년','퇴','상','근','공','청']);
   let todayWorkers = []; // 오늘 근무하는 사람 이름 목록
   const yeonWorkers = new Set(); // "연" 코드 포함 → 11:00 출근 (10:00 점검 불가)
 
@@ -752,7 +753,9 @@ function fillAttendance(todaySheet, workSchedSS, prodPlanSS, today, month, day, 
     }
   }
 
-  const OFF_CODES = new Set(['휴','무','야','년','퇴','상','근','공','청','반']);
+  // '반'(반휴)은 실제 출근하여 근무하므로 OFF_CODES에서 제외 → dayCount에 포함됨
+  // '교'(교육)는 색깔로 구분: #ffff00(사외교육=결근) vs 기타색(사내교육=정상근무) → 별도 처리
+  const OFF_CODES = new Set(['휴','무','야','년','퇴','상','근','공','청','교']);
 
   const todayInfo = (workSheet && todayColOffset >= 0)
     ? extractDayInfo(workSheet, todayColOffset, firstWorkerRow, lastWorkerRow, OFF_CODES)
@@ -779,6 +782,8 @@ function fillAttendance(todaySheet, workSchedSS, prodPlanSS, today, month, day, 
   todaySheet.getRange('I30').setValue(dv(todayInfo.jumuCount));
   todaySheet.getRange('K29').setValue(dv(prevInfo.cheongCount));
   todaySheet.getRange('K30').setValue(dv(todayInfo.cheongCount));
+  todaySheet.getRange('L29').setValue(dv(prevInfo.eduCount));
+  todaySheet.getRange('L30').setValue(dv(todayInfo.eduCount));
 
   todaySheet.getRange('A31').setValue(buildAbsenceText(todayInfo));
   const extNames = formatNamesWithLineBreak(todayInfo.extWorkers.map(w => w.name));
@@ -802,14 +807,32 @@ function extractDayInfo(workSheet, colOffset, firstWorkerRow, lastWorkerRow, OFF
   if (workerCount <= 0) return info;
 
   const dataCol = 7 + colOffset;
-  const nameVals = workSheet.getRange(firstWorkerRow, 3, workerCount, 1).getValues();
-  const codeVals = workSheet.getRange(firstWorkerRow, dataCol, workerCount, 1).getValues();
+  const nameVals   = workSheet.getRange(firstWorkerRow, 3,       workerCount, 1).getValues();
+  const codeVals   = workSheet.getRange(firstWorkerRow, dataCol, workerCount, 1).getValues();
+  // 배경색: '교' 코드의 사내/사외교육 구분에 사용 (#ffff00 = 사외교육)
+  const bgColors   = workSheet.getRange(firstWorkerRow, dataCol, workerCount, 1).getBackgrounds();
 
   for (let r = 0; r < workerCount; r++) {
     const rawName = String(nameVals[r][0] || '').trim();
     if (!rawName) continue;
     const code = String(codeVals[r][0] || '').trim();
+    const bg   = String(bgColors[r][0]  || '').toLowerCase();
 
+    // ── '교'(교육) 코드: 배경색으로 사내/사외 구분 ──────────────
+    if (code === '교') {
+      if (bg === '#ffff00') {
+        // 사외교육: 결근 처리 → eduCount에 집계
+        info.eduCount++;
+        info.eduWorkers.push(rawName);
+      } else {
+        // 사내교육: 정상 출근 → dayCount에 집계
+        info.dayCount++;
+      }
+      continue; // 아래 일반 처리 건너뜀
+    }
+
+    // ── 일반 근무 코드 처리 ──────────────────────────────────────
+    // '반'(반휴)은 OFF_CODES에 없으므로 dayCount에 포함됨
     if (!OFF_CODES.has(code)) {
       info.dayCount++;
       if (code === 'P' || code === 'B' || code === 'L') {
@@ -821,9 +844,10 @@ function extractDayInfo(workSheet, colOffset, firstWorkerRow, lastWorkerRow, OFF
     if (code === '퇴') info.yagHyuCount++;
     if (code === '년') { info.yearCount++; info.yearWorkers.push(rawName); }
     if (code === '공') { info.pubCount++; info.pubWorkers.push(rawName); }
-    if (code === '휴' || code === '무') info.jumuCount++;
+    if (code === '휴') info.jumuCount++; // '휴'(주휴)
+    if (code === '무') { info.muCount++; info.muWorkers.push(rawName); info.jumuCount++; } // '무'(무휴)
     if (code === '청') { info.cheongCount++; info.cheongWorkers.push(rawName); }
-    if (code === '반') { info.banCount++; info.banWorkers.push(rawName); }
+    if (code === '반') { info.banCount++; info.banWorkers.push(rawName); } // 반휴: dayCount 포함 + 별도 추적
     if (code === 'P') info.hasP = true;
     if (code === 'B') info.hasB = true;
   }
@@ -838,8 +862,8 @@ function extractDayInfo(workSheet, colOffset, firstWorkerRow, lastWorkerRow, OFF
 function emptyDayInfo() {
   return {
     dayCount: 0, nightCount: 0, yagHyuCount: 0,
-    yearCount: 0, pubCount: 0, jumuCount: 0, cheongCount: 0, banCount: 0,
-    yearWorkers: [], pubWorkers: [], cheongWorkers: [], banWorkers: [],
+    yearCount: 0, pubCount: 0, jumuCount: 0, muCount: 0, cheongCount: 0, banCount: 0, eduCount: 0,
+    yearWorkers: [], pubWorkers: [], muWorkers: [], cheongWorkers: [], banWorkers: [], eduWorkers: [],
     nightWorkers: [], extWorkers: [],
     hasP: false, hasB: false
   };
@@ -864,10 +888,13 @@ function formatNamesWithLineBreak(names) {
 // ════════════════════════════════════════════════════════
 function buildAbsenceText(info) {
   const parts = [];
-  if (info.yearCount > 0) parts.push(`연차 : ${info.yearCount}명 (${info.yearWorkers.join(', ')})`);
-  if (info.banCount > 0) parts.push(`반휴 : ${info.banCount}명 (${info.banWorkers.join(', ')})`);
-  if (info.pubCount > 0) parts.push(`공휴 : ${info.pubCount}명 (${info.pubWorkers.join(', ')})`);
+  // 순서: 연차 → 반휴 → 공휴 → 주/무휴 → 청휴 → 교육(기타, 제일 마지막)
+  if (info.yearCount  > 0) parts.push(`연차 : ${info.yearCount}명 (${info.yearWorkers.join(', ')})`);
+  if (info.banCount   > 0) parts.push(`반휴 : ${info.banCount}명 (${info.banWorkers.join(', ')})`);
+  if (info.pubCount   > 0) parts.push(`공휴 : ${info.pubCount}명 (${info.pubWorkers.join(', ')})`);
+  if (info.muCount    > 0) parts.push(`무휴 : ${info.muCount}명 (${info.muWorkers.join(', ')})`);
   if (info.cheongCount > 0) parts.push(`청휴 : ${info.cheongCount}명 (${info.cheongWorkers.join(', ')})`);
+  if (info.eduCount   > 0) parts.push(`교육 : ${info.eduCount}명 (${info.eduWorkers.join(', ')})`);
   if (parts.length === 0) return '';
   return '- ' + parts.join(', ');
 }
