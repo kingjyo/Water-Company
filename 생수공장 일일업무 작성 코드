@@ -387,14 +387,17 @@ gaText = pickByDay(gaFiltered.length > 0 ? gaFiltered : GA_OPTIONS, day * 3 + mo
   }
 
   // 오전 선택
-  let amOptions;
-  if (has189L) {
-amOptions = AM_189L_OPTIONS.filter(t => t !== prevAm);
-    if (amOptions.length === 0) amOptions = AM_189L_OPTIONS;
-  } else {
-amOptions = AM_GENERAL_OPTIONS.filter(t => t !== prevAm);
-    if (amOptions.length === 0) amOptions = AM_GENERAL_OPTIONS;
-  }
+let amOptions;
+if (has189L) {
+  amOptions = AM_189L_OPTIONS.filter(t => t !== prevAm);
+  if (amOptions.length === 0) amOptions = AM_189L_OPTIONS;
+} else {
+  let baseAmOptions = hasLC
+    ? AM_GENERAL_OPTIONS
+    : AM_GENERAL_OPTIONS.filter(t => !t.includes('LINE CHANGE'));
+  amOptions = baseAmOptions.filter(t => t !== prevAm);
+  if (amOptions.length === 0) amOptions = baseAmOptions;
+}
   const amText = pickByDay(amOptions, day * 5 + month * 2);
 
   // 오후 선택 (18.9L 문구 제외)
