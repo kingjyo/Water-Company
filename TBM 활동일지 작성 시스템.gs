@@ -599,6 +599,12 @@ function getTBMTargets(targetDate) {
     throw new Error(`${month}월 ${day}일의 일자 열을 찾을 수 없습니다. (G열 이후에서 탐색)`);
   }
   
+  // 해당 날짜 열의 배경색을 직원 행(5행~20행)에 대해 읽기
+  // dataRange는 B열(=2)부터 시작, dayColIndex는 B3 기준 0-based offset
+  // → 실제 스프레드시트 열 번호: 2 + dayColIndex (1-based)
+  const actualCol = 2 + dayColIndex;
+  const bgValues = scheduleSheet.getRange(5, actualCol, 16, 1).getBackgrounds(); // 5행~20행 (16개)
+
   // 직원 정보 수집 (5번째 행 ~ 20번째 행)
   // 즉 data[2] ~ data[17]
   // B열 (index 0) = 직급, C열 (index 1) = 성명
@@ -606,11 +612,8 @@ function getTBMTargets(targetDate) {
   // 휴무 코드: 공, 휴, 무, 년, 야, 퇴, 상, 근, 청(청원휴가)
   const ABSENT_CODES = ['공', '휴', '무', '년', '야', '퇴', '상', '근', '청'];
   
-  // 사내교육 대상자: 근무코드에 "교"가 포함되면 TBM 제외
-  const EDU_MEMBERS = ['김재방', '이정묵', '김영준', '박수형', '고혁진', '진성령'];
-  
   const targets = [];   // TBM 대상 (출근)
-  const excluded = [];  // TBM 제외 (결근/휴무/사내교육 등)
+  const excluded = [];  // TBM 제외 (결근/휴무/외부교육 등)
   
   for (let r = 2; r <= 17; r++) { // data index 2~17 = 5번째~20번째 행
     const row = data[r];
@@ -622,14 +625,16 @@ function getTBMTargets(targetDate) {
     if (!name || name === '' || name === 'undefined') continue;
     
     const attendance = String(row[dayColIndex]).trim();
+    const cellBg = bgValues[r - 2][0].toLowerCase(); // 해당 셀 배경색 (r-2: 0-based)
     
-    // 결근 코드에 해당하면 TBM 제외 목록에 추가
+    // 결근 코드에 해당하면 TBM 제외
     const isAbsent = ABSENT_CODES.some(code => attendance.includes(code));
-    // 사내교육 대상자이고 "교" 코드 포함 시 TBM 제외
-    const isEdu = EDU_MEMBERS.includes(name) && attendance.includes('교');
+    // "교" 코드 + 배경색 #ffff00 → 외부교육(비근무) → TBM 제외
+    // "교" 코드 + 그 외 색상   → 사내교육(출근)   → TBM 대상 유지
+    const isExtEdu = attendance.includes('교') && cellBg === '#ffff00';
     const displayName = (rank && rank !== '') ? `${name} ${rank}` : name;
     
-    if (isAbsent || isEdu) {
+    if (isAbsent || isExtEdu) {
       excluded.push(displayName);
     } else {
       targets.push(displayName);
