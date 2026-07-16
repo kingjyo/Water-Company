@@ -11,6 +11,10 @@ const WORK_SCHED_ID = '12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY';
 const WASTE_WATER_ID = '1c5njunIqLbuPFOR4dFnDELSInNVcf6tOP_C-bh5L-q8';
 const WATER_LEVEL_ID = '1WAHcipjiORBl6Jv3j-T1Xqv6CpFzZkj9n7LUzem1wso';
 const WEATHER_DATA_ID = '1paz1MbqB5zmfdzK8ebzmob8s_T69ICa-GRTgRr7XBBg';
+// 제품생산일지 (1순위: 일반 제품 생산량 C9~C12, C14)
+const PROD_LOG_ID = '1WymbNXGMa8EqZmOmm6l2BPbcQeXlvK_pIfzveYNbyg0';
+// 탄산음료 생산일지 (1순위: 0.19L 생산량 C13)
+const SODA_LOG_ID = '1V2CNYoRY8AaQAcTtiSfHLZKNNI2_Ud9no2qpE5ptYHs';
 
 // ════════════════════════════════════════════════════════
 // 메뉴 생성
@@ -73,6 +77,22 @@ function fillDailyReportCore(today) {
   const prodActualSS = SpreadsheetApp.openById(PROD_ACTUAL_ID);
   const workSchedSS = SpreadsheetApp.openById(WORK_SCHED_ID);
   const waterLevelSS = SpreadsheetApp.openById(WATER_LEVEL_ID);
+
+  // 제품생산일지 (1순위 보험)
+  let prodLogSS = null;
+  try {
+    prodLogSS = SpreadsheetApp.openById(PROD_LOG_ID);
+  } catch(e) {
+    Logger.log(`제품생산일지 스프레드시트 열기 실패: ${e.message}`);
+  }
+
+  // 탄산음료 생산일지 (0.19L 1순위 보험)
+  let sodaLogSS = null;
+  try {
+    sodaLogSS = SpreadsheetApp.openById(SODA_LOG_ID);
+  } catch(e) {
+    Logger.log(`탄산음료 생산일지 스프레드시트 열기 실패: ${e.message}`);
+  }
 
   let wasteWaterSS = null;
   try {
@@ -171,7 +191,7 @@ jilsiLabel = `실 시 사 항 (${prevProdDate.month}/${String(prevProdDate.day).
   // 9. C9:C14, D9:D14 = 실제 생산량 / C15 = "제품수"
   // ════════════════════════════════════════════════════════
   if (prevProdDate) {
-    fillActualProduction(todaySheet, prodActualSS, prevProdDate, year);
+    fillActualProduction(todaySheet, prodActualSS, prodLogSS, sodaLogSS, prevProdDate, year);
   }
   todaySheet.getRange('C15').setValue('제품수');
   const c13val = todaySheet.getRange('C13').getValue();
@@ -1288,9 +1308,82 @@ function getWorkFlags(workSchedSS, month, day) {
 
 
 // ════════════════════════════════════════════════════════
-// [헬퍼] 실제 생산량 채우기
+// [헬퍼] 실제 생산량 채우기 (이중 확인 로직)
+// 1순위: 제품생산일지(MMDD 시트) / 탄산음료생산일지(MMDD 시트)
+// 2순위: 제품 생산량 스프레드시트 (기존 방식)
 // ════════════════════════════════════════════════════════
-function fillActualProduction(todaySheet, prodActualSS, prevProdDate, year) {
+function fillActualProduction(todaySheet, prodActualSS, prodLogSS, sodaLogSS, prevProdDate, year) {
+  const tz = Session.getScriptTimeZone();
+  const mm = String(prevProdDate.month).padStart(2, '0');
+  const dd = String(prevProdDate.day).padStart(2, '0');
+  const mmdd = mm + dd; // "MMDD" 형식 시트명
+
+  // ── 1순위: 제품생산일지 MMDD 시트에서 생산량 조회 ──────────────
+  // C9(18.9L): F6
+  // C10(1.5L) : F7:F12 합계
+  // C11(0.5L) : F13:F15 합계
+  // C12(0.33L): F16:F17 합계
+  // C14(0.12L): F18:F20 합계
+  let logVal_c9 = null, logVal_c10 = null, logVal_c11 = null,
+      logVal_c12 = null, logVal_c14 = null;
+
+  if (prodLogSS) {
+    const logSheet = prodLogSS.getSheetByName(mmdd);
+    if (logSheet) {
+      try {
+        // 18.9L: F6
+        const f6 = logSheet.getRange('F6').getValue();
+        if (typeof f6 === 'number' && f6 > 0) logVal_c9 = f6;
+
+        // 1.5L: F7:F12 합계
+        const f7f12 = logSheet.getRange('F7:F12').getValues();
+        const sum_c10 = f7f12.reduce((s, r) => s + (typeof r[0] === 'number' ? r[0] : 0), 0);
+        if (sum_c10 > 0) logVal_c10 = sum_c10;
+
+        // 0.5L: F13:F15 합계
+        const f13f15 = logSheet.getRange('F13:F15').getValues();
+        const sum_c11 = f13f15.reduce((s, r) => s + (typeof r[0] === 'number' ? r[0] : 0), 0);
+        if (sum_c11 > 0) logVal_c11 = sum_c11;
+
+        // 0.33L: F16:F17 합계
+        const f16f17 = logSheet.getRange('F16:F17').getValues();
+        const sum_c12 = f16f17.reduce((s, r) => s + (typeof r[0] === 'number' ? r[0] : 0), 0);
+        if (sum_c12 > 0) logVal_c12 = sum_c12;
+
+        // 0.12L: F18:F20 합계
+        const f18f20 = logSheet.getRange('F18:F20').getValues();
+        const sum_c14 = f18f20.reduce((s, r) => s + (typeof r[0] === 'number' ? r[0] : 0), 0);
+        if (sum_c14 > 0) logVal_c14 = sum_c14;
+
+        Logger.log(`제품생산일지 ${mmdd} 시트: 18.9L=${logVal_c9}, 1.5L=${logVal_c10}, 0.5L=${logVal_c11}, 0.33L=${logVal_c12}, 0.12L=${logVal_c14}`);
+      } catch(e) {
+        Logger.log(`제품생산일지 ${mmdd} 시트 값 읽기 실패: ${e.message}`);
+      }
+    } else {
+      Logger.log(`제품생산일지에 ${mmdd} 시트 없음 → 제품 생산량 스프레드시트로 대체`);
+    }
+  }
+
+  // ── 1순위: 탄산음료 생산일지 MMDD 시트에서 0.19L(C13) 조회 ─────
+  // C13(0.19L): F7
+  let logVal_c13 = null;
+
+  if (sodaLogSS) {
+    const sodaSheet = sodaLogSS.getSheetByName(mmdd);
+    if (sodaSheet) {
+      try {
+        const f7 = sodaSheet.getRange('F7').getValue();
+        if (typeof f7 === 'number' && f7 > 0) logVal_c13 = f7;
+        Logger.log(`탄산음료 생산일지 ${mmdd} 시트: 0.19L=${logVal_c13}`);
+      } catch(e) {
+        Logger.log(`탄산음료 생산일지 ${mmdd} 시트 값 읽기 실패: ${e.message}`);
+      }
+    } else {
+      Logger.log(`탄산음료 생산일지에 ${mmdd} 시트 없음 → 제품 생산량 스프레드시트로 대체`);
+    }
+  }
+
+  // ── 2순위: 제품 생산량 스프레드시트 (기존 방식) ──────────────────
   const sheets = prodActualSS.getSheets();
   let actualSheet = null;
   for (const s of sheets) {
@@ -1298,46 +1391,74 @@ function fillActualProduction(todaySheet, prodActualSS, prevProdDate, year) {
     if (a2 && String(a2).startsWith(String(year))) { actualSheet = s; break; }
   }
   if (!actualSheet) actualSheet = sheets[0];
+
+  let fallbackVals = [null, null, null, null, null, null]; // [c9,c10,c11,c12,c13,c14]
+
+  if (actualSheet) {
+    const targetDateStr = `${year}-${mm}-${dd}`;
+    const aVals = actualSheet.getRange('A2:A400').getValues();
+    let targetRow = -1;
+    for (let i = 0; i < aVals.length; i++) {
+      const v = aVals[i][0];
+      let dateStr = '';
+      if (v instanceof Date) {
+        dateStr = Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+      } else {
+        dateStr = String(v).trim();
+      }
+      if (dateStr === targetDateStr) { targetRow = i + 2; break; }
+    }
+    if (targetRow !== -1) {
+      const dayVals = actualSheet.getRange(targetRow, 20, 1, 6).getValues()[0];
+      for (let i = 0; i < 6; i++) {
+        if (typeof dayVals[i] === 'number' && dayVals[i] > 0) {
+          fallbackVals[i] = dayVals[i];
+        }
+      }
+      Logger.log(`제품 생산량 스프레드시트 2순위: [${fallbackVals.join(', ')}]`);
+    }
+  }
+
+  // ── 최종값 결정: 1순위 없으면 2순위 사용 ──────────────────────────
+  // fallbackVals 인덱스: 0=18.9L(c9), 1=1.5L(c10), 2=0.5L(c11),
+  //                     3=0.33L(c12), 4=0.19L(c13), 5=0.12L(c14)
+  const c9  = logVal_c9  !== null ? logVal_c9  : (fallbackVals[0] !== null ? fallbackVals[0] : 0);
+  const c10 = logVal_c10 !== null ? logVal_c10 : (fallbackVals[1] !== null ? fallbackVals[1] : 0);
+  const c11 = logVal_c11 !== null ? logVal_c11 : (fallbackVals[2] !== null ? fallbackVals[2] : 0);
+  const c12 = logVal_c12 !== null ? logVal_c12 : (fallbackVals[3] !== null ? fallbackVals[3] : 0);
+  const c13 = logVal_c13 !== null ? logVal_c13 : (fallbackVals[4] !== null ? fallbackVals[4] : 0);
+  const c14 = logVal_c14 !== null ? logVal_c14 : (fallbackVals[5] !== null ? fallbackVals[5] : 0);
+
+  todaySheet.getRange('C9').setValue(c9);
+  todaySheet.getRange('C10').setValue(c10);
+  todaySheet.getRange('C11').setValue(c11);
+  todaySheet.getRange('C12').setValue(c12);
+  todaySheet.getRange('C13').setValue(c13);
+  todaySheet.getRange('C14').setValue(c14);
+
+  // ── 월 누계(D열): 기존 제품 생산량 스프레드시트 방식 유지 ────────
   if (!actualSheet) return;
 
-  const targetDateStr = `${year}-${String(prevProdDate.month).padStart(2,'0')}-${String(prevProdDate.day).padStart(2,'0')}`;
-  const aVals = actualSheet.getRange('A2:A400').getValues();
-  let targetRow = -1;
-  for (let i = 0; i < aVals.length; i++) {
-    const v = aVals[i][0];
-    let dateStr = '';
-    if (v instanceof Date) {
-dateStr = Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd');
-    } else {
-dateStr = String(v).trim();
-    }
-    if (dateStr === targetDateStr) { targetRow = i + 2; break; }
-  }
-  if (targetRow === -1) return;
-
-  const dayVals = actualSheet.getRange(targetRow, 20, 1, 6).getValues()[0];
-  todaySheet.getRange('C9').setValue(dayVals[0]);
-  todaySheet.getRange('C10').setValue(dayVals[1]);
-  todaySheet.getRange('C11').setValue(dayVals[2]);
-  todaySheet.getRange('C12').setValue(dayVals[3]);
-  todaySheet.getRange('C13').setValue(dayVals[4]);
-  todaySheet.getRange('C14').setValue(dayVals[5]);
-
-  const monthStart = `${year}-${String(prevProdDate.month).padStart(2,'0')}-01`;
+  const monthStart = `${year}-${mm}-01`;
+  const aVals2 = actualSheet.getRange('A2:A400').getValues();
   let monthStartRow = -1;
-  for (let i = 0; i < aVals.length; i++) {
-    const v = aVals[i][0];
+  let targetRow2 = -1;
+  const targetDateStr2 = `${year}-${mm}-${dd}`;
+
+  for (let i = 0; i < aVals2.length; i++) {
+    const v = aVals2[i][0];
     let dateStr = '';
     if (v instanceof Date) {
-dateStr = Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+      dateStr = Utilities.formatDate(v, tz, 'yyyy-MM-dd');
     } else {
-dateStr = String(v).trim();
+      dateStr = String(v).trim();
     }
-    if (dateStr === monthStart) { monthStartRow = i + 2; break; }
+    if (dateStr === monthStart && monthStartRow === -1) monthStartRow = i + 2;
+    if (dateStr === targetDateStr2) targetRow2 = i + 2;
   }
-  if (monthStartRow === -1) return;
+  if (monthStartRow === -1 || targetRow2 === -1) return;
 
-  const rowCount = targetRow - monthStartRow + 1;
+  const rowCount = targetRow2 - monthStartRow + 1;
   const monthVals = actualSheet.getRange(monthStartRow, 20, rowCount, 6).getValues();
   const sums = [0, 0, 0, 0, 0, 0];
   for (const row of monthVals) {
