@@ -808,8 +808,8 @@ prevSheet2 = prevWorkSheet;
   todaySheet.getRange('I30').setValue(dv(todayInfo.jumuCount));
   todaySheet.getRange('K29').setValue(dv(prevInfo.cheongCount));
   todaySheet.getRange('K30').setValue(dv(todayInfo.cheongCount));
-  todaySheet.getRange('L29').setValue(dv(prevInfo.eduCount));
-  todaySheet.getRange('L30').setValue(dv(todayInfo.eduCount));
+  todaySheet.getRange('L29').setValue(dv(prevInfo.eduCount + prevInfo.chulCount));
+  todaySheet.getRange('L30').setValue(dv(todayInfo.eduCount + todayInfo.chulCount));
 
   todaySheet.getRange('A31').setValue(buildAbsenceText(todayInfo));
   const extNames = formatNamesWithLineBreak(todayInfo.extWorkers.map(w => w.name));
@@ -853,7 +853,9 @@ function extractDayInfo(workSheet, colOffset, firstWorkerRow, lastWorkerRow, OFF
       continue;
     }
 
-    if (!OFF_CODES.has(code)) {
+    if (code === '출') {
+      // 출장: 기타(L열)에만 반영, 출근수에는 포함하지 않음
+    } else if (!OFF_CODES.has(code)) {
       info.dayCount++;
       if (code === 'P' || code === 'B' || code === 'L') {
         info.extWorkers.push({ name: rawName, code });
@@ -868,6 +870,7 @@ function extractDayInfo(workSheet, colOffset, firstWorkerRow, lastWorkerRow, OFF
     if (code === '무') { info.muCount++; info.muWorkers.push(rawName); info.jumuCount++; }
     if (code === '청') { info.cheongCount++; info.cheongWorkers.push(rawName); }
     if (code === '반') { info.banCount++; info.banWorkers.push(rawName); }
+    if (code === '출') { info.chulCount++; info.chulWorkers.push(rawName); }
     if (code === 'P') info.hasP = true;
     if (code === 'B') info.hasB = true;
   }
@@ -882,8 +885,8 @@ function extractDayInfo(workSheet, colOffset, firstWorkerRow, lastWorkerRow, OFF
 function emptyDayInfo() {
   return {
     dayCount: 0, nightCount: 0, yagHyuCount: 0,
-    yearCount: 0, pubCount: 0, jumuCount: 0, muCount: 0, cheongCount: 0, banCount: 0, eduCount: 0,
-    yearWorkers: [], pubWorkers: [], muWorkers: [], cheongWorkers: [], banWorkers: [], eduWorkers: [],
+    yearCount: 0, pubCount: 0, jumuCount: 0, muCount: 0, cheongCount: 0, banCount: 0, eduCount: 0, chulCount: 0,
+    yearWorkers: [], pubWorkers: [], muWorkers: [], cheongWorkers: [], banWorkers: [], eduWorkers: [], chulWorkers: [],
     nightWorkers: [], extWorkers: [],
     hasP: false, hasB: false
   };
@@ -914,6 +917,7 @@ function buildAbsenceText(info) {
   if (info.muCount > 0) parts.push(`무휴 : ${info.muCount}명 (${info.muWorkers.join(', ')})`);
   if (info.cheongCount > 0) parts.push(`청휴 : ${info.cheongCount}명 (${info.cheongWorkers.join(', ')})`);
   if (info.eduCount > 0) parts.push(`교육 : ${info.eduCount}명 (${info.eduWorkers.join(', ')})`);
+  if (info.chulCount > 0) parts.push(`출장 : ${info.chulCount}명 (${info.chulWorkers.join(', ')})`);
   if (parts.length === 0) return '';
   return '- ' + parts.join(', ');
 }

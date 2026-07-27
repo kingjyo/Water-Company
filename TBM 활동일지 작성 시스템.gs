@@ -609,8 +609,8 @@ function getTBMTargets(targetDate) {
   // 즉 data[2] ~ data[17]
   // B열 (index 0) = 직급, C열 (index 1) = 성명
   
-  // 휴무 코드: 공, 휴, 무, 년, 야, 퇴, 상, 근, 청(청원휴가)
-  const ABSENT_CODES = ['공', '휴', '무', '년', '야', '퇴', '상', '근', '청'];
+  // 휴무 코드: 공, 휴, 무, 년, 야, 퇴, 상, 근, 청(청원휴가), 출(출장)
+  const ABSENT_CODES = ['공', '휴', '무', '년', '야', '퇴', '상', '근', '청', '출'];
   
   const targets = [];   // TBM 대상 (출근)
   const excluded = [];  // TBM 제외 (결근/휴무/외부교육 등)

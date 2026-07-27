@@ -6,7 +6,7 @@
 const ID_PROD = "1ibZaOX0NKni6vRTVE0i2Wb5AXNHn9D72F5CFWSxH3qQ";
 const ID_WORK = "12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY";
 
-const OFF_CODES = ["휴", "무", "사", "퇴", "상", "년", "공", "청"];
+const OFF_CODES = ["휴", "무", "사", "퇴", "상", "년", "공", "청", "출"];
 
 // 사내교육 대상자 ("교" 코드 처리 대상)
 const EDU_MEMBERS = ["김재방", "이정묵", "김영준", "박수형", "고혁진", "진성령"];
@@ -19,7 +19,7 @@ const GROUP = {
 
 const OFF_REASON = {
   "년": "연차", "공": "공휴", "휴": "휴무",
-  "무": "무급휴무", "사": "사직", "퇴": "철야휴무", "상": "상조휴가", "청": "청원휴가"
+  "무": "무급휴무", "사": "사직", "퇴": "철야휴무", "상": "상조휴가", "청": "청원휴가", "출": "출장"
 };
 
 const PROD_ITEMS = [
@@ -606,9 +606,11 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
 
   // "교" + 배경색 노랑(#ffff00) → 외부교육(비근무)
   // "교" + 그 외 색상           → 사내교육(출근 처리)
+  // "출"                        → 출장(비근무)
   const isExtEdu = (name) => {
     return getCode(name).includes("교") && getBg(name) === "#ffff00";
   };
+  const isChulJang = (name) => getCode(name) === "출";
 
   const present = {
     생산: GROUP.생산.filter(n => workData.hasOwnProperty(n) && !OFF_CODES.includes(getCode(n)) && !isExtEdu(n)),
@@ -688,6 +690,7 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
     const names  = absent[g].map(n => n).join(", ");
     const reason = absent[g].map(n => {
       if (isExtEdu(n)) return n + " 외부교육";
+      if (isChulJang(n)) return n + " 출장";
       return n + " " + (OFF_REASON[getCode(n)] || getCode(n));
     }).join(", ");
     dataCell(ws, r, 12, names  || "—", bg);
