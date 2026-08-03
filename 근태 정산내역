@@ -314,9 +314,9 @@ function createReportDoc() {
     const leaveSheetName = findSheetByPattern(destSS, /^휴무 소진내역$/);
     if (!leaveSheetName) throw new Error('"휴무 소진내역" 시트를 찾을 수 없습니다.');
     const leaveSheet = destSS.getSheetByName(leaveSheetName);
-    const { row: leaveRow } = getLeaveHistoryTarget(currentMonth);
-    const leaveMonthRow = leaveSheet.getRange(leaveRow, 2, 1, 13).getDisplayValues()[0];
-    const leaveCumRow = leaveSheet.getRange(leaveRow + 1, 2, 1, 13).getDisplayValues()[0];
+    const { row: leaveRow, readStartCol: leaveReadStartCol } = getLeaveHistoryTarget(currentMonth);
+    const leaveMonthRow = leaveSheet.getRange(leaveRow, leaveReadStartCol, 1, 13).getDisplayValues()[0];
+    const leaveCumRow = leaveSheet.getRange(leaveRow + 1, leaveReadStartCol, 1, 13).getDisplayValues()[0];
 
     const overtimeReportName = findSheetByPattern(destSS, /^연장근무 발생 보고$/);
     if (!overtimeReportName) throw new Error('"연장근무 발생 보고" 시트를 찾을 수 없습니다.');
@@ -590,9 +590,10 @@ function applyColumnVisibility(sheet, lastDay) {
 function getLeaveHistoryTarget(month) {
   const rowMap = { 1:4, 2:10, 3:16, 4:22, 5:28, 6:34, 7:4, 8:10, 9:16, 10:22, 11:28, 12:34 };
   const row = rowMap[month];
-  const dataStartCol = month <= 6 ? 4 : 18;
+  const dataStartCol = month <= 6 ? 4 : 18;   // 쓰기(updateLeaveHistory) 기준 열
+  const readStartCol = month <= 6 ? 2 : 16;    // 읽기(createReportDoc) 기준 열: 1~6월=B(2), 7~12월=P(16)
   if (!row) throw new Error(`월 매핑을 찾을 수 없습니다: ${month}월`);
-  return { row, dataStartCol };
+  return { row, dataStartCol, readStartCol };
 }
 
 function loadSourceData(targetMonth) {
