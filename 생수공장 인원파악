@@ -213,19 +213,46 @@ function getLCData(sheet, day, currentMonth) {
     });
     if (!lcItem) return null;
 
+    // ── 이전 품목: 먼저 현재 달 시트에서 위쪽 행 검색 ───────
     let prevName = null;
     for (let r = ri - 1; r >= 0; r--) {
       for (const item of line) {
         const v = prodVal[r][item.idx];
         const s = String(v || "");
         if (v && !s.toUpperCase().includes("L/C") && Number(v) > 0) {
-          prevName = item.name; 
+          prevName = item.name;
           break;
         }
       }
       if (prevName) break;
     }
 
+    // ── 현재 달에서 못 찾았으면 이전 달 시트의 마지막 생산 품목 참조 ──
+    if (!prevName) {
+      const prevMonth = currentMonth === 1 ? 12 : currentMonth - 1;
+      const ssProd = SpreadsheetApp.openById(ID_PROD);
+      const prevSheet = findProdSheet(ssProd, prevMonth);
+      if (prevSheet) {
+        const prevDayCol  = prevSheet.getRange("A3:A33").getValues();
+        const prevProdVal = prevSheet.getRange("C3:L33").getValues();
+        // 이전 달 마지막 행부터 역순으로 검색
+        for (let r = prevDayCol.length - 1; r >= 0; r--) {
+          if (Number(prevDayCol[r][0]) > 0) {
+            for (const item of line) {
+              const v = prevProdVal[r][item.idx];
+              const s = String(v || "");
+              if (v && !s.toUpperCase().includes("L/C") && Number(v) > 0) {
+                prevName = item.name;
+                break;
+              }
+            }
+            if (prevName) break;
+          }
+        }
+      }
+    }
+
+    // ── 다음 품목: 현재 달 시트에서 아래쪽 행 검색 ───────────
     let nextName = null;
     for (let r = ri + 1; r < prodVal.length; r++) {
       for (const item of line) {
@@ -239,6 +266,7 @@ function getLCData(sheet, day, currentMonth) {
       if (nextName) break;
     }
 
+    // ── 현재 달에서 다음 품목 못 찾았으면 다음 달 시트 참조 ──
     if (!nextName) {
       const nextMonth = currentMonth === 12 ? 1 : currentMonth + 1;
       const ssProd = SpreadsheetApp.openById(ID_PROD);
