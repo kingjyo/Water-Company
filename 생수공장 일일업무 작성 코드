@@ -258,7 +258,8 @@ function fillSafetySection(todaySheet, workSchedSS, prodPlanSS, ss, today, month
     : { firstWorkerRow: 5, lastWorkerRow: 19 };
 
   // '반'(반휴)은 실제 출근하여 근무하므로 제외 → todayWorkers에 포함됨
-  const OFF_CODES_TODAY = new Set(['휴','무','야','년','퇴','상','근','공','청']);
+  // '출'(출장)은 공장 미출근이므로 제외
+  const OFF_CODES_TODAY = new Set(['휴','무','야','년','퇴','상','근','공','청','출']);
   let todayWorkers = []; // 오늘 근무하는 사람 이름 목록
   const yeonWorkers = new Set(); // "연" 코드 포함 → 11:00 출근 (10:00 점검 불가)
 
@@ -272,9 +273,17 @@ function fillSafetySection(todaySheet, workSchedSS, prodPlanSS, ss, today, month
       const nameVals = workSheet.getRange(firstWorkerRow, 3, workerCount, 1).getValues();
       const codeVals = workSheet.getRange(firstWorkerRow, dataCol, workerCount, 1).getValues();
 
+      // 배경색 확인: 노랑(#ffff00) + '교' 코드 = 사내교육으로 공장 미출근
+      const bgColors = workSheet.getRange(firstWorkerRow, dataCol, workerCount, 1).getBackgrounds();
+
       for (let r = 0; r < workerCount; r++) {
         const name = String(nameVals[r][0] || '').trim();
         const code = String(codeVals[r][0] || '').trim();
+
+        // 노랑 배경(#ffff00) + '교' 코드 → 사내교육으로 공장 미출근 → 제외
+        const bg = String(bgColors[r][0] || '').toLowerCase();
+        if (code === '교' && bg === '#ffff00') continue;
+
         if (name && !OFF_CODES_TODAY.has(code)) {
           todayWorkers.push(name);
           // 근무 코드에 "연"이 포함되면 11:00 출근 → 10:00 점검 불가
