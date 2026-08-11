@@ -1176,7 +1176,7 @@ function buildTodayPrediction(prodPlanSS, workSchedSS, today, month, day, year) 
   if (rowIdx === -1) return '';
 
   const prodRow = planSheet.getRange(rowIdx, 3, 1, 10).getValues()[0];
-  const PROD_NAMES = ['18.9L','1.5L','0.5L','0.33L','0.12L','0.19L'];
+  const PROD_NAMES = ['18.9L','1.5L','0.5L','0.33L','0.19L','0.12L'];
   const BTL_NAMES = ['1.5L BTL','0.5L BTL','0.33L BTL'];
 
   const prodItems = [];
@@ -1230,7 +1230,7 @@ function detectLC(planSheet, prodPlanSS, rowIdx, type, month, day, year) {
   let lcColStart, lcColEnd, names, lcPattern;
   if (type === 'prod') {
 lcColStart = 3; lcColEnd = 8;
-names = ['18.9L','1.5L','0.5L','0.33L','0.12L','0.19L'];
+names = ['18.9L','1.5L','0.5L','0.33L','0.19L','0.12L'];
 lcPattern = /^L\/C$/i;
   } else {
 lcColStart = 9; lcColEnd = 11;
