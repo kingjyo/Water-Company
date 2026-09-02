@@ -590,8 +590,8 @@ function applyColumnVisibility(sheet, lastDay) {
 function getLeaveHistoryTarget(month) {
   const rowMap = { 1:4, 2:10, 3:16, 4:22, 5:28, 6:34, 7:4, 8:10, 9:16, 10:22, 11:28, 12:34 };
   const row = rowMap[month];
-  const dataStartCol = month <= 6 ? 4 : 18;   // 쓰기(updateLeaveHistory) 기준 열
-  const readStartCol = month <= 6 ? 2 : 16;    // 읽기(createReportDoc) 기준 열: 1~6월=B(2), 7~12월=P(16)
+  const dataStartCol = month <= 6 ? 4 : 18; // 쓰기(updateLeaveHistory) 기준 열
+  const readStartCol = month <= 6 ? 2 : 16; // 읽기(createReportDoc) 기준 열: 1~6월=B(2), 7~12월=P(16)
   if (!row) throw new Error(`월 매핑을 찾을 수 없습니다: ${month}월`);
   return { row, dataStartCol, readStartCol };
 }
@@ -837,9 +837,19 @@ function convertPBLtoYeonAndClear() {
   const lastDay = getLastDayOfMonth(year, month);
   const nightText = processPBLtoYeonAndClear(sheet, lastDay);
   SpreadsheetApp.getUi().alert(
-    `완료\n• P, B, L → "연" 변환\n• "연", "야" 외 전부 공란\n• 배경색 하얀색\n` +
+    `완료\n• P, B, L (P/교, B/교, L/교 포함) → "연" 변환\n• "연", "야" 외 전부 공란\n• 배경색 하얀색\n` +
     `• AD27: ${nightText}\n(${year}년 ${month}월 기준, ${lastDay}일까지)`
   );
+}
+
+// "P/교", "B / 교", "L-교", "P교" 처럼 뒤에 붙은 "교"(사내교육) 표기를 제거하고
+// 앞쪽 근태코드만 반환. 그 외 값은 공백 제거 + 대문자화만 수행.
+function normalizeAttendCode_(v) {
+  let s = (v == null ? '' : String(v)).trim();
+  if (!s) return '';
+  const m = s.match(/^([A-Za-z가-힣]{1,2})\s*[\/\\\-]?\s*교$/);
+  if (m && m[1]) s = m[1].trim();
+  return s.toUpperCase();
 }
 
 function processPBLtoYeonAndClear(sheet, lastDay) {
@@ -851,19 +861,18 @@ function processPBLtoYeonAndClear(sheet, lastDay) {
   const pbl = new Set(["P", "B", "L"]);
   const keepers = new Set(["연", "야"]);
 
-  for (let r = 0; r < values.length; r++) {
-    for (let c = 0; c < values[r].length; c++) {
-      const str = (values[r][c] == null ? '' : String(values[r][c])).trim();
-      if (pbl.has(str)) values[r][c] = "연";
-    }
-  }
-
   let nightCount = 0;
   for (let r = 0; r < values.length; r++) {
     for (let c = 0; c < values[r].length; c++) {
-      const str = (values[r][c] == null ? '' : String(values[r][c])).trim();
-      if (str === "야") nightCount++;
-      if (str !== '' && !keepers.has(str)) values[r][c] = '';
+      const code = normalizeAttendCode_(values[r][c]);
+      if (pbl.has(code)) {
+        values[r][c] = "연";
+      } else if (keepers.has(code)) {
+        values[r][c] = code;
+        if (code === "야") nightCount++;
+      } else {
+        values[r][c] = '';
+      }
       backgrounds[r][c] = '#ffffff';
     }
   }
@@ -1037,11 +1046,11 @@ function fillKeunTaeData() {
       const day = Number(dateRow[ci]);
       if (!day) continue;
       for (const sr of staffRows) {
-        const val = sr[ci];
-        if (val === '야') nightDays[day] = (nightDays[day] || 0) + 1;
-        if (val === 'P') pDays[day] = (pDays[day] || 0) + 1;
-        if (val === 'B') bDays[day] = (bDays[day] || 0) + 1;
-        if (val === 'L') lDays[day] = (lDays[day] || 0) + 1;
+        const code = normalizeAttendCode_(sr[ci]);
+        if (code === '야') nightDays[day] = (nightDays[day] || 0) + 1;
+        if (code === 'P') pDays[day] = (pDays[day] || 0) + 1;
+        if (code === 'B') bDays[day] = (bDays[day] || 0) + 1;
+        if (code === 'L') lDays[day] = (lDays[day] || 0) + 1;
       }
     }
 
@@ -1153,11 +1162,11 @@ function debugKeunTaeData() {
     const day = Number(dateRow[ci]);
     if (!day) continue;
     for (const sr of staffRows) {
-      const val = sr[ci];
-      if (val === '야') nightDays[day] = (nightDays[day] || 0) + 1;
-      if (val === 'P') pDays[day] = (pDays[day] || 0) + 1;
-      if (val === 'B') bDays[day] = (bDays[day] || 0) + 1;
-      if (val === 'L') lDays[day] = (lDays[day] || 0) + 1;
+      const code = normalizeAttendCode_(sr[ci]);
+      if (code === '야') nightDays[day] = (nightDays[day] || 0) + 1;
+      if (code === 'P') pDays[day] = (pDays[day] || 0) + 1;
+      if (code === 'B') bDays[day] = (bDays[day] || 0) + 1;
+      if (code === 'L') lDays[day] = (lDays[day] || 0) + 1;
     }
   }
   Logger.log('=== 야간(야) 집계 ===');
@@ -1240,7 +1249,9 @@ function showHelp() {
     " (X월 결과보고 / X월 근태 / X월 근무현황표)\n\n" +
     "【 교육(교) 처리 규칙 】\n" +
     "• 근무계획에서 노란색(#ffff00) 배경의 \"교\"는 사외교육 → 특수문자 외 1 채우기 시에도 \"교\" 값 유지\n" +
-    "• 그 외 배경색의 \"교\"는 사내교육(출근) → 1로 변환\n\n" +
+    "• 그 외 배경색의 \"교\"는 사내교육(출근) → 1로 변환\n" +
+    "• 연장 + 사내교육 병행 표기(P/교, B/교, L/교)는 각각 P, B, L과 동일하게 인식\n" +
+    " (PBL→연 변환, A23~A26 집계 모두 적용)\n\n" +
     "【 차월 근무계획 월 기준 】\n" +
     "• \"차월 근무계획\" 시트는 근무계획 가져오기·특수문자 외 1 채우기 모두\n" +
     " 그 시트 자체의 Z3(월) 값을 기준으로 동작함 (X월 근무현황표 월과 무관)\n\n" +
