@@ -1,0 +1,263 @@
+/**
+ * 일근무관리 시트 정리 (일근무관리.gs)
+ * - 1~2행 병합 해제 후 1행 삭제 (2행이 진짜 헤더)
+ * - P·Q·R·S 헤더명 변경 (열 삭제 전 = 원본 좌표 기준)
+ * - 불필요한 18개 열 삭제
+ * - 헤더 서식 / 열 너비 / 테두리 정리
+ *
+ * ※ Code.gs의 헬퍼(deleteColumnsByLetters, columnLetterToIndex, _styleHeader)를 재사용합니다.
+ */
+
+// ─── 시트명 ──────────────────────────────────────────────────────────────
+const SHEET_WORK_MGMT = "일근무관리";
+
+// ─── 삭제 대상 열 (원본 좌표 기준) ───────────────────────────────────────
+const WM_DELETE_COLS = [
+  "A","B","F","G","K","L",
+  "AC","AD","AF","AG","AH",
+  "AM","AN","AO","AP","AQ","AT","AU"
+];
+
+// ─── 헤더명 변경 (원본 좌표 기준, 열 삭제 전에 적용) ─────────────────────
+const WM_HEADER_RENAMES = [
+  { col: "P", name: "TimeCard 출근" },
+  { col: "Q", name: "TimeCard 퇴근" },
+  { col: "R", name: "근무시간 출근" },
+  { col: "S", name: "근무시간 퇴근" }
+];
+
+// ─── 서식 설정 ───────────────────────────────────────────────────────────
+const WM_COL_MIN_WIDTH = 70;
+const WM_COL_MAX_WIDTH = 200;
+const WM_HEADER_ROW_HEIGHT = 32;
+
+// 재실행 감지용 (이 값이 헤더에 있으면 이미 정리된 시트)
+const WM_GUARD_HEADER = "TimeCard 출근";
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [1] 메인 — 일근무관리 정리
+// ═════════════════════════════════════════════════════════════════════════
+function cleanWorkMgmtSheet() {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = _getWorkMgmtSheet();
+  if (!sheet) return;
+
+  // ── 재실행 방지 ──────────────────────────────────────────────────────
+  if (_isAlreadyCleaned(sheet)) {
+    const res = ui.alert(
+      "⚠️ 이미 정리된 시트로 보입니다",
+      `헤더에 "${WM_GUARD_HEADER}"가 이미 있습니다.\n` +
+      "그대로 실행하면 데이터 열이 잘못 삭제됩니다.\n\n계속하시겠습니까?",
+      ui.ButtonSet.YES_NO
+    );
+    if (res !== ui.Button.YES) return;
+  }
+
+  const beforeCols = sheet.getLastColumn();
+
+  // ── 1) 헤더 병합 해제 (1행 값은 2행으로 내림) ────────────────────────
+  _unmergeHeaderKeepRow2(sheet);
+
+  // ── 2) 1행 삭제 ──────────────────────────────────────────────────────
+  sheet.deleteRow(1);
+  SpreadsheetApp.flush();
+
+  // ── 3) 헤더명 변경 (열 삭제 전) ──────────────────────────────────────
+  const renamed = _renameWorkMgmtHeaders(sheet);
+
+  // ── 4) 불필요한 열 삭제 ──────────────────────────────────────────────
+  deleteColumnsByLetters(sheet, WM_DELETE_COLS);
+
+  // ── 5) 서식 정리 ─────────────────────────────────────────────────────
+  _styleWorkMgmtSheet(sheet);
+
+  const lastCol = sheet.getLastColumn();
+  const headers = lastCol > 0
+    ? sheet.getRange(1, 1, 1, lastCol).getValues()[0]
+        .map((h, i) => `${_indexToColumnLetter(i + 1)}:${String(h).trim() || "(빈칸)"}`)
+    : [];
+
+  ui.alert(
+    "✅ 일근무관리 정리 완료!\n\n" +
+    "• 헤더 병합 해제 후 1행 삭제\n" +
+    `• 헤더명 변경 ${renamed}개 (TimeCard·근무시간 출퇴근)\n` +
+    `• 불필요한 ${WM_DELETE_COLS.length}개 열 삭제 (${beforeCols} → ${lastCol}열)\n` +
+    `• 데이터 ${Math.max(0, sheet.getLastRow() - 1)}행\n\n` +
+    "📋 현재 헤더\n" + headers.join("\n")
+  );
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [2] 미리보기 — 실제 삭제 없이 열 매핑만 로그 출력
+// ═════════════════════════════════════════════════════════════════════════
+function previewWorkMgmtHeaders() {
+  const sheet = _getWorkMgmtSheet();
+  if (!sheet) return;
+
+  const lastCol = sheet.getLastColumn();
+  if (lastCol < 1) {
+    SpreadsheetApp.getUi().alert("시트가 비어 있습니다.");
+    return;
+  }
+
+  const row1 = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const row2 = sheet.getLastRow() >= 2
+    ? sheet.getRange(2, 1, 1, lastCol).getValues()[0]
+    : new Array(lastCol).fill("");
+
+  const delSet = {};
+  WM_DELETE_COLS.forEach(l => { delSet[columnLetterToIndex(l)] = true; });
+
+  const renameMap = {};
+  WM_HEADER_RENAMES.forEach(r => { renameMap[columnLetterToIndex(r.col)] = r.name; });
+
+  const keep = [];
+  Logger.log("─── 일근무관리 열 매핑 미리보기 ───");
+  for (let c = 1; c <= lastCol; c++) {
+    const letter = _indexToColumnLetter(c);
+    const h1 = String(row1[c - 1]).trim();
+    const h2 = String(row2[c - 1]).trim();
+
+    let mark = "유지";
+    if (delSet[c]) mark = "❌ 삭제";
+    else if (renameMap[c]) mark = `✏️ "${renameMap[c]}"로 변경`;
+
+    Logger.log(`${letter} | 1행:"${h1}" 2행:"${h2}" → ${mark}`);
+    if (!delSet[c]) keep.push(renameMap[c] || h2 || h1 || "(빈칸)");
+  }
+
+  Logger.log("─── 정리 후 예상 헤더 ───");
+  keep.forEach((h, i) => Logger.log(`${_indexToColumnLetter(i + 1)}: ${h}`));
+
+  SpreadsheetApp.getUi().alert(
+    "🔍 미리보기 완료\n\n" +
+    `현재 ${lastCol}열 → 정리 후 ${keep.length}열 예상\n\n` +
+    "자세한 매핑은 [확장 프로그램 → Apps Script → 실행 로그]를 확인하세요."
+  );
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [3] 세부 처리
+// ═════════════════════════════════════════════════════════════════════════
+
+// ─── 1~2행 병합 해제 (1행에서 시작한 병합은 2행에 값을 남김) ─────────────
+function _unmergeHeaderKeepRow2(sheet) {
+  const lastCol = sheet.getLastColumn();
+  if (lastCol < 1 || sheet.getMaxRows() < 2) return;
+
+  const merges = sheet.getRange(1, 1, 2, lastCol).getMergedRanges();
+
+  merges.forEach(r => {
+    const value = r.getCell(1, 1).getValue();
+    const startRow = r.getRow();
+    const startCol = r.getColumn();
+    const numRows = r.getNumRows();
+    const numCols = r.getNumColumns();
+
+    r.breakApart();
+
+    // 2행에 걸쳐 있던 병합 → 2행에 값 복원 (1행 삭제 대비)
+    if ((startRow === 1 && numRows >= 2) || startRow === 2) {
+      sheet.getRange(2, startCol, 1, numCols).setValue(value);
+    }
+  });
+
+  SpreadsheetApp.flush();
+}
+
+
+// ─── 헤더명 변경 ─────────────────────────────────────────────────────────
+function _renameWorkMgmtHeaders(sheet) {
+  const lastCol = sheet.getLastColumn();
+  let count = 0;
+
+  WM_HEADER_RENAMES.forEach(r => {
+    const idx = columnLetterToIndex(r.col);
+    if (idx > lastCol) {
+      Logger.log(`[주의] ${r.col}열이 존재하지 않아 건너뜀 (현재 ${lastCol}열)`);
+      return;
+    }
+    const before = String(sheet.getRange(1, idx).getValue()).trim();
+    sheet.getRange(1, idx).setValue(r.name);
+    Logger.log(`${r.col}열 헤더: "${before}" → "${r.name}"`);
+    count++;
+  });
+
+  SpreadsheetApp.flush();
+  return count;
+}
+
+
+// ─── 서식 정리 ───────────────────────────────────────────────────────────
+function _styleWorkMgmtSheet(sheet) {
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow < 1 || lastCol < 1) return;
+
+  // 헤더 (Code.gs 공통 서식 + 1행 고정)
+  _styleHeader(sheet, lastCol, true);
+  sheet.getRange(1, 1, 1, lastCol).setWrap(true);
+  sheet.setRowHeight(1, WM_HEADER_ROW_HEIGHT);
+
+  // 전체 범위 정렬 + 테두리
+  const all = sheet.getRange(1, 1, lastRow, lastCol);
+  all.setVerticalAlignment("middle");
+  all.setBorder(true, true, true, true, true, true,
+                "#b7c3dc", SpreadsheetApp.BorderStyle.SOLID);
+
+  if (lastRow >= 2) {
+    sheet.getRange(2, 1, lastRow - 1, lastCol).setHorizontalAlignment("center");
+  }
+
+  // 열 너비 자동맞춤 후 최소·최대값으로 클램프
+  sheet.autoResizeColumns(1, lastCol);
+  SpreadsheetApp.flush();
+
+  for (let c = 1; c <= lastCol; c++) {
+    const w = sheet.getColumnWidth(c);
+    if (w < WM_COL_MIN_WIDTH) sheet.setColumnWidth(c, WM_COL_MIN_WIDTH);
+    else if (w > WM_COL_MAX_WIDTH) sheet.setColumnWidth(c, WM_COL_MAX_WIDTH);
+  }
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [4] 유틸
+// ═════════════════════════════════════════════════════════════════════════
+function _getWorkMgmtSheet() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_WORK_MGMT);
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert(`"${SHEET_WORK_MGMT}" 시트를 찾을 수 없습니다.`);
+    return null;
+  }
+  return sheet;
+}
+
+
+function _isAlreadyCleaned(sheet) {
+  const lastCol = sheet.getLastColumn();
+  if (lastCol < 1) return false;
+
+  const rows = Math.min(2, sheet.getLastRow());
+  if (rows < 1) return false;
+
+  const vals = sheet.getRange(1, 1, rows, lastCol).getValues();
+  return vals.some(row =>
+    row.some(v => String(v).replace(/\s+/g, "") === WM_GUARD_HEADER.replace(/\s+/g, ""))
+  );
+}
+
+
+function _indexToColumnLetter(index) {
+  let letter = "";
+  let n = index;
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    letter = String.fromCharCode(65 + rem) + letter;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letter;
+}

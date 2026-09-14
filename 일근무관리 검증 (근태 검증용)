@@ -1,0 +1,617 @@
+/**
+ * 일근무관리 검증 (일근무관리검증.gs)
+ *
+ * [1] 근무계획 대조 — 해당 월 시트의 근무기호 ↔ 일근무관리 G·H열
+ *     ※ "교"는 배경색으로 사외교육(#ffff00) / 사내교육(#d9ead3)을 구분
+ * [2] 일근무관리 자체 검증 — S열 / 가산근로(W) / 비고(AB) / 타임카드 누락(Q)
+ *
+ * 결과: "일근무관리 검증" 시트에 문제 항목만 출력
+ *
+ * ※ Code.gs의 상수·헬퍼(SS_ID_WORK_PLAN, _findSheetByPatterns, _readBlock,
+ *    _toDate)와 일근무관리.gs의 SHEET_WORK_MGMT를 재사용합니다.
+ */
+
+// ─── 결과 시트명 ─────────────────────────────────────────────────────────
+const SHEET_WM_VERIFY = "일근무관리 검증";
+
+// ─── 일근무관리 시트 열 (정리 완료 후 기준) ──────────────────────────────
+const WM_COL_DATE = 1;      // A 날짜
+const WM_COL_NAME = 5;      // E 이름
+const WM_COL_ATTEND = 7;    // G 근태
+const WM_COL_WORKTIME = 8;  // H 근무시간
+const WM_COL_TC_MISS = 17;  // Q 타임카드 누락
+const WM_COL_CHECK = 19;    // S 확인
+const WM_COL_ADDWORK = 23;  // W 가산근로
+const WM_COL_NOTE = 28;     // AB 비고
+const WM_READ_COLS = 28;    // A~AB
+const WM_DATA_START_ROW = 2;
+
+// ─── 근무계획 시트 구조 ──────────────────────────────────────────────────
+const PLAN_NAME_COL = 3;        // C열 = 이름
+const PLAN_NAME_START_ROW = 5;  // C5부터
+const PLAN_STOP_LABEL = "계";   // A열에 이 값이 나오면 표 끝
+const PLAN_STOP_SCAN_MAX = 100; // 안전 상한
+const PLAN_DAY_ROW = 3;         // 3행 = 일(1~31)
+const PLAN_DAY_COL_START = 7;   // G열
+const PLAN_DAY_COL_END = 37;    // AK열
+
+// ─── 근무기호 → 근무시간(H) 규칙 ─────────────────────────────────────────
+// ※ 순서 중요: "휴무"처럼 두 글자면 앞쪽 규칙이 우선 적용됨
+const WM_WORKTIME_RULES = [
+  { key: "무", expect: "휴무(G03)" },
+  { key: "휴", expect: "휴무(G01)" },
+  { key: "연", expect: "근무(L11)" },
+  { key: "조", expect: "근무(H61)" },
+  { key: "야", expect: "근무(R86)" }
+];
+const WM_BLANK_WORKTIME = "근무(I61)"; // 근무계획 셀이 공란일 때 = 정상근무
+
+// ─── 근무기호 → 근태(G) 규칙 ─────────────────────────────────────────────
+// ※ "교"는 배경색 분기가 필요해 여기 없음 (_parsePlanMark에서 별도 처리)
+const WM_ATTEND_RULES = [
+  { key: "년", expect: ["연차"] },
+  { key: "퇴", expect: ["철야휴무"] },
+  { key: "반", expect: ["오전반차", "오후반차"] },
+  { key: "출", expect: ["국내출장"] },
+  { key: "청", expect: ["청원휴가"] },
+  { key: "공", expect: ["공휴"] }
+];
+
+// ─── "교" 배경색 분기 ────────────────────────────────────────────────────
+const WM_EDU_TOKEN = "교";
+const WM_EDU_COLOR_OUTSIDE = ["#ffff00"]; // 사외교육 → 근태 "교육(종일)"
+const WM_EDU_COLOR_INSIDE = ["#d9ead3"];  // 사내교육 → 정상근무 "근무(I61)"
+const WM_EDU_ATTEND_LABEL = "교육(종일)";
+const WM_EDU_RULE_OUTSIDE = { key: WM_EDU_TOKEN, expect: [WM_EDU_ATTEND_LABEL] };
+
+// 근무기호 해석에서 무시할 토큰 (연장근무 기호 등)
+const WM_IGNORE_TOKENS = ["P", "B", "L"];
+
+// ─── 자체 검증 기준값 ────────────────────────────────────────────────────
+const WM_CHECK_OK_VALUES = ["O"];                         // S열
+const WM_NIGHT_WORKTIME = "근무(R86)";                    // 야간 근무 코드
+const WM_NIGHT_NOTE = "생수공장 야간 가산근로 반영";       // AB열 필수 문구
+const WM_NIGHT_ADDWORK_MINUTES = 0;                       // W열 = 0:00
+
+// ─── 검증 항목 라벨 ──────────────────────────────────────────────────────
+const WM_ITEM = {
+  WORKTIME: "근무시간 불일치",
+  ATTEND: "근태 불일치",
+  EDU_COLOR: "교육 배경색 확인필요",
+  UNKNOWN: "근무기호 확인필요",
+  NO_NAME: "근무계획 이름 없음",
+  NO_DAY: "근무계획 날짜 없음",
+  CHECK: "확인란 미표기",
+  ADDWORK: "가산근로 불일치",
+  NOTE: "비고 누락",
+  TC_MISS: "타임카드 누락"
+};
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [1] 메인
+// ═════════════════════════════════════════════════════════════════════════
+function verifyWorkMgmtSheet() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  const sheet = ss.getSheetByName(SHEET_WORK_MGMT);
+  if (!sheet) {
+    ui.alert(`"${SHEET_WORK_MGMT}" 시트를 찾을 수 없습니다.`);
+    return;
+  }
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < WM_DATA_START_ROW) {
+    ui.alert("일근무관리 시트에 데이터가 없습니다.");
+    return;
+  }
+
+  // ── 데이터 읽기 (A~AB, 부족한 열은 빈 값으로 패딩) ───────────────────
+  const numRows = lastRow - WM_DATA_START_ROW + 1;
+  const data = _readBlock(sheet, WM_DATA_START_ROW, 1, numRows, WM_READ_COLS);
+
+  const rows = [];
+  data.forEach((r, i) => {
+    const date = _toDate(r[WM_COL_DATE - 1]);
+    const name = String(r[WM_COL_NAME - 1]).replace(/\s+/g, "");
+    if (!date || !name) return; // 날짜·이름 없는 행은 건너뜀
+    rows.push({
+      row: WM_DATA_START_ROW + i,
+      date: date,
+      name: name,
+      attend: String(r[WM_COL_ATTEND - 1]).replace(/\s+/g, ""),
+      worktime: String(r[WM_COL_WORKTIME - 1]).replace(/\s+/g, ""),
+      tcMiss: String(r[WM_COL_TC_MISS - 1]).trim(),
+      check: String(r[WM_COL_CHECK - 1]).replace(/\s+/g, "").toUpperCase(),
+      addwork: r[WM_COL_ADDWORK - 1],
+      note: String(r[WM_COL_NOTE - 1]).replace(/\s+/g, " ").trim()
+    });
+  });
+
+  if (rows.length === 0) {
+    ui.alert("검사할 데이터가 없습니다. (날짜·이름이 있는 행 없음)");
+    return;
+  }
+
+  const issues = [];
+  const headers = _wmHeaderMap(sheet);
+
+  // ── 기준 연·월 ───────────────────────────────────────────────────────
+  const baseDate = rows[0].date;
+  const year = baseDate.getFullYear();
+  const month = baseDate.getMonth() + 1;
+
+  // ── (1) 근무계획 대조 ────────────────────────────────────────────────
+  let planInfo = { sheetName: null, error: null };
+  try {
+    planInfo = _verifyAgainstWorkPlan(rows, month, issues);
+  } catch (e) {
+    planInfo.error = e.message;
+    issues.push(_wmIssue(null, "", "근무계획 대조 실패", e.message));
+  }
+
+  // ── (2) 일근무관리 자체 검증 ─────────────────────────────────────────
+  _verifyWorkMgmtSelf(rows, headers, issues);
+
+  // ── 정렬 (날짜 → 이름) ───────────────────────────────────────────────
+  issues.sort((a, b) => {
+    const ta = a.date ? a.date.getTime() : 0;
+    const tb = b.date ? b.date.getTime() : 0;
+    return (ta - tb) || a.name.localeCompare(b.name);
+  });
+
+  // ── 결과 시트 작성 ───────────────────────────────────────────────────
+  const info = {
+    year: year, month: month,
+    planSheet: planInfo.sheetName,
+    planError: planInfo.error,
+    checked: rows.length
+  };
+  const result = _buildWorkMgmtReport(info, issues);
+  ss.setActiveSheet(result);
+
+  ui.alert(
+    issues.length === 0
+      ? `✅ 일근무관리 검증 완료\n\n기준: ${year}년 ${month}월\n` +
+        `근무계획 시트: ${planInfo.sheetName || "확인 불가"}\n` +
+        `검사 ${rows.length}행\n\n문제가 발견되지 않았습니다.`
+      : `⚠️ 일근무관리 검증 완료\n\n기준: ${year}년 ${month}월\n` +
+        `근무계획 시트: ${planInfo.sheetName || "확인 불가"}\n` +
+        `검사 ${rows.length}행 / 문제 ${issues.length}건\n\n` +
+        `자세한 내용은 "${SHEET_WM_VERIFY}" 시트를 확인하세요.`
+  );
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [2] 근무계획 대조
+// ═════════════════════════════════════════════════════════════════════════
+function _verifyAgainstWorkPlan(rows, month, issues) {
+  const plan = SpreadsheetApp.openById(SS_ID_WORK_PLAN);
+  const sh = _findSheetByPatterns(plan, [`${month}월`],
+                                  new RegExp(`(^|[^0-9])${month}\\s*월`));
+  if (!sh) throw new Error(`근무계획에서 "${month}월" 시트를 찾을 수 없습니다`);
+
+  // ── 이름 행 맵 (C5 ~ A열 "계" 직전) ──────────────────────────────────
+  const nameRows = _readPlanNameRows(sh);
+  if (nameRows.count === 0) throw new Error(`"${sh.getName()}" 시트에서 이름 행을 찾지 못했습니다`);
+
+  // ── 일 → 열 맵 (G3:AK3) ──────────────────────────────────────────────
+  const dayCols = _readPlanDayColumns(sh);
+  if (Object.keys(dayCols).length === 0) throw new Error(`"${sh.getName()}" 시트 3행에서 날짜를 찾지 못했습니다`);
+
+  // ── 근무기호 + 배경색 일괄 읽기 ──────────────────────────────────────
+  const numCols = PLAN_DAY_COL_END - PLAN_DAY_COL_START + 1;
+  const marks = _readBlock(sh, nameRows.startRow, PLAN_DAY_COL_START, nameRows.count, numCols);
+  const bgs = _readBlockBackgrounds(sh, nameRows.startRow, PLAN_DAY_COL_START, nameRows.count, numCols);
+
+  Logger.log(`근무계획 "${sh.getName()}": 이름 ${nameRows.count}명 ` +
+             `(${nameRows.startRow}~${nameRows.startRow + nameRows.count - 1}행), ` +
+             `날짜 ${Object.keys(dayCols).length}일`);
+
+  const reportedNames = {}; // 이름당 1회만 지적
+
+  rows.forEach(r => {
+    const idx = nameRows.map[r.name];
+    if (idx === undefined) {
+      if (!reportedNames[r.name]) {
+        reportedNames[r.name] = true;
+        issues.push(_wmIssue(null, r.name, WM_ITEM.NO_NAME,
+          `근무계획 "${sh.getName()}" 시트 C열에 이름이 없습니다`));
+      }
+      return;
+    }
+
+    const day = r.date.getDate();
+    const col = dayCols[day];
+    if (col === undefined) {
+      issues.push(_wmIssue(r.date, r.name, WM_ITEM.NO_DAY,
+        `근무계획 3행에 ${day}일이 없습니다`));
+      return;
+    }
+
+    const offset = col - PLAN_DAY_COL_START;
+    const parsed = _parsePlanMark(marks[idx][offset], bgs[idx][offset]);
+    const markText = parsed.raw || "(공란)";
+
+    // 교육 배경색 판별 실패
+    if (parsed.eduUnknownColor) {
+      issues.push(_wmIssue(r.date, r.name, WM_ITEM.EDU_COLOR,
+        `근무계획 "${markText}" 배경색 ${parsed.eduUnknownColor} — ` +
+        `사외교육(${WM_EDU_COLOR_OUTSIDE[0]}) 또는 사내교육(${WM_EDU_COLOR_INSIDE[0]})이 아닙니다`));
+    }
+
+    // 근무시간(H) 대조
+    if (parsed.worktime !== null) {
+      if (r.worktime !== parsed.worktime) {
+        const via = parsed.eduInside ? " (사내교육 = 정상근무)" : "";
+        issues.push(_wmIssue(r.date, r.name, WM_ITEM.WORKTIME,
+          `근무계획 "${markText}"${via} → "${parsed.worktime}" 이어야 하는데 ` +
+          `"${r.worktime || "공란"}"`));
+      }
+    }
+
+    // 근태(G) 대조
+    if (parsed.attend) {
+      const ok = parsed.attend.expect.some(e => r.attend === e.replace(/\s+/g, ""));
+      if (!ok) {
+        issues.push(_wmIssue(r.date, r.name, WM_ITEM.ATTEND,
+          `근무계획 "${markText}" → "${parsed.attend.expect.join(" 또는 ")}" ` +
+          `이어야 하는데 "${r.attend || "공란"}"`));
+      }
+    }
+
+    // 사내교육인데 근태에 교육(종일)이 잡혀 있으면 역으로 지적
+    if (parsed.eduInside && r.attend === WM_EDU_ATTEND_LABEL.replace(/\s+/g, "")) {
+      issues.push(_wmIssue(r.date, r.name, WM_ITEM.ATTEND,
+        `근무계획 "${markText}"는 사내교육(정상근무)인데 근태가 "${WM_EDU_ATTEND_LABEL}" 입니다`));
+    }
+
+    // 해석 불가 기호
+    if (parsed.unknown.length > 0) {
+      issues.push(_wmIssue(r.date, r.name, WM_ITEM.UNKNOWN,
+        `근무계획 "${markText}" — 정의되지 않은 기호 (${parsed.unknown.join(", ")})`));
+    }
+  });
+
+  return { sheetName: sh.getName(), error: null };
+}
+
+
+// ─── 근무계획 이름 행 읽기 (A열 "계" 직전까지) ───────────────────────────
+function _readPlanNameRows(sheet) {
+  const lastRow = Math.min(sheet.getLastRow(), PLAN_NAME_START_ROW + PLAN_STOP_SCAN_MAX);
+  const numRows = lastRow - PLAN_NAME_START_ROW + 1;
+  if (numRows < 1) return { map: {}, startRow: PLAN_NAME_START_ROW, count: 0 };
+
+  const vals = _readBlock(sheet, PLAN_NAME_START_ROW, 1, numRows, PLAN_NAME_COL);
+
+  const map = {};
+  let count = 0;
+  for (let i = 0; i < vals.length; i++) {
+    const aVal = String(vals[i][0]).replace(/\s+/g, "");
+    if (aVal === PLAN_STOP_LABEL) break; // 합계 행 → 표 끝
+
+    const name = String(vals[i][PLAN_NAME_COL - 1]).replace(/\s+/g, "");
+    if (name) map[name] = i;
+    count = i + 1;
+  }
+
+  return { map: map, startRow: PLAN_NAME_START_ROW, count: count };
+}
+
+
+// ─── 근무계획 일(日) → 열 맵 (G3:AK3) ────────────────────────────────────
+function _readPlanDayColumns(sheet) {
+  const numCols = PLAN_DAY_COL_END - PLAN_DAY_COL_START + 1;
+  const vals = _readBlock(sheet, PLAN_DAY_ROW, PLAN_DAY_COL_START, 1, numCols)[0];
+
+  const map = {};
+  vals.forEach((v, i) => {
+    let day = null;
+    if (v instanceof Date) day = v.getDate();
+    else {
+      const m = String(v).match(/(\d{1,2})/);
+      if (m) day = parseInt(m[1], 10);
+    }
+    if (day && day >= 1 && day <= 31 && map[day] === undefined) {
+      map[day] = PLAN_DAY_COL_START + i;
+    }
+  });
+  return map;
+}
+
+
+// ─── 근무기호 해석 (배경색 포함) ─────────────────────────────────────────
+function _parsePlanMark(mark, bg) {
+  const raw = String(mark == null ? "" : mark).replace(/\s+/g, "");
+  const color = _wmNormalizeColor(bg);
+
+  const out = {
+    raw: raw, worktime: null, attend: null, unknown: [],
+    eduInside: false, eduUnknownColor: null
+  };
+
+  if (!raw) {
+    out.worktime = WM_BLANK_WORKTIME;
+    return out;
+  }
+
+  const tokens = raw.split(/[\/·,、|+\-]+/).filter(t => t !== "");
+
+  tokens.forEach(t => {
+    // ── "교" → 배경색으로 사외/사내 판별 ───────────────────────────────
+    if (t.indexOf(WM_EDU_TOKEN) !== -1) {
+      if (WM_EDU_COLOR_OUTSIDE.indexOf(color) !== -1) {
+        if (out.attend === null) out.attend = WM_EDU_RULE_OUTSIDE;
+      } else if (WM_EDU_COLOR_INSIDE.indexOf(color) !== -1) {
+        out.eduInside = true;
+        if (out.worktime === null) out.worktime = WM_BLANK_WORKTIME;
+      } else {
+        out.eduUnknownColor = color;
+      }
+      return;
+    }
+
+    let hit = false;
+
+    for (const rule of WM_WORKTIME_RULES) {
+      if (t.indexOf(rule.key) !== -1) {
+        if (out.worktime === null) out.worktime = rule.expect;
+        hit = true;
+        break;
+      }
+    }
+    for (const rule of WM_ATTEND_RULES) {
+      if (t.indexOf(rule.key) !== -1) {
+        if (out.attend === null) out.attend = rule;
+        hit = true;
+        break;
+      }
+    }
+    if (!hit && WM_IGNORE_TOKENS.indexOf(t.toUpperCase()) === -1) out.unknown.push(t);
+  });
+
+  return out;
+}
+
+
+// ─── 배경색 정규화 (#RRGGBB 소문자) ──────────────────────────────────────
+function _wmNormalizeColor(bg) {
+  let s = String(bg == null ? "" : bg).trim().toLowerCase();
+  if (!s) return "";
+
+  // #rgb → #rrggbb
+  const m = s.match(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/);
+  if (m) return `#${m[1]}${m[1]}${m[2]}${m[2]}${m[3]}${m[3]}`;
+  return s;
+}
+
+
+// ─── 배경색 블록 읽기 (범위 초과분은 흰색) ───────────────────────────────
+function _readBlockBackgrounds(sheet, row, col, numRows, numCols) {
+  const out = [];
+  for (let r = 0; r < numRows; r++) out.push(new Array(numCols).fill("#ffffff"));
+
+  const readRows = Math.max(0, Math.min(numRows, sheet.getMaxRows() - row + 1));
+  const readCols = Math.max(0, Math.min(numCols, sheet.getMaxColumns() - col + 1));
+  if (readRows === 0 || readCols === 0) return out;
+
+  const vals = sheet.getRange(row, col, readRows, readCols).getBackgrounds();
+  for (let r = 0; r < readRows; r++) {
+    for (let c = 0; c < readCols; c++) out[r][c] = vals[r][c];
+  }
+  return out;
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [3] 일근무관리 자체 검증
+// ═════════════════════════════════════════════════════════════════════════
+function _verifyWorkMgmtSelf(rows, headers, issues) {
+  const hCheck = headers[WM_COL_CHECK] || "S열";
+  const hAdd = headers[WM_COL_ADDWORK] || "W열";
+  const hNote = headers[WM_COL_NOTE] || "AB열";
+  const hTc = headers[WM_COL_TC_MISS] || "Q열";
+
+  const noteKey = WM_NIGHT_NOTE.replace(/\s+/g, "");
+
+  rows.forEach(r => {
+    // (1) S열 확인란
+    if (WM_CHECK_OK_VALUES.indexOf(r.check) === -1) {
+      issues.push(_wmIssue(r.date, r.name, WM_ITEM.CHECK,
+        `${hCheck}(S) 값이 "${r.check || "공란"}" — "${WM_CHECK_OK_VALUES.join("/")}" 이어야 합니다`));
+    }
+
+    // (2)(3) 야간 근무자 전용
+    if (r.worktime === WM_NIGHT_WORKTIME) {
+      const min = _wmToMinutes(r.addwork);
+      if (min === null || min !== WM_NIGHT_ADDWORK_MINUTES) {
+        issues.push(_wmIssue(r.date, r.name, WM_ITEM.ADDWORK,
+          `${WM_NIGHT_WORKTIME}인데 ${hAdd}(W)가 "${_wmFmtDuration(r.addwork)}" — 0:00 이어야 합니다`));
+      }
+      if (r.note.replace(/\s+/g, "").indexOf(noteKey) === -1) {
+        issues.push(_wmIssue(r.date, r.name, WM_ITEM.NOTE,
+          `${WM_NIGHT_WORKTIME}인데 ${hNote}(AB)에 "${WM_NIGHT_NOTE}" 없음 ` +
+          `(현재: "${r.note || "공란"}")`));
+      }
+    }
+
+    // (4) 타임카드 누락
+    if (r.tcMiss !== "") {
+      issues.push(_wmIssue(r.date, r.name, WM_ITEM.TC_MISS,
+        `${hTc}(Q)에 값이 있습니다 — "${r.tcMiss}"`));
+    }
+  });
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [4] 결과 시트 작성
+// ═════════════════════════════════════════════════════════════════════════
+function _buildWorkMgmtReport(info, issues) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_WM_VERIFY);
+
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_WM_VERIFY);
+  } else {
+    sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).breakApart();
+    sheet.clear();
+  }
+
+  const NCOL = 4;
+  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
+  const tz = Session.getScriptTimeZone();
+
+  const data = [];
+  const meta = [];
+  const push = (row, type) => { data.push(row); meta.push(type); };
+
+  push(["일근무관리 검증 결과", "", "", ""], "title");
+  push([`기준 ${info.year}년 ${info.month}월 · 근무계획 시트 "${info.planSheet || "확인 불가"}" · ` +
+        `검사 ${info.checked}행 · 실행 ${stamp}`, "", "", ""], "sub");
+  push([issues.length === 0 ? "✅ 문제 없음" : `❌ 문제 ${issues.length}건`, "", "", ""],
+       issues.length === 0 ? "ok" : "summary");
+
+  if (info.planError) push([`⚠️ ${info.planError}`, "", "", ""], "note");
+
+  push(["", "", "", ""], "blank");
+
+  if (issues.length > 0) {
+    push(["날짜", "이름", "검증 항목", "문제 내용"], "head");
+    issues.forEach(it => {
+      push([
+        it.date ? Utilities.formatDate(it.date, tz, "MM-dd (E)") : "-",
+        it.name || "-",
+        it.item,
+        it.detail
+      ], "data");
+    });
+  } else {
+    push(["근무계획 대조 및 일근무관리 자체 검증에서 불일치 항목이 발견되지 않았습니다.", "", "", ""], "note");
+  }
+
+  sheet.getRange(1, 1, data.length, NCOL).setValues(data);
+
+  // ── 서식 ───────────────────────────────────────────────────────────────
+  sheet.setColumnWidth(1, 110);
+  sheet.setColumnWidth(2, 90);
+  sheet.setColumnWidth(3, 160);
+  sheet.setColumnWidth(4, 620);
+
+  sheet.getRange(1, 1, data.length, NCOL)
+    .setFontFamily("Noto Sans KR")
+    .setVerticalAlignment("middle");
+
+  let headRow = 0;
+
+  meta.forEach((type, i) => {
+    const r = i + 1;
+    const full = sheet.getRange(r, 1, 1, NCOL);
+
+    if (type === "title") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(16).setFontWeight("bold")
+        .setFontColor("#ffffff").setBackground("#1f3864")
+        .setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 40);
+
+    } else if (type === "sub") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(10).setFontColor("#ffffff").setBackground("#2e5496")
+        .setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 26);
+
+    } else if (type === "summary") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(12).setFontWeight("bold")
+        .setBackground("#fdeaea").setFontColor("#a61b1b")
+        .setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 32);
+
+    } else if (type === "ok") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(12).setFontWeight("bold")
+        .setBackground("#eaf5ea").setFontColor("#1e6b34")
+        .setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 32);
+
+    } else if (type === "note") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(10).setFontColor("#666666").setFontStyle("italic")
+        .setBackground("#f7f9fc").setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 24);
+
+    } else if (type === "head") {
+      headRow = r;
+      full.setFontWeight("bold").setBackground("#d9e1f2")
+        .setHorizontalAlignment("center")
+        .setBorder(true, true, true, true, true, true, "#8ea9db", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.setRowHeight(r, 28);
+
+    } else if (type === "data") {
+      full.setBackground("#fdeaea")
+        .setBorder(true, true, true, true, true, true, "#e6b8b8", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.getRange(r, 1, 1, 3).setHorizontalAlignment("center");
+      sheet.getRange(r, 3).setFontWeight("bold").setFontColor("#a61b1b");
+      sheet.getRange(r, 4).setFontSize(10).setFontColor("#333333").setWrap(true);
+      sheet.setRowHeight(r, 26);
+
+    } else {
+      sheet.setRowHeight(r, 10);
+    }
+  });
+
+  sheet.setFrozenRows(headRow > 0 ? headRow : 3);
+  sheet.setHiddenGridlines(true);
+  return sheet;
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [5] 유틸
+// ═════════════════════════════════════════════════════════════════════════
+function _wmIssue(date, name, item, detail) {
+  return { date: date || null, name: name || "", item: item, detail: detail };
+}
+
+
+// 헤더 행(1행)에서 열 번호 → 헤더명 맵
+function _wmHeaderMap(sheet) {
+  const lastCol = sheet.getLastColumn();
+  const map = {};
+  if (lastCol < 1) return map;
+
+  sheet.getRange(1, 1, 1, lastCol).getValues()[0].forEach((v, i) => {
+    const s = String(v).replace(/\s+/g, " ").trim();
+    if (s) map[i + 1] = s;
+  });
+  return map;
+}
+
+
+// 시간 값 → 분 (Date / 소수(1=24시간) / "H:MM" 문자열 지원)
+function _wmToMinutes(v) {
+  if (v instanceof Date) return v.getHours() * 60 + v.getMinutes();
+  if (typeof v === "number") return Math.round(v * 24 * 60);
+
+  const s = String(v == null ? "" : v).trim();
+  if (!s) return null;
+
+  const m = s.match(/^(\d+)\s*:\s*(\d{1,2})/);
+  if (m) return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+
+  const n = parseFloat(s);
+  return isNaN(n) ? null : Math.round(n * 24 * 60);
+}
+
+
+function _wmFmtDuration(v) {
+  const min = _wmToMinutes(v);
+  if (min === null) return "공란";
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return `${h}:${m < 10 ? "0" + m : m}`;
+}

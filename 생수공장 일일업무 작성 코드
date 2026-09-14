@@ -249,6 +249,9 @@ jilsiLabel = `실 시 사 항 (${prevProdDate.month}/${String(prevProdDate.day).
 // ════════════════════════════════════════════════════════
 // [신규] G8:O16 = 장비별 점검 및 특이사항
 // ════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════
+// [신규] G8:O16 = 장비별 점검 및 특이사항
+// ════════════════════════════════════════════════════════
 function fillSafetySection(todaySheet, workSchedSS, prodPlanSS, ss, today, month, day, year) {
 
   // ── 오늘 근무자 파악 ──────────────────────────────────
@@ -343,12 +346,12 @@ function fillSafetySection(todaySheet, workSchedSS, prodPlanSS, ss, today, month
       // L/C 여부: C~H열에 "L/C", I~K열에 "L/C(1,2,3)"
       for (let i = 0; i < 6; i++) {
         if (typeof prodRow[i] === 'string' && /^L\/C$/i.test(prodRow[i].trim())) {
-hasLC = true;
+          hasLC = true;
         }
       }
       for (let i = 6; i < 9; i++) {
         if (typeof prodRow[i] === 'string' && /^L\/C/i.test(prodRow[i].trim())) {
-hasLC = true;
+          hasLC = true;
         }
       }
     }
@@ -358,15 +361,15 @@ hasLC = true;
   // LINE CHANGE 날은 반드시 LC 문구
   const GA_LC = 'LINE CHANGE 작업시 지적확인 철저';
   const GA_OPTIONS = [
-'제품 생산시 이상유무 확인 철저',
-'지게차 운행시 사주경계 철저',
-'공장 내 위험요소 확인, 장비 정비시 보호구 착용 철저',
-'공장내 창고 이동시 안전모 착용 철저'
+    '제품 생산시 이상유무 확인 철저',
+    '지게차 운행시 사주경계 철저',
+    '공장 내 위험요소 확인, 장비 정비시 보호구 착용 철저',
+    '공장내 창고 이동시 안전모 착용 철저'
   ];
 
   let gaText;
   if (hasLC) {
-gaText = GA_LC;
+    gaText = GA_LC;
   } else {
     // 전날 가. 문구 파악해서 연속 방지
     let prevGa = '';
@@ -377,31 +380,31 @@ gaText = GA_LC;
       if (gaMatch) prevGa = gaMatch[1].trim();
     }
     const gaFiltered = GA_OPTIONS.filter(t => t !== prevGa);
-gaText = pickByDay(gaFiltered.length > 0 ? gaFiltered : GA_OPTIONS, day * 3 + month);
+    gaText = pickByDay(gaFiltered.length > 0 ? gaFiltered : GA_OPTIONS, day * 3 + month);
   }
 
   // ── 오전 안전 강조사항 ────────────────────────────────
   const AM_189L_OPTIONS = [
-'18.9L 작업장 정리정돈, 적재 작업시 사주경계 철저',
-'지게차 규정속도 준수, 운전자는 방어운전, 보행자는 주변확인 철저'
+    '18.9L 작업장 정리정돈, 적재 작업시 사주경계 철저',
+    '지게차 규정속도 준수, 운전자는 방어운전, 보행자는 주변확인 철저'
   ];
 
   const AM_GENERAL_OPTIONS = [
-'지게차 규정속도 준수, 운전자는 방어운전, 보행자는 주변확인 철저',
-'중량물 하역 작업시 안전수칙 준수 철저',
-'공장 내 위험요소 확인, 장비 정비시 보호구 착용 철저',
-'제품 생산시 이상유무 확인 철저, 트러블 발생시 관리자 보고 철저',
-'LINE CHANGE 작업시 지적확인 철저'
+    '지게차 규정속도 준수, 운전자는 방어운전, 보행자는 주변확인 철저',
+    '중량물 하역 작업시 안전수칙 준수 철저',
+    '공장 내 위험요소 확인, 장비 정비시 보호구 착용 철저',
+    '제품 생산시 이상유무 확인 철저, 트러블 발생시 관리자 보고 철저',
+    'LINE CHANGE 작업시 지적확인 철저'
   ];
 
   const PM_OPTIONS = [
-'지정된 구역에서 흡연, 화재 예방수칙 준수 철저',
-'공장 내 위험요소 확인, 장비 정비시 보호구 착용 철저',
-'포장실 및 병제작실 장비 마무리 철저, 이상유무 확인',
-'중량물 하역 작업시 안전수칙 준수 철저',
-'공장내 창고 이동 및 작업시 안전모 착용 철저',
-'지게차 규정속도 준수, 운전자는 방어운전, 보행자는 주변확인 철저',
-'제품 생산시 이상유무 확인 철저, 트러블 발생시 관리자 보고 철저'
+    '지정된 구역에서 흡연, 화재 예방수칙 준수 철저',
+    '공장 내 위험요소 확인, 장비 정비시 보호구 착용 철저',
+    '포장실 및 병제작실 장비 마무리 철저, 이상유무 확인',
+    '중량물 하역 작업시 안전수칙 준수 철저',
+    '공장내 창고 이동 및 작업시 안전모 착용 철저',
+    '지게차 규정속도 준수, 운전자는 방어운전, 보행자는 주변확인 철저',
+    '제품 생산시 이상유무 확인 철저, 트러블 발생시 관리자 보고 철저'
   ];
 
   // 전날 오전/오후 문구 파악
@@ -416,17 +419,17 @@ gaText = pickByDay(gaFiltered.length > 0 ? gaFiltered : GA_OPTIONS, day * 3 + mo
   }
 
   // 오전 선택
-let amOptions;
-if (has189L) {
-  amOptions = AM_189L_OPTIONS.filter(t => t !== prevAm);
-  if (amOptions.length === 0) amOptions = AM_189L_OPTIONS;
-} else {
-  let baseAmOptions = hasLC
-    ? AM_GENERAL_OPTIONS
-    : AM_GENERAL_OPTIONS.filter(t => !t.includes('LINE CHANGE'));
-  amOptions = baseAmOptions.filter(t => t !== prevAm);
-  if (amOptions.length === 0) amOptions = baseAmOptions;
-}
+  let amOptions;
+  if (has189L) {
+    amOptions = AM_189L_OPTIONS.filter(t => t !== prevAm);
+    if (amOptions.length === 0) amOptions = AM_189L_OPTIONS;
+  } else {
+    let baseAmOptions = hasLC
+      ? AM_GENERAL_OPTIONS
+      : AM_GENERAL_OPTIONS.filter(t => !t.includes('LINE CHANGE'));
+    amOptions = baseAmOptions.filter(t => t !== prevAm);
+    if (amOptions.length === 0) amOptions = baseAmOptions;
+  }
   const amText = pickByDay(amOptions, day * 5 + month * 2);
 
   // 오후 선택 (18.9L 문구 제외)
@@ -442,29 +445,39 @@ if (has189L) {
     `▶ 오전: ${amText}\n\n` +
     `▶ 오후: ${pmText}`;
 
-  // ── G8 셀에 입력 + 가. 줄 파란색 적용 ──────────────────
+  // ── G8 셀에 입력 + 가. 줄만 파란색 적용 ────────────────
+  // ※ setValue()를 먼저 쓰면 첫 런(파란색)이 셀 기본 글자색으로 굳어져서
+  //   이후 사용자가 직접 타이핑하는 글자까지 파랗게 들어감.
+  //   → setValue 없이 리치텍스트만으로 입력하고, 기본색은 검정으로 먼저 고정.
   const cell = todaySheet.getRange('G8');
-  cell.setValue(fullText);
+  const BLUE = '#0000FF';
+  const BLACK = '#000000';
+
+  // ① 셀 기본 글자색을 검정으로 먼저 고정 (전날 시트에서 물려받은 파란 서식 초기화)
+  cell.setFontColor(BLACK);
 
   try {
-    const blueColor = '#0000FF';
-    const blackColor = '#000000';
     const gaLine = `가. ${gaText} "좋아"`;
     const gaLen = gaLine.length;
     const totalLen = fullText.length;
 
+    const blueStyle = SpreadsheetApp.newTextStyle().setForegroundColor(BLUE).build();
+    const blackStyle = SpreadsheetApp.newTextStyle().setForegroundColor(BLACK).build();
+
+    // ② 전체를 검정으로 깔고, 가. 줄만 파랑으로 덮어씀 (겹치면 나중 것이 적용됨)
     const richText = SpreadsheetApp.newRichTextValue()
       .setText(fullText)
-      .setTextStyle(0, gaLen, SpreadsheetApp.newTextStyle().setForegroundColor(blueColor).build())
-      .setTextStyle(gaLen, totalLen, SpreadsheetApp.newTextStyle().setForegroundColor(blackColor).build())
+      .setTextStyle(0, totalLen, blackStyle)
+      .setTextStyle(0, gaLen, blueStyle)
       .build();
 
     cell.setRichTextValue(richText);
   } catch(e) {
     Logger.log(`RichText 적용 실패: ${e.message}`);
+    cell.setValue(fullText);
+    cell.setFontColor(BLACK);
   }
 }
-
 
 // ════════════════════════════════════════════════════════
 // [헬퍼] 전날 시트 가져오기

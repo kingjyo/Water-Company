@@ -23,7 +23,7 @@ function clearReport() {
   if (response === ui.Button.YES) {
     reportSheet.getRange("D3:D5").clearContent();
     reportSheet.getRange("C6:D14").clearContent();
-    reportSheet.getRange("D16:D18").clearContent(); // D15:D17 -> D16:D18
+    reportSheet.getRange("D16:D18").clearContent();
     reportSheet.showRows(6, 9);
     ui.alert("초기화 완료!");
   }
@@ -63,8 +63,8 @@ function fillWeatherReport() {
   // D3: 평균기온
   const avgTemps = cValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
   const avgTemp = avgTemps.length > 0
-      ? toFixed1(avgTemps.reduce((a, b) => a + b, 0) / avgTemps.length)
-      : "0.0";
+    ? toFixed1(avgTemps.reduce((a, b) => a + b, 0) / avgTemps.length)
+    : "0.0";
   reportSheet.getRange("D3").setValue(avgTemp + " ℃");
 
   // D4: 최고기온
@@ -77,23 +77,38 @@ function fillWeatherReport() {
   const minTemp = minTemps.length > 0 ? toFixed1(Math.min(...minTemps)) : "0.0";
   reportSheet.getRange("D5").setValue(minTemp + " ℃");
 
-  // D16: 강우량 월 합계 (기존 D15 -> D16)
+  // D16: 강우량 월 합계
   const totalRainfall = mNums.reduce((a, b) => a + b, 0);
   reportSheet.getRange("D16").setValue(toInt(totalRainfall) + " mm");
 
-  // D17: 평균 습도 (기존 D16 -> D17)
+  // D17: 평균 습도
   const humidities = fValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
   const avgHumidity = humidities.length > 0
-      ? toFixed1(humidities.reduce((a, b) => a + b, 0) / humidities.length)
-      : "0.0";
+    ? toFixed1(humidities.reduce((a, b) => a + b, 0) / humidities.length)
+    : "0.0";
   reportSheet.getRange("D17").setValue(avgHumidity + " %");
 
-  // D18: 평균 지중온도 (기존 D17 -> D18)
+  // D18: 평균 지중온도
   const groundTemps = gValues.map(r => r[0]).filter(v => v !== "" && !isNaN(v));
   const avgGroundTemp = groundTemps.length > 0
-      ? toFixed1(groundTemps.reduce((a, b) => a + b, 0) / groundTemps.length)
-      : "0.0";
+    ? toFixed1(groundTemps.reduce((a, b) => a + b, 0) / groundTemps.length)
+    : "0.0";
   reportSheet.getRange("D18").setValue(avgGroundTemp + " ℃");
+
+  // 관측 간격(ms) 추정: A열 첫 두 행의 차이, 못 구하면 1시간
+  let stepMs = 60 * 60 * 1000;
+  if (aValues.length >= 2) {
+    const t0 = new Date(aValues[0][0]).getTime();
+    const t1 = new Date(aValues[1][0]).getTime();
+    if (!isNaN(t0) && !isNaN(t1) && t1 > t0) stepMs = t1 - t0;
+  }
+
+  // 강우 이벤트 시작 시각 = 강우가 처음 잡힌 행의 "직전 행" 시각
+  // (관측값은 직전 관측 시각 ~ 해당 시각까지 누적된 강우량이므로)
+  function getEventStartDate(idx) {
+    if (idx > 0) return new Date(aValues[idx - 1][0]);
+    return new Date(new Date(aValues[0][0]).getTime() - stepMs);
+  }
 
   // 연속 강우 이벤트 묶기
   const events = [];
@@ -119,10 +134,10 @@ function fillWeatherReport() {
 
   // 30mm 이상 이벤트 중 큰 값 상위 9개 선정 후, 시간순으로 재정렬
   const heavyRains = events
-      .filter(e => e.sum >= 30)
-      .sort((a, b) => b.sum - a.sum) // 상위 9개를 뽑기 위한 정렬
-      .slice(0, 9)
-      .sort((a, b) => a.startIdx - b.startIdx); // 표시 순서는 시간순으로 재정렬
+    .filter(e => e.sum >= 30)
+    .sort((a, b) => b.sum - a.sum)
+    .slice(0, 9)
+    .sort((a, b) => a.startIdx - b.startIdx);
 
   function formatDateKo(d) {
     return `${d.getMonth() + 1}월 ${d.getDate()}일 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -133,7 +148,7 @@ function fillWeatherReport() {
 
   for (let i = 0; i < heavyRains.length; i++) {
     const e = heavyRains[i];
-    const earliest = new Date(aValues[e.startIdx][0]);
+    const earliest = getEventStartDate(e.startIdx);
     const latest = new Date(aValues[e.endIdx][0]);
     const rangeStr = `${formatDateKo(earliest)} ~ ${formatDateKo(latest)}`;
     const sumStr = toInt(e.sum) + " mm";
@@ -186,7 +201,7 @@ function applyLinkToText(body, searchText, url, skipFirst) {
   return true;
 }
 
-// Docs 표 셀에 값 쓰기 (13pt, 맑은 고딕, 가운데 정렬)
+// Docs 표 셀에 값 쓰기
 function writeDocCell(tableRow, colIdx, text, fontSize, fontFamily) {
   const cell = tableRow.getCell(colIdx);
   const numParas = cell.getNumChildren();
@@ -229,9 +244,9 @@ function createWeatherReport() {
   const d3 = reportSheet.getRange("D3").getDisplayValue();
   const d4 = reportSheet.getRange("D4").getDisplayValue();
   const d5 = reportSheet.getRange("D5").getDisplayValue();
-  const d15 = reportSheet.getRange("D16").getDisplayValue(); // 월합계 (D15->D16)
-  const d16 = reportSheet.getRange("D17").getDisplayValue(); // 평균습도 (D16->D17)
-  const d17 = reportSheet.getRange("D18").getDisplayValue(); // 지중온도 (D17->D18)
+  const d15 = reportSheet.getRange("D16").getDisplayValue();
+  const d16 = reportSheet.getRange("D17").getDisplayValue();
+  const d17 = reportSheet.getRange("D18").getDisplayValue();
 
   // 30mm 이상 강우 데이터 읽기 (표시된 행만)
   const rainRows = [];
@@ -296,34 +311,26 @@ function createWeatherReport() {
   const FS = 13;
   const FF = "Malgun Gothic";
 
-  // 표 구조 (0-based):
-  // 0: 헤더
-  // 1: 평균기온, 2: 최고기온, 3: 최저기온
-  // 4~12: 강우량 이벤트 행 (9행)
-  // 13: 월합계, 14: 평균습도, 15: 평균지중온도
-
   // 1단계: 기온 결과 입력
   writeDocCell(targetTable.getRow(1), 2, d3, FS, FF);
   writeDocCell(targetTable.getRow(2), 2, d4, FS, FF);
   writeDocCell(targetTable.getRow(3), 2, d5, FS, FF);
 
-  // 2단계: 강우량 이벤트 행 입력 (데이터 있는 행만)
+  // 2단계: 강우량 이벤트 행 입력
   for (let i = 0; i < rainRows.length; i++) {
     writeDocCell(targetTable.getRow(4 + i), 1, rainRows[i].period, FS, FF);
     writeDocCell(targetTable.getRow(4 + i), 2, rainRows[i].amount, FS, FF);
   }
 
-  // 3단계: 빈 강우량 행만 뒤에서부터 삭제 (4+rainRows.length ~ 12번 행)
-  // 삭제 후 13행(월합계), 14행(습도), 15행(지중온도)는 그대로 유지됨
+  // 3단계: 빈 강우량 행만 뒤에서부터 삭제
   for (let i = 8; i >= rainRows.length; i--) {
     targetTable.removeRow(4 + i);
   }
 
-  // 4단계: 삭제 후 재계산된 행 인덱스로 월합계/습도/지중온도 입력
-  // 강우량 행 삭제 후 남은 행 수: 1(헤더) + 3(기온) + rainRows.length(강우) + 1(월합계) + 1(습도) + 1(지중온도)
-  const monthSumRowIdx = 1 + 3 + rainRows.length; // 월합계 행
-  const humidityRowIdx = monthSumRowIdx + 1; // 습도 행
-  const groundTempRowIdx = monthSumRowIdx + 2; // 지중온도 행
+  // 4단계: 재계산된 행 인덱스로 월합계/습도/지중온도 입력
+  const monthSumRowIdx = 1 + 3 + rainRows.length;
+  const humidityRowIdx = monthSumRowIdx + 1;
+  const groundTempRowIdx = monthSumRowIdx + 2;
 
   writeDocCell(targetTable.getRow(monthSumRowIdx), 2, d15, FS, FF);
   writeDocCell(targetTable.getRow(humidityRowIdx), 2, d16, FS, FF);
