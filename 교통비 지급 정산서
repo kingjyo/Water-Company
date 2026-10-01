@@ -1,3 +1,7 @@
+// ═══════════════════════════════════════════
+// 교통비 정산 자동화 — Code.gs (통합본)
+// ═══════════════════════════════════════════
+
 // ───────────────────────────────────────────
 // 외부 스프레드시트 ID 설정
 // ───────────────────────────────────────────
@@ -5,13 +9,53 @@ const WORK_PLAN_SS_ID = '12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY'; // 근�
 const PROD_PLAN_SS_ID = '1ibZaOX0NKni6vRTVE0i2Wb5AXNHn9D72F5CFWSxH3qQ'; // 제품생산 계획
 const ATTENDANCE_SS_ID = '1UjHzUCH3w4eUQuxIZrzOtgeCi4itVUOTXDq7sm8PcvE'; // 근무현황표 (월 기준)
 
+const MENU_OWNER_EMAIL = 'youngjoonkim@kas.co.kr';
+
 // ───────────────────────────────────────────
-// 메뉴 등록 (youngjoonkim@kas.co.kr에게만 보이게 제한)
+// 시트 레이아웃 설정
+// ───────────────────────────────────────────
+const DATA_START_ROW = 5;          // 데이터 시작 행
+const TEMPLATE_ROW = 6;            // 행 추가/수식 복구 시 기준이 되는 행
+const TARGET_SUM_ROW = 100;        // 합계 행 목표 위치 (K100)
+const SUM_COL = 11;                // K열
+const DATE_FORMAT = 'm"월" d"일"'; // B열 표시 형식
+const ROUTE_TEXT = '공장 ↔ 제주시';
+
+// ───────────────────────────────────────────
+// 특이사항 설정 ★ 이름/사유 버튼은 여기서 수정
+// ───────────────────────────────────────────
+const SPECIAL_SHEET_NAME = '특이사항'; // 특이사항 저장용 (숨김 시트, 자동 생성)
+const SPECIAL_EXPIRE_DAYS = 200;       // 이 일수보다 오래된 특이사항은 무시 (작년 같은 달 방지)
+
+const PRODUCTION_NAMES = ['이정묵', '김일수', '양공호', '김정운', '강영우', '임상균', '양진복', '강은철', '고남호', '이청훈'];
+const QUALITY_NAMES = ['박수형', '고혁진', '진성령']; // ← 이름 표기 확인 필요
+
+const SHEET_CFG = {
+  SEJEUM: {
+    sheetName: '제품생산',
+    names: PRODUCTION_NAMES,
+    reasons: ['자재 구매', '농업용수 수위 CHECK', '추석연휴 공장 순찰', '설날연휴 공장 순찰']
+  },
+  CIP: {
+    sheetName: '품질 CIP',
+    names: QUALITY_NAMES,
+    reasons: ['원수 CIP', '농업용수 CIP', '제품수 정기 대외분석', '민속촌 전용상수도 수질검사', '추석연휴 공장 순찰', '설날연휴 공장 순찰']
+  },
+  BTL: {
+    sheetName: 'BTL 생산',
+    names: PRODUCTION_NAMES,
+    reasons: []
+  }
+};
+const UI_SHEET_ORDER = ['SEJEUM', 'CIP', 'BTL'];  // 입력창 탭 순서
+const RUN_SHEET_ORDER = ['BTL', 'SEJEUM', 'CIP']; // 전체 실행 순서
+
+// ───────────────────────────────────────────
+// 메뉴 등록 (본인 계정에게만 표시)
 // ───────────────────────────────────────────
 function onOpen() {
   const userEmail = Session.getActiveUser().getEmail();
-  // 본인 계정에게만 메뉴 표시
-  if (userEmail === 'youngjoonkim@kas.co.kr') {
+  if (userEmail === MENU_OWNER_EMAIL) {
     SpreadsheetApp.getUi()
       .createMenu('교통비 정산')
       .addItem('전체 시트 자동 채우기', 'fillAllSheets')
@@ -20,68 +64,73 @@ function onOpen() {
       .addItem('제품생산 시트만', 'fillSejeumSheet')
       .addItem('품질 CIP 시트만', 'fillCIPSheet')
       .addSeparator()
+      .addItem('⚙ 합계 행을 100행으로 맞추기 (최초 1회)', 'setupSumRow100')
       .addItem('도움말', 'showHelp')
       .addToUi();
   }
 }
 
+// 메뉴 → 모두 특이사항 입력창을 먼저 띄움
+function fillAllSheets()   { openSpecialDialog_('ALL'); }
+function fillBTLSheet()    { openSpecialDialog_('BTL'); }
+function fillSejeumSheet() { openSpecialDialog_('SEJEUM'); }
+function fillCIPSheet()    { openSpecialDialog_('CIP'); }
+
+function openSpecialDialog_(mode) {
+  const t = HtmlService.createTemplateFromFile('SpecialDialog');
+  t.mode = mode;
+  const html = t.evaluate().setWidth(800).setHeight(720);
+  SpreadsheetApp.getUi().showModalDialog(html, '교통비 정산 — 특이사항 입력');
+}
+
 // ───────────────────────────────────────────
-// 근무 유형 표기 정규화 ★신규
-// "P/교" → "P" , "B/교" → "B" , "L/교" → "L"
-// "야/교" → "야" , "조/교" → "조" , "연/교" → "연"
-// "교" 또는 "교육" 단독 → "" (연장근무 아님 → 제외)
+// 근무 유형 표기 정규화
+// "P/교" → "P", "야/교" → "야" ... / "교", "교육" 단독 → "" (제외)
 // ───────────────────────────────────────────
 function normalizeType(raw) {
   let s = String(raw === null || raw === undefined ? '' : raw).trim();
   if (!s) return '';
-
-  // 다양한 구분자를 "/" 하나로 통일 (전각 슬래시, 역슬래시, 쉼표, 가운뎃점, 파이프)
   s = s.replace(/[／\\,、·ㆍ|]/g, '/');
-  // 모든 공백 제거 ("P / 교" 대응)
   s = s.replace(/\s+/g, '');
-
-  // "교" / "교육" 토큰 제거 후 남은 첫 번째 토큰을 실제 근무 유형으로 사용
   const parts = s.split('/').filter(function (p) {
     return p !== '' && !/^교(육)?$/.test(p);
   });
-
-  if (parts.length === 0) return ''; // 교육만 있는 날 → 제외
-
+  if (parts.length === 0) return '';
   let base = parts[0];
-  if (/^[a-zA-Z]+$/.test(base)) base = base.toUpperCase(); // p/교 → P
+  if (/^[a-zA-Z]+$/.test(base)) base = base.toUpperCase();
   return base;
 }
 
 // ───────────────────────────────────────────
-// 월 숫자 가져오기 (외부 근무현황표 스프레드시트 Z3)
+// 월 숫자 가져오기 (근무현황표 Z3) — 실패 시 오류 발생
 // ───────────────────────────────────────────
 function getMonthNumber() {
   const ss = SpreadsheetApp.openById(ATTENDANCE_SS_ID);
-  const sheets = ss.getSheets();
-  for (const s of sheets) {
-    if (s.getName().includes('근무현황표')) {
-      const val = s.getRange('Z3').getValue();
+  for (const s of ss.getSheets()) {
+    if (!s.getName().includes('근무현황표')) continue;
+    const val = s.getRange('Z3').getValue();
+    let month = null;
+    if (val instanceof Date) {
+      month = val.getMonth() + 1;
+    } else {
       const matched = String(val).match(/(\d+)/);
-      if (matched) return parseInt(matched[1]);
+      if (matched) month = parseInt(matched[1], 10);
     }
+    if (month >= 1 && month <= 12) return month;
   }
-  SpreadsheetApp.getUi().alert('오류: 근무현황표 스프레드시트에서 "근무현황표" 시트를 찾을 수 없습니다.\nZ3 셀을 확인해주세요.');
-  return null;
+  throw new Error('근무현황표 스프레드시트의 "근무현황표" 시트 Z3에서 월을 읽지 못했습니다. Z3 셀을 확인해주세요.');
 }
 
 /**
- * 근무계획 스프레드시트에서 해당 월 시트 데이터 파싱 + 직급 순위 매핑 생성
- * 반환: { records: [...], rankMap: { "김일수": 0, "양공호": 1, ... } }
- * rankMap: C5부터 위에서 아래로 (작은 숫자 = 직급 높음)
+ * 근무계획 → 해당 월 시트 파싱 + 직급 순위 매핑
+ * 반환: { records: [...], rankMap: { "김일수": 0, ... } }
  */
 function parseMonthlyWorkData(month) {
   const ss = SpreadsheetApp.openById(WORK_PLAN_SS_ID);
   const monthName = `${month}월`;
   const monthSheet = ss.getSheetByName(monthName);
-
   if (!monthSheet) {
-    SpreadsheetApp.getUi().alert(`오류: 근무계획 스프레드시트에서 "${monthName}" 시트를 찾을 수 없습니다.`);
-    return null;
+    throw new Error(`근무계획 스프레드시트에서 "${monthName}" 시트를 찾을 수 없습니다.`);
   }
 
   const dayRow = monthSheet.getRange('G3:AK3').getValues()[0];
@@ -91,29 +140,25 @@ function parseMonthlyWorkData(month) {
   const records = [];
   const rankMap = {};
 
-  // 1. 직급 순위 매핑 (C열에 위에 있을수록 직급 높음 → 작은 숫자)
   for (let r = 0; r < nameCol.length; r++) {
     const name = String(nameCol[r][0]).trim();
-    if (name && !(name in rankMap)) {
-      rankMap[name] = r;
-    }
+    if (name && !(name in rankMap)) rankMap[name] = r;
   }
 
-  // 2. 실제 근무 데이터 기록
   for (let r = 0; r < nameCol.length; r++) {
     const name = String(nameCol[r][0]).trim();
     if (!name) continue;
     for (let c = 0; c < dayRow.length; c++) {
       const dayVal = dayRow[c];
       if (!dayVal && dayVal !== 0) continue;
-      const day = parseInt(dayVal);
+      const day = parseInt(dayVal, 10);
       if (isNaN(day)) continue;
 
       const rawType = String(workGrid[r][c]).trim();
       if (!rawType) continue;
 
-      const type = normalizeType(rawType); // ★ "P/교" → "P"
-      if (!type) continue; // "교" 단독은 제외
+      const type = normalizeType(rawType);
+      if (!type) continue;
 
       records.push({ name, day, type, rawType, monthName });
     }
@@ -122,8 +167,7 @@ function parseMonthlyWorkData(month) {
 }
 
 /**
- * 제품생산 계획 스프레드시트에서 해당 월 시트 데이터 파싱
- * 시트명 패턴: "X월 제품생산 계획"
+ * 제품생산 계획 → 해당 월 시트 파싱
  * 반환: { [day]: { C, D, E, F, G, H, I, J, K, L } }
  */
 function parsePlanData(month) {
@@ -137,10 +181,8 @@ function parsePlanData(month) {
       break;
     }
   }
-
   if (!planSheet) {
-    SpreadsheetApp.getUi().alert(`오류: 제품생산 계획 스프레드시트에서 "${prefix} 제품생산 계획..." 시트를 찾을 수 없습니다.`);
-    return null;
+    throw new Error(`제품생산 계획 스프레드시트에서 "${prefix} 제품생산 계획..." 시트를 찾을 수 없습니다.`);
   }
 
   const dayCol = planSheet.getRange('A3:A33').getValues();
@@ -148,28 +190,18 @@ function parsePlanData(month) {
 
   const plan = {};
   for (let r = 0; r < dayCol.length; r++) {
-    const day = parseInt(dayCol[r][0]);
+    const day = parseInt(dayCol[r][0], 10);
     if (isNaN(day)) continue;
     plan[day] = {
-      C: dataGrid[r][0],
-      D: dataGrid[r][1],
-      E: dataGrid[r][2],
-      F: dataGrid[r][3],
-      G: dataGrid[r][4],
-      H: dataGrid[r][5], // 0.19L 생산 계획
-      I: dataGrid[r][6],
-      J: dataGrid[r][7],
-      K: dataGrid[r][8],
-      L: dataGrid[r][9],
+      C: dataGrid[r][0], D: dataGrid[r][1], E: dataGrid[r][2], F: dataGrid[r][3],
+      G: dataGrid[r][4], H: dataGrid[r][5], I: dataGrid[r][6], J: dataGrid[r][7],
+      K: dataGrid[r][8], L: dataGrid[r][9]
     };
   }
   return plan;
 }
 
-/**
- * 값이 있는지 판단 (숫자 수치가 입력된 경우만 true)
- * 빈칸, 0, "-", null, 텍스트(특이사항, L/C 등) 모두 제외
- */
+/** 숫자 수치가 입력된 경우만 true */
 function hasValue(v) {
   if (v === null || v === undefined) return false;
   const s = String(v).trim();
@@ -178,44 +210,42 @@ function hasValue(v) {
   return !isNaN(num) && num !== 0;
 }
 
-/**
- * "합 계" 행 번호 찾기
- */
+// ───────────────────────────────────────────
+// "합 계" 행 찾기 ★ 시트 끝까지 검색, 못 찾으면 오류 (추측 금지)
+// ───────────────────────────────────────────
 function findSumRow(targetSheet) {
-  const aCol = targetSheet.getRange('A5:A70').getValues();
-  for (let i = 0; i < aCol.length; i++) {
-    const val = String(aCol[i][0]).replace(/\s+/g, ' ').trim();
-    if (val === '합 계') {
-      return 5 + i;
+  const last = targetSheet.getLastRow();
+  if (last >= DATA_START_ROW) {
+    const vals = targetSheet.getRange(DATA_START_ROW, 1, last - DATA_START_ROW + 1, SUM_COL).getValues();
+    for (let i = 0; i < vals.length; i++) {
+      for (let c = 0; c < vals[i].length; c++) {
+        if (String(vals[i][c]).replace(/\s+/g, '') === '합계') return DATA_START_ROW + i;
+      }
     }
   }
-  return 61;
+  throw new Error(`"${targetSheet.getName()}" 시트에서 "합 계" 행을 찾지 못했습니다. 합계 행의 A열에 "합 계" 글자가 있는지 확인해주세요.`);
 }
 
 /**
- * 빈 행 자동 숨기기
+ * 합계 행 바로 위에 count개 행 추가 (TEMPLATE_ROW의 서식·병합·수식 복사)
+ * 반환: 새 합계 행 번호
  */
-function autoHideEmptyRows(targetSheet, dataEndRow) {
-  const startRow = 5;
-  const endRow = dataEndRow - 1;
-  if (endRow < startRow) return;
-
-  const aCol = targetSheet.getRange(startRow, 1, endRow - startRow + 1, 1).getValues();
-  for (let i = 0; i < aCol.length; i++) {
-    const rowNum = startRow + i;
-    const val = String(aCol[i][0]).trim();
-    if (val === '') {
-      targetSheet.hideRows(rowNum);
-    } else {
-      targetSheet.showRows(rowNum);
-    }
+function insertDataRows_(sheet, sumRow, count) {
+  if (sumRow <= TEMPLATE_ROW) {
+    throw new Error(`"${sheet.getName()}" 시트의 합계 행(${sumRow}행)이 너무 위에 있어 행을 추가할 수 없습니다.`);
   }
+  sheet.insertRowsAfter(sumRow - 1, count);
+  const lastCol = sheet.getMaxColumns();
+  sheet.getRange(TEMPLATE_ROW, 1, 1, lastCol).copyTo(sheet.getRange(sumRow, 1, count, lastCol));
+  sheet.getRange(sumRow, 1, count, 6).clearContent(); // 복사된 A~F 데이터는 지움
+  sheet.setRowHeights(sumRow, count, sheet.getRowHeight(TEMPLATE_ROW));
+  sheet.showRows(sumRow, count);
+  return sumRow + count;
 }
 
 // ───────────────────────────────────────────
-// 사유 생성 함수들 (BTL, 제품생산, CIP)
+// 사유 생성 함수들 (BTL, 제품생산, CIP) — 기존 로직 그대로
 // ───────────────────────────────────────────
-
 function getBTLReason(dayPlan) {
   if (!dayPlan) return 'BTL/CAP 생산';
   const btlPart = [];
@@ -247,41 +277,26 @@ function getSejeumReason(type, dayPlan) {
     if (hasValue(dayPlan.G)) return '0.12L 제품 생산';
     return '제품 생산';
   }
-
   return '연장 근무';
 }
 
-/**
- * 품질 CIP 사유 생성 (2025년 3월 개선 버전)
- * • 조기출근("조") 첫 번째 → 0.19L 최우선
- * • 0.12L은 최하위 우선순위
- */
 function getCIPReasons(dayPlan, group) {
   if (!group || group.length === 0) return [];
   if (!dayPlan) return Array(group.length).fill('CIP');
 
   const morning = group.filter(r => r.type === '조');
   const evening = group.filter(r => r.type === '연');
-
   const reasons = [];
 
-  // 조기출근자 처리
   if (morning.length > 0) {
     if (hasValue(dayPlan.H)) {
       reasons.push('0.19L 생산라인 CIP');
     } else {
       reasons.push(getNextCIP(dayPlan, 'morning'));
     }
-    for (let i = 1; i < morning.length; i++) {
-      reasons.push(getNextCIP(dayPlan, 'morning'));
-    }
+    for (let i = 1; i < morning.length; i++) reasons.push(getNextCIP(dayPlan, 'morning'));
   }
-
-  // 연장자 처리
-  for (let i = 0; i < evening.length; i++) {
-    reasons.push(getNextCIP(dayPlan, 'evening'));
-  }
-
+  for (let i = 0; i < evening.length; i++) reasons.push(getNextCIP(dayPlan, 'evening'));
   return reasons;
 }
 
@@ -289,11 +304,8 @@ function getNextCIP(dayPlan, shiftType) {
   const priorities = shiftType === 'morning'
     ? ['C', 'D', 'E', 'F', 'G']
     : ['D', 'E', 'F', 'C', 'G'];
-
   for (const col of priorities) {
-    if (hasValue(dayPlan[col])) {
-      return getCIPReasonName(col);
-    }
+    if (hasValue(dayPlan[col])) return getCIPReasonName(col);
   }
   return 'CIP';
 }
@@ -311,38 +323,53 @@ function getCIPReasonName(col) {
 }
 
 // ───────────────────────────────────────────
-// 공통 시트 쓰기
+// 공통 시트 쓰기 ★ 전면 개선
+// 반환: { count, sumRow, addedRows }
 // ───────────────────────────────────────────
 function writeToSheet(targetSheet, rows, monthName) {
-  const sumRow = findSumRow(targetSheet);
-  const clearEndRow = sumRow - 1;
-
-  if (clearEndRow >= 5) {
-    targetSheet.getRange(`A5:F${clearEndRow}`).clearContent();
-    targetSheet.showRows(5, clearEndRow - 5 + 1);
+  let sumRow = findSumRow(targetSheet);
+  if (sumRow <= DATA_START_ROW) {
+    throw new Error(`"${targetSheet.getName()}" 시트의 합계 행 위치(${sumRow}행)가 올바르지 않습니다.`);
   }
 
-  if (rows.length === 0) {
-    targetSheet.getRange(`K${sumRow}`).setFormula(`=SUM($K$5:$K${clearEndRow})`);
-    autoHideEmptyRows(targetSheet, sumRow);
-    return;
+  // 1) 숨겨진 데이터 행 모두 펼치기
+  targetSheet.showRows(DATA_START_ROW, sumRow - DATA_START_ROW);
+
+  // 2) 행이 모자라면 자동 확장 (데이터가 잘리지 않게)
+  let addedRows = 0;
+  if (rows.length > sumRow - DATA_START_ROW) {
+    addedRows = rows.length - (sumRow - DATA_START_ROW);
+    sumRow = insertDataRows_(targetSheet, sumRow, addedRows);
+  }
+  const capacity = sumRow - DATA_START_ROW;
+
+  // 3) 5행 ~ 합계 바로 윗행까지 A~F 전부 비우기
+  targetSheet.getRange(DATA_START_ROW, 1, capacity, 6).clearContent();
+  targetSheet.getRange(DATA_START_ROW, 2, capacity, 1).setNumberFormat(DATE_FORMAT);
+
+  const n = rows.length;
+  const sumCell = targetSheet.getRange(sumRow, SUM_COL);
+
+  if (n === 0) {
+    sumCell.setValue(0);
+    targetSheet.hideRows(DATA_START_ROW, capacity);
+    return { count: 0, sumRow: sumRow, addedRows: addedRows };
   }
 
-  const maxRows = clearEndRow - 5 + 1;
-  for (let i = 0; i < rows.length && i < maxRows; i++) {
-    const rowNum = 5 + i;
-    const { name, day, reason } = rows[i];
-    targetSheet.getRange(`A${rowNum}`).setValue(name);
-    targetSheet.getRange(`B${rowNum}`).setValue(`${monthName}${day}일`);
-    targetSheet.getRange(`C${rowNum}`).setValue('공장 ↔ 제주시');
-    targetSheet.getRange(`E${rowNum}`).setValue(reason);
-  }
+  // 4) 열 단위 일괄 쓰기 (C:D, E:F 병합 셀 고려해 열별로 기록)
+  targetSheet.getRange(DATA_START_ROW, 1, n, 1).setValues(rows.map(r => [r.name]));
+  targetSheet.getRange(DATA_START_ROW, 2, n, 1).setValues(rows.map(r => [`${monthName} ${r.day}일`])); // ★ 띄어쓰기
+  targetSheet.getRange(DATA_START_ROW, 3, n, 1).setValues(rows.map(() => [ROUTE_TEXT]));
+  targetSheet.getRange(DATA_START_ROW, 5, n, 1).setValues(rows.map(r => [r.reason]));
 
-  const lastDataRow = 5 + Math.min(rows.length, maxRows) - 1;
-  targetSheet.getRange(`K${sumRow}`).setFormula(`=SUM($K$5:$K$${lastDataRow})`);
+  // 5) 합계 수식 (빈 행의 #N/A를 피하려고 마지막 데이터 행까지만 합산)
+  const lastDataRow = DATA_START_ROW + n - 1;
+  sumCell.setFormula(`=SUM($K$${DATA_START_ROW}:$K$${lastDataRow})`);
 
-  SpreadsheetApp.flush();
-  autoHideEmptyRows(targetSheet, sumRow);
+  // 6) 데이터 없는 행 숨기기
+  if (capacity > n) targetSheet.hideRows(DATA_START_ROW + n, capacity - n);
+
+  return { count: n, sumRow: sumRow, addedRows: addedRows };
 }
 
 // ───────────────────────────────────────────
@@ -350,101 +377,43 @@ function writeToSheet(targetSheet, rows, monthName) {
 // ───────────────────────────────────────────
 function loadData() {
   const month = getMonthNumber();
-  if (!month) return null;
-
   const parsed = parseMonthlyWorkData(month);
-  if (!parsed) return null;
-
   const plan = parsePlanData(month);
-  if (!plan) return null;
-
   return { month, records: parsed.records, rankMap: parsed.rankMap, plan };
 }
 
-// ───────────────────────────────────────────
-// BTL 생산 시트 채우기 (직급 순위 적용)
-// ───────────────────────────────────────────
-function fillBTLSheet() {
-  const data = loadData();
-  if (!data) return;
-  const { records, plan, rankMap } = data;
-
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const targetSheet = ss.getSheetByName('BTL 생산');
-  if (!targetSheet) {
-    SpreadsheetApp.getUi().alert('오류: "BTL 생산" 시트를 찾을 수 없습니다.');
-    return;
-  }
-
-  const monthName = records[0]?.monthName || '';
-  const filtered = records
-    .filter(r => r.type === '야')
-    .sort((a, b) => {
-      if (a.day !== b.day) return a.day - b.day;
-      return (rankMap[a.name] ?? 999) - (rankMap[b.name] ?? 999);
-    });
-
-  const rows = filtered.map(r => ({
-    name: r.name, day: r.day, reason: getBTLReason(plan[r.day])
-  }));
-
-  writeToSheet(targetSheet, rows, monthName);
-  SpreadsheetApp.getUi().alert(`BTL 생산 시트 완료\n총 ${rows.length}건 입력됨`);
+function rankOf_(rankMap, name) {
+  return (name in rankMap) ? rankMap[name] : 999;
 }
 
 // ───────────────────────────────────────────
-// 제품생산 시트 채우기 (직급 순위 적용)
+// 자동 입력 행 생성 (근무계획 기반)
+// kind: CIP는 조=0, 연=1 / 나머지는 0  (특이사항은 2)
 // ───────────────────────────────────────────
-function fillSejeumSheet() {
-  const data = loadData();
-  if (!data) return;
-  const { records, plan, rankMap } = data;
+function buildAutoRows_(key, data) {
+  const records = data.records, plan = data.plan, rankMap = data.rankMap;
+  const byDayRank = (a, b) => {
+    if (a.day !== b.day) return a.day - b.day;
+    return rankOf_(rankMap, a.name) - rankOf_(rankMap, b.name);
+  };
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const targetSheet = ss.getSheetByName('제품생산');
-  if (!targetSheet) {
-    SpreadsheetApp.getUi().alert('오류: "제품생산" 시트를 찾을 수 없습니다.');
-    return;
+  if (key === 'BTL') {
+    return records.filter(r => r.type === '야').sort(byDayRank)
+      .map(r => ({ name: r.name, day: r.day, reason: getBTLReason(plan[r.day]), kind: 0, special: false }));
   }
 
-  const monthName = records[0]?.monthName || '';
-  const filtered = records
-    .filter(r => ['B', 'P', 'L'].includes(r.type))
-    .sort((a, b) => {
-      if (a.day !== b.day) return a.day - b.day;
-      return (rankMap[a.name] ?? 999) - (rankMap[b.name] ?? 999);
-    });
-
-  const rows = filtered.map(r => ({
-    name: r.name, day: r.day, reason: getSejeumReason(r.type, plan[r.day])
-  }));
-
-  writeToSheet(targetSheet, rows, monthName);
-  SpreadsheetApp.getUi().alert(`제품생산 시트 완료\n총 ${rows.length}건 입력됨`);
-}
-
-// ───────────────────────────────────────────
-// 품질 CIP 시트 채우기 (직급 순위 적용)
-// ───────────────────────────────────────────
-function fillCIPSheet() {
-  const data = loadData();
-  if (!data) return;
-  const { records, plan, rankMap } = data;
-
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const targetSheet = ss.getSheetByName('품질 CIP');
-  if (!targetSheet) {
-    SpreadsheetApp.getUi().alert('오류: "품질 CIP" 시트를 찾을 수 없습니다.');
-    return;
+  if (key === 'SEJEUM') {
+    return records.filter(r => ['B', 'P', 'L'].includes(r.type)).sort(byDayRank)
+      .map(r => ({ name: r.name, day: r.day, reason: getSejeumReason(r.type, plan[r.day]), kind: 0, special: false }));
   }
 
-  const monthName = records[0]?.monthName || '';
+  // CIP
   const filtered = records
     .filter(r => r.type === '조' || r.type === '연')
     .sort((a, b) => {
       if (a.day !== b.day) return a.day - b.day;
       if (a.type !== b.type) return a.type === '조' ? -1 : 1;
-      return (rankMap[a.name] ?? 999) - (rankMap[b.name] ?? 999);
+      return rankOf_(rankMap, a.name) - rankOf_(rankMap, b.name);
     });
 
   const dayGroups = {};
@@ -458,75 +427,274 @@ function fillCIPSheet() {
     const group = dayGroups[day];
     const reasons = getCIPReasons(plan[day], group);
     group.forEach((r, i) => {
-      rows.push({ name: r.name, day: r.day, reason: reasons[i] });
+      rows.push({ name: r.name, day: r.day, reason: reasons[i], kind: r.type === '조' ? 0 : 1, special: false });
     });
   }
-
-  writeToSheet(targetSheet, rows, monthName);
-  SpreadsheetApp.getUi().alert(`품질 CIP 시트 완료\n총 ${rows.length}건 입력됨`);
+  return rows;
 }
 
 // ───────────────────────────────────────────
-// 전체 실행 (모든 시트에 직급 순위 적용)
+// 자동 입력 + 특이사항 병합 정렬
+// • BTL/제품생산: 날짜 → 직급 → (자동 먼저)
+// • 품질 CIP    : 날짜 → 조 → 연 → 특이사항 → 직급
 // ───────────────────────────────────────────
-function fillAllSheets() {
+function mergeAndSort_(key, autoRows, specials, rankMap) {
+  const all = autoRows.concat(specials.map(s => ({
+    name: s.name, day: s.day, reason: s.reason, kind: 2, special: true
+  })));
+  const kindFirst = (key === 'CIP');
+  all.sort((a, b) => {
+    if (a.day !== b.day) return a.day - b.day;
+    if (kindFirst && a.kind !== b.kind) return a.kind - b.kind;
+    const ra = rankOf_(rankMap, a.name), rb = rankOf_(rankMap, b.name);
+    if (ra !== rb) return ra - rb;
+    return a.kind - b.kind;
+  });
+  return all;
+}
+
+// ───────────────────────────────────────────
+// 정산 실행 본체 — mode: 'ALL' | 'BTL' | 'SEJEUM' | 'CIP'
+// 반환: 결과 요약 문자열
+// ───────────────────────────────────────────
+function runFill_(mode, expectedMonth) {
   const data = loadData();
-  if (!data) return;
-  const { records, plan, rankMap } = data;
-  const monthName = records[0]?.monthName || '';
+  if (expectedMonth && data.month !== expectedMonth) {
+    throw new Error(`기준 월이 ${expectedMonth}월 → ${data.month}월로 바뀌었습니다. 창을 닫고 다시 실행해주세요.`);
+  }
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const monthName = `${data.month}월`;
+  const keys = mode === 'ALL' ? RUN_SHEET_ORDER : [mode];
+  const specialsAll = readSpecials_(data.month);
 
-  // BTL 생산 (직급 순 적용)
-  const btlSheet = ss.getSheetByName('BTL 생산');
-  if (btlSheet) {
-    const rows = records
-      .filter(r => r.type === '야')
-      .sort((a, b) => {
-        if (a.day !== b.day) return a.day - b.day;
-        return (rankMap[a.name] ?? 999) - (rankMap[b.name] ?? 999);
-      })
-      .map(r => ({ name: r.name, day: r.day, reason: getBTLReason(plan[r.day]) }));
-    writeToSheet(btlSheet, rows, monthName);
-  }
+  const lines = [];
+  const warns = [];
 
-  // 제품생산 (직급 순 적용)
-  const sejeumSheet = ss.getSheetByName('제품생산');
-  if (sejeumSheet) {
-    const rows = records
-      .filter(r => ['B', 'P', 'L'].includes(r.type))
-      .sort((a, b) => {
-        if (a.day !== b.day) return a.day - b.day;
-        return (rankMap[a.name] ?? 999) - (rankMap[b.name] ?? 999);
-      })
-      .map(r => ({ name: r.name, day: r.day, reason: getSejeumReason(r.type, plan[r.day]) }));
-    writeToSheet(sejeumSheet, rows, monthName);
-  }
-
-  // 품질 CIP
-  const cipSheet = ss.getSheetByName('품질 CIP');
-  if (cipSheet) {
-    const filtered = records
-      .filter(r => r.type === '조' || r.type === '연')
-      .sort((a, b) => {
-        if (a.day !== b.day) return a.day - b.day;
-        if (a.type !== b.type) return a.type === '조' ? -1 : 1;
-        return (rankMap[a.name] ?? 999) - (rankMap[b.name] ?? 999);
-      });
-    const dayGroups = {};
-    for (const r of filtered) {
-      if (!dayGroups[r.day]) dayGroups[r.day] = [];
-      dayGroups[r.day].push(r);
+  for (const key of keys) {
+    const cfg = SHEET_CFG[key];
+    const sheet = ss.getSheetByName(cfg.sheetName);
+    if (!sheet) {
+      if (mode === 'ALL') { lines.push(`• ${cfg.sheetName}: 시트 없음 (건너뜀)`); continue; }
+      throw new Error(`"${cfg.sheetName}" 시트를 찾을 수 없습니다.`);
     }
-    const rows = [];
-    for (const day of Object.keys(dayGroups).map(Number).sort((a, b) => a - b)) {
-      const group = dayGroups[day];
-      const reasons = getCIPReasons(plan[day], group);
-      group.forEach((r, i) => rows.push({ name: r.name, day: r.day, reason: reasons[i] }));
-    }
-    writeToSheet(cipSheet, rows, monthName);
+
+    const autoRows = buildAutoRows_(key, data);
+    const specials = specialsAll.filter(s => s.sheetKey === key);
+    const rows = mergeAndSort_(key, autoRows, specials, data.rankMap);
+    const res = writeToSheet(sheet, rows, monthName);
+
+    let line = `• ${cfg.sheetName}: 총 ${res.count}건 (자동 ${autoRows.length} + 특이사항 ${specials.length}) / 합계 ${res.sumRow}행`;
+    if (res.addedRows > 0) line += ` ← 행 부족으로 ${res.addedRows}행 자동 추가`;
+    lines.push(line);
+
+    specials.forEach(s => {
+      if (autoRows.some(a => a.name === s.name && a.day === s.day)) {
+        warns.push(`  - ${cfg.sheetName} / ${s.name} / ${monthName} ${s.day}일 (${s.reason})`);
+      }
+    });
   }
 
-  SpreadsheetApp.getUi().alert('전체 시트 자동 채우기 완료!');
+  SpreadsheetApp.flush();
+
+  let msg = `${monthName} 교통비 정산 완료\n\n` + lines.join('\n');
+  if (warns.length > 0) {
+    msg += '\n\n⚠ 같은 사람·같은 날에 자동 입력 건과 겹치는 특이사항 (두 행 모두 입력됨, 확인 필요)\n' + warns.join('\n');
+  }
+  return msg;
+}
+
+// ═══════════════════════════════════════════
+// 특이사항 입력창 ↔ 서버 통신 함수
+// ═══════════════════════════════════════════
+
+/** 입력창 초기 데이터 */
+function getDialogInit() {
+  const month = getMonthNumber();
+  const rankMap = parseMonthlyWorkData(month).rankMap;
+
+  const unknownNames = [];
+  const sheets = UI_SHEET_ORDER.map(key => {
+    const cfg = SHEET_CFG[key];
+    cfg.names.forEach(n => {
+      if (!(n in rankMap) && unknownNames.indexOf(n) < 0) unknownNames.push(n);
+    });
+    return { key: key, sheetName: cfg.sheetName, names: cfg.names, reasons: cfg.reasons };
+  });
+
+  return {
+    month: month,
+    daysInMonth: daysInMonth_(month),
+    sheets: sheets,
+    unknownNames: unknownNames,
+    entries: readSpecials_(month)
+  };
+}
+
+/** 저장만 */
+function saveSpecials(month, entries) {
+  const clean = sanitizeEntries_(entries);
+  writeSpecials_(parseInt(month, 10), clean);
+  return clean.length;
+}
+
+/** 저장 후 정산 실행 */
+function saveSpecialsAndRun(month, entries, mode) {
+  const m = parseInt(month, 10);
+  if (mode !== 'ALL' && !SHEET_CFG[mode]) throw new Error('알 수 없는 실행 모드: ' + mode);
+  writeSpecials_(m, sanitizeEntries_(entries));
+  return runFill_(mode, m);
+}
+
+function daysInMonth_(month) {
+  const now = new Date();
+  let year = now.getFullYear();
+  if (month - (now.getMonth() + 1) > 6) year -= 1; // 1월에 작년 12월분 정산하는 경우
+  return new Date(year, month, 0).getDate();
+}
+
+function sanitizeEntries_(entries) {
+  const out = [];
+  const seen = {};
+  (entries || []).forEach(e => {
+    if (!e) return;
+    const sheetKey = String(e.sheetKey || '');
+    if (!SHEET_CFG[sheetKey]) return;
+    const name = String(e.name || '').trim();
+    const reason = String(e.reason || '').trim();
+    const day = parseInt(e.day, 10);
+    if (!name || !reason || isNaN(day) || day < 1 || day > 31) return;
+    const k = [sheetKey, name, day, reason].join('|');
+    if (seen[k]) return;
+    seen[k] = true;
+    out.push({ sheetKey: sheetKey, name: name, day: day, reason: reason });
+  });
+  return out;
+}
+
+// ───────────────────────────────────────────
+// 특이사항 저장 시트 (숨김) — A:월 B:시트 C:일 D:이름 E:사유 F:등록일시
+// ───────────────────────────────────────────
+function getOrCreateSpecialSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(SPECIAL_SHEET_NAME);
+  if (sh) return sh;
+
+  const active = ss.getActiveSheet();
+  sh = ss.insertSheet(SPECIAL_SHEET_NAME, ss.getNumSheets());
+  sh.getRange('A:E').setNumberFormat('@');
+  sh.getRange('F:F').setNumberFormat('yyyy-mm-dd hh:mm');
+  sh.getRange(1, 1, 1, 6).setValues([['월', '시트', '일', '이름', '사유', '등록일시']]).setFontWeight('bold');
+  sh.setFrozenRows(1);
+  sh.hideSheet();
+  if (active) ss.setActiveSheet(active);
+  return sh;
+}
+
+function readSpecials_(month) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(SPECIAL_SHEET_NAME);
+  if (!sh || sh.getLastRow() < 2) return [];
+
+  const nameToKey = {};
+  Object.keys(SHEET_CFG).forEach(k => { nameToKey[SHEET_CFG[k].sheetName] = k; });
+
+  const limit = new Date().getTime() - SPECIAL_EXPIRE_DAYS * 24 * 60 * 60 * 1000;
+  const vals = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
+  const out = [];
+
+  vals.forEach(r => {
+    if (parseInt(r[0], 10) !== month) return;
+    const sheetKey = nameToKey[String(r[1]).trim()];
+    const day = parseInt(r[2], 10);
+    const name = String(r[3]).trim();
+    const reason = String(r[4]).trim();
+    if (!sheetKey || isNaN(day) || !name || !reason) return;
+    if (r[5] instanceof Date && r[5].getTime() < limit) return; // 오래된 건(작년 같은 달) 무시
+    out.push({ sheetKey: sheetKey, name: name, day: day, reason: reason });
+  });
+  return out;
+}
+
+/** 해당 월의 특이사항을 entries로 통째 교체 (다른 달 기록은 유지) */
+function writeSpecials_(month, entries) {
+  const sh = getOrCreateSpecialSheet_();
+  const last = sh.getLastRow();
+
+  let keep = [];
+  if (last >= 2) {
+    keep = sh.getRange(2, 1, last - 1, 6).getValues()
+      .filter(r => String(r[0]).trim() !== '' && parseInt(r[0], 10) !== month);
+    sh.getRange(2, 1, last - 1, 6).clearContent();
+  }
+
+  const now = new Date();
+  const rows = keep.concat(entries.map(e =>
+    [String(month), SHEET_CFG[e.sheetKey].sheetName, String(e.day), e.name, e.reason, now]
+  ));
+
+  if (rows.length > 0) {
+    sh.getRange(2, 1, rows.length, 5).setNumberFormat('@');
+    sh.getRange(2, 1, rows.length, 6).setValues(rows);
+  }
+}
+
+// ═══════════════════════════════════════════
+// ⚙ 합계 행을 100행으로 맞추기 (최초 1회)
+// ═══════════════════════════════════════════
+function setupSumRow100() {
+  const ui = SpreadsheetApp.getUi();
+  const answer = ui.alert(
+    '합계 행을 100행으로 맞추기',
+    '"BTL 생산", "제품생산", "품질 CIP" 시트에 대해 다음 작업을 합니다.\n\n' +
+    `1. 합계 행을 ${TARGET_SUM_ROW}행으로 이동 (부족한 행은 ${TEMPLATE_ROW}행 서식·수식을 복사해 추가)\n` +
+    `2. ${TEMPLATE_ROW + 1}행 ~ ${TARGET_SUM_ROW - 1}행의 G~K열 수식을 ${TEMPLATE_ROW}행 기준으로 다시 채움 (K61에 남은 SUM 수식 등 복구)\n` +
+    `3. ${DATA_START_ROW}행 ~ ${TARGET_SUM_ROW - 1}행의 A~F열 내용을 비움 (수기 입력분 포함)\n\n` +
+    `※ 실행 전 각 시트 ${TEMPLATE_ROW}행의 G~K열 수식이 정상인지 확인하세요.\n` +
+    '※ 스프레드시트 사본을 먼저 만들어 두는 것을 권장합니다.\n\n계속할까요?',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (answer !== ui.Button.OK) return;
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const msgs = [];
+
+  RUN_SHEET_ORDER.forEach(key => {
+    const sheetName = SHEET_CFG[key].sheetName;
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) { msgs.push(`• ${sheetName}: 시트 없음 (건너뜀)`); return; }
+
+    try {
+      let sumRow = findSumRow(sheet);
+      const before = sumRow;
+      sheet.showRows(DATA_START_ROW, sumRow - DATA_START_ROW);
+
+      if (sumRow < TARGET_SUM_ROW) {
+        sumRow = insertDataRows_(sheet, sumRow, TARGET_SUM_ROW - sumRow);
+      } else if (sumRow > TARGET_SUM_ROW) {
+        sheet.deleteRows(TARGET_SUM_ROW, sumRow - TARGET_SUM_ROW);
+        sumRow = TARGET_SUM_ROW;
+      }
+
+      // G~K 수식 복구 (TEMPLATE_ROW 기준)
+      const fixCount = sumRow - 1 - TEMPLATE_ROW;
+      if (fixCount > 0) {
+        sheet.getRange(TEMPLATE_ROW, 7, 1, 5).copyTo(
+          sheet.getRange(TEMPLATE_ROW + 1, 7, fixCount, 5),
+          SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false
+        );
+      }
+
+      sheet.getRange(DATA_START_ROW, 1, sumRow - DATA_START_ROW, 6).clearContent();
+      sheet.getRange(sumRow, SUM_COL).setValue(0);
+      msgs.push(`• ${sheetName}: 합계 ${before}행 → ${sumRow}행`);
+    } catch (e) {
+      msgs.push(`• ${sheetName}: 실패 — ${e.message}`);
+    }
+  });
+
+  SpreadsheetApp.flush();
+  ui.alert('완료\n\n' + msgs.join('\n') + '\n\n이제 메뉴에서 "전체 시트 자동 채우기"를 실행하세요.');
 }
 
 // ───────────────────────────────────────────
@@ -539,16 +707,21 @@ function showHelp() {
     '• 근무 데이터: 근무계획 스프레드시트 → "X월" 시트\n' +
     '• 생산 계획: 제품생산 계획 스프레드시트 → "X월 제품생산 계획..." 시트\n' +
     '• 기준 월: "X월 근무현황표" 시트 Z3\n\n' +
+    '【특이사항】\n' +
+    '• 메뉴 실행 시 입력창이 먼저 뜸 (이름·일자·사유 버튼 선택 또는 직접 입력)\n' +
+    '• 숨김 시트 "특이사항"에 월별로 저장 → 다시 돌려도 자동 반영\n' +
+    '• 이름/사유 버튼 목록은 코드 상단 SHEET_CFG에서 수정\n\n' +
     '【근무 유형 표기】\n' +
-    '• 교육 병행 표기 자동 인식: P/교→P, B/교→B, L/교→L\n' +
-    ' (야/교, 조/교, 연/교도 동일하게 처리)\n' +
-    '• "교" 단독 표기는 연장근무가 아니므로 제외\n\n' +
-    '【정렬 규칙 (모든 시트 공통 적용)】\n' +
-    '• 같은 날짜 → 직급 높은 사람(근무계획 시트 C열 위쪽)이 먼저\n' +
-    '• 품질 CIP 추가: 조기출근("조")가 연장("연")보다 위\n\n' +
+    '• 교육 병행 표기 자동 인식: P/교→P, B/교→B, L/교→L (야/교, 조/교, 연/교 동일)\n' +
+    '• "교" 단독 표기는 제외\n\n' +
+    '【정렬 규칙】\n' +
+    '• BTL/제품생산: 날짜 → 직급 순 (특이사항도 직급 순으로 섞임)\n' +
+    '• 품질 CIP: 날짜 → 조 → 연 → 특이사항 → 직급 순\n\n' +
+    '【합계】\n' +
+    '• "합 계" 행을 시트 끝까지 자동 탐색 (기본 100행), 행이 모자라면 자동 추가\n\n' +
     '【실행 순서】\n' +
     '1. Z3 월 확인\n' +
     '2. 메뉴 → 전체 시트 자동 채우기\n' +
-    '3. 필요시 수동 수정'
+    '3. 특이사항 입력 → "저장 후 정산 실행"'
   );
 }
