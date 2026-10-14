@@ -1,0 +1,723 @@
+/**
+ * CIP 검증 (CIP검증.gs)
+ *
+ * 일근무관리에서 CIP 담당자(CIP_PEOPLE)의 근무(H61)·근무(L11) 날짜를 뽑아 세 곳과 대조합니다.
+ *   [1] 교통비 지급 정산서 "품질 CIP" — 같은 날짜·이름 행의 업무내용(E:F)에 "생산라인 CIP"가 있는지
+ *   [2] 근태 정산내역 "연장야근정산" — 이름 행 × 일자 열 셀에 기대 기호(L11 → "연")가 있는지
+ *       (조기출근 H61은 연장야근정산에 잡히지 않으므로 검사하지 않음)
+ *   [3] 근무계획 "X월" — 이름 행 × 일자 열 셀에 기대 기호(H61 → "조", L11 → "연")가 있는지
+ *   + 역방향: 품질 CIP의 "생산라인 CIP" 행 중 일근무관리에 대응되는 H61·L11이 없는 것
+ *
+ * 결과: "CIP 검증" 시트 (비고는 날짜+이름 기준으로 재실행해도 보존)
+ * 모든 소스는 이름·일자를 찾아 읽으므로 인원·행 위치가 바뀌어도 코드 수정 불필요.
+ *
+ * ※ 재사용: Code.gs(SS_ID_*, _readBlock, _toDate, _findSheetByPatterns, columnLetterToIndex),
+ *    검증.gs(SS_ID_TRANSPORT, OT_SETTLE_SHEET, _normName, _row, R_OK/R_FAIL/R_NA),
+ *    휴가검증.gs(_lvIsTotalLabel), 일근무관리.gs(SHEET_WORK_MGMT),
+ *    일근무관리검증.gs(WM_COL_DATE/NAME/WORKTIME, WM_DATA_START_ROW,
+ *    _readPlanNameRows, _readPlanDayColumns, PLAN_DAY_COL_START/END)
+ * ※ _readOtSettleTable()은 검증.gs(연장근무 검증)에서도 재사용합니다.
+ */
+
+// ─── 결과 시트명 / 소스 시트명 ───────────────────────────────────────────
+const SHEET_CIP_VERIFY    = "CIP 검증";
+const SHEET_TRANSPORT_CIP = "품질 CIP";
+
+// ─── CIP 담당자 (공백 무시) — 사람이 바뀌면 여기만 수정 ───────────────────
+const CIP_PEOPLE = ["박수형", "고혁진", "진성령", "김은혁"];
+
+// ─── 근무시간 코드별 기대값 (null = 그 소스는 검사 안 함) ─────────────────
+//   settle: 연장야근정산 셀에 있어야 할 기호 / plan: 근무계획 셀에 있어야 할 기호
+//   ※ 연장야근정산은 조기출근을 잡지 않으므로 H61은 settle 검사 없음(공란이 정상)
+const CIP_WORK_CODES = {
+  "근무(H61)": { label: "조기출근", settle: null, plan: "조" },
+  "근무(L11)": { label: "연장퇴근", settle: "연",  plan: "연" }
+};
+
+// 품질 CIP 업무내용에 포함되어야 할 문구 (공백 무시·대소문자 무시로 비교)
+const CIP_WORK_SUFFIX = "생산라인 CIP";
+
+// ─── [1] 품질 CIP 시트 구조 ──────────────────────────────────────────────
+const TCIP_DATA_START_ROW = 5;
+const TCIP_COL_NAME = "A";
+const TCIP_COL_DATE = "B";    // "9월 1일" 또는 날짜
+const TCIP_COL_WORK = "E";    // E:F 병합 → 값은 E에 있음
+const TCIP_SCAN_MAX = 500;
+
+// ─── [2] 연장야근정산 시트 구조 ──────────────────────────────────────────
+const OTS_DAY_ROW        = 5;     // C5:AG5 = 1~31일
+const OTS_DAY_COL_START  = "C";
+const OTS_DAY_COL_END    = "AG";
+const OTS_NAME_COL       = "B";   // B8부터 이름
+const OTS_NAME_START_ROW = 8;
+const OTS_STOP_COL       = "A";   // "합  계"가 나오면 표 끝
+const OTS_SCAN_MAX       = 100;
+
+// ─── 결과 시트 열 구성: 날짜 | 이름 | 코드 | (값·결과)×3 | 종합 | 비고 ───
+const CIP_SOURCES = [
+  { key: "cip",    label: "품질 CIP" },
+  { key: "settle", label: "연장야근정산" },
+  { key: "plan",   label: "근무계획" }
+];
+const CIP_FIRST_SRC_COL = 4;
+const CIP_OVERALL_COL   = CIP_FIRST_SRC_COL + 2 * CIP_SOURCES.length;   // 10
+const CIP_NOTE_COL      = CIP_OVERALL_COL + 1;                          // 11
+const CIP_NCOL          = CIP_NOTE_COL;
+
+const CIP_ST = { ok: "✅", fail: "❌ 불일치", na: "⚠️ 확인불가", skip: "–" };
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [A] 메뉴 진입
+// ═════════════════════════════════════════════════════════════════════════
+function verifyCipSheet() {
+  const ui = SpreadsheetApp.getUi();
+  const run = _runCipVerification();
+  SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(run.sheet);
+
+  if (run.res.error) {
+    ui.alert(`⚠️ CIP 검증 실패\n\n${run.res.error}`);
+    return;
+  }
+  ui.alert(`📊 CIP 검증 완료\n\n${run.summary}\n\n자세한 내용은 "${SHEET_CIP_VERIFY}" 시트를 확인하세요.`);
+}
+
+
+function _runCipVerification() {
+  const res = _collectCipVerification();
+  const sheet = _buildCipReport(res);
+  return { res: res, sheet: sheet, summary: _cipSummaryText(res) };
+}
+
+
+function _cipSummaryText(res) {
+  if (res.error) return `⚠️ ${res.error}`;
+  const c = res.counts;
+  let s =
+    `기준: ${res.year}년 ${res.month}월 · 담당자 ${CIP_PEOPLE.join(", ")}\n` +
+    `일근무관리 H61·L11 건수: ${res.events.length}건\n` +
+    `${R_OK} ${c.ok}건 / ${R_FAIL} ${c.fail}건 / ⚠️ 확인불가 ${c.na}건\n` +
+    `품질 CIP 역방향 미매칭: ${res.reverse.length}건`;
+  if (res.messages.length > 0) s += "\n\n⚠️ 확인 필요\n" + res.messages.map(m => "• " + m).join("\n");
+  return s;
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [B] 데이터 수집
+// ═════════════════════════════════════════════════════════════════════════
+function _collectCipVerification() {
+  const ss  = SpreadsheetApp.getActiveSpreadsheet();
+  const res = { year: null, month: null, error: null, messages: [],
+                events: [], reverse: [], counts: { ok: 0, fail: 0, na: 0 },
+                sheets: { cip: null, settle: null, plan: null } };
+
+  // ── 일근무관리 ───────────────────────────────────────────────────────
+  const wm = ss.getSheetByName(SHEET_WORK_MGMT);
+  if (!wm) { res.error = `"${SHEET_WORK_MGMT}" 시트 없음`; return res; }
+
+  const rows = _readWorkMgmtRows(wm);
+  if (rows.length === 0) { res.error = `"${SHEET_WORK_MGMT}"에 날짜·이름이 있는 행이 없습니다 (정리를 먼저 실행했는지 확인)`; return res; }
+
+  res.year  = rows[0].date.getFullYear();
+  res.month = rows[0].date.getMonth() + 1;
+
+  const peopleSet = {};
+  CIP_PEOPLE.forEach(n => { peopleSet[_normName(n)] = true; });
+
+  const wmIndex = {};   // "월-일|이름키" → 일근무관리 행들
+  rows.forEach(r => {
+    const k = _cipKey(r.date.getMonth() + 1, r.date.getDate(), r.key);
+    (wmIndex[k] = wmIndex[k] || []).push(r);
+  });
+
+  const events = rows.filter(r => peopleSet[r.key] && CIP_WORK_CODES[r.worktime]);
+
+  const notFound = CIP_PEOPLE.filter(n => !rows.some(r => r.key === _normName(n)));
+  if (notFound.length > 0) res.messages.push(`일근무관리에 이름 없음: ${notFound.join(", ")}`);
+
+  // ── [1] 품질 CIP ─────────────────────────────────────────────────────
+  let cip = null;
+  const cipMap = {};
+  try {
+    const tr = SpreadsheetApp.openById(SS_ID_TRANSPORT);
+    const sh = tr.getSheetByName(SHEET_TRANSPORT_CIP);
+    if (!sh) throw new Error(`"${SHEET_TRANSPORT_CIP}" 시트 없음`);
+    cip = _readTransportCipRows(sh);
+    res.sheets.cip = sh.getName();
+
+    const badDates = [];
+    cip.forEach(c => {
+      if (!c.md) { badDates.push(`${c.row}행 "${c.dateRaw}"`); return; }
+      const k = _cipKey(c.md.m, c.md.d, c.key);
+      (cipMap[k] = cipMap[k] || []).push(c);
+    });
+    if (badDates.length > 0) {
+      res.messages.push(`품질 CIP 날짜 해석 불가 ${badDates.length}건 (${badDates.slice(0, 3).join(", ")}${badDates.length > 3 ? " …" : ""})`);
+    }
+  } catch (e) {
+    res.messages.push(`품질 CIP: ${e.message}`);
+  }
+
+  // ── [2] 연장야근정산 ─────────────────────────────────────────────────
+  let settle = null;
+  try {
+    const att = SpreadsheetApp.openById(SS_ID_ATTENDANCE);
+    const sh = att.getSheetByName(OT_SETTLE_SHEET);
+    if (!sh) throw new Error(`"${OT_SETTLE_SHEET}" 시트 없음`);
+    settle = _readOtSettleTable(sh);
+    if (settle.count === 0) throw new Error(`"${OT_SETTLE_SHEET}" ${OTS_NAME_COL}${OTS_NAME_START_ROW}부터 이름 없음`);
+    res.sheets.settle = sh.getName();
+  } catch (e) {
+    settle = null;
+    res.messages.push(`연장야근정산: ${e.message}`);
+  }
+
+  // ── [3] 근무계획 X월 ─────────────────────────────────────────────────
+  let plan = null;
+  try {
+    const book = SpreadsheetApp.openById(SS_ID_WORK_PLAN);
+    const sh = _findSheetByPatterns(book, [`${res.month}월`],
+      new RegExp(`(^|[^0-9])${res.month}\\s*월`));
+    if (!sh) throw new Error(`"${res.month}월" 시트 없음`);
+    plan = _readPlanTable(sh);
+    if (plan.count === 0) throw new Error(`"${sh.getName()}" 이름 행 없음`);
+    res.sheets.plan = sh.getName();
+  } catch (e) {
+    plan = null;
+    res.messages.push(`근무계획: ${e.message}`);
+  }
+
+  // ── 정방향: 일근무관리 H61·L11 → 세 소스 확인 ────────────────────────
+  const matchedCip = {};
+  const sfxNorm = _cipNormWork(CIP_WORK_SUFFIX);
+
+  events.forEach(ev => {
+    const m = ev.date.getMonth() + 1, d = ev.date.getDate();
+    const k = _cipKey(m, d, ev.key);
+    const spec = CIP_WORK_CODES[ev.worktime];
+    const checks = {};
+
+    // [1] 품질 CIP
+    if (!cip) {
+      checks.cip = { status: "na", value: "-", detail: "품질 CIP 시트 없음" };
+    } else {
+      const list = cipMap[k] || [];
+      const hit = list.find(c => c.isCip);
+      if (hit) {
+        checks.cip = { status: "ok", value: hit.work, detail: "" };
+        list.forEach(c => { if (c.isCip) matchedCip[c.row] = true; });
+      } else if (list.length > 0) {
+        checks.cip = { status: "fail", value: list.map(c => c.work || "(공란)").join(" / "),
+                       detail: `품질 CIP 업무내용에 "${CIP_WORK_SUFFIX}" 없음` };
+      } else {
+        checks.cip = { status: "fail", value: "-", detail: "품질 CIP에 해당 날짜·이름 행 없음" };
+      }
+    }
+
+    // [2] 연장야근정산 / [3] 근무계획
+    checks.settle = spec.settle
+      ? _cipCheckMark(settle, ev.key, d, spec.settle, "연장야근정산")
+      : { status: "skip", value: "-", detail: "" };
+    checks.plan = spec.plan
+      ? _cipCheckMark(plan, ev.key, d, spec.plan, "근무계획")
+      : { status: "skip", value: "-", detail: "" };
+
+    const sts = CIP_SOURCES.map(s => checks[s.key].status);
+    const overall = sts.indexOf("fail") !== -1 ? "fail" : (sts.indexOf("na") !== -1 ? "na" : "ok");
+    res.counts[overall]++;
+
+    res.events.push({
+      date: ev.date, name: ev.name, key: ev.key, worktime: ev.worktime, label: spec.label,
+      checks: checks, overall: overall,
+      details: CIP_SOURCES.map(s => checks[s.key].detail).filter(Boolean)
+    });
+  });
+
+  // ── 역방향: 품질 CIP의 "생산라인 CIP" 행 중 매칭 안 된 것 ────────────
+  if (cip) {
+    cip.forEach(c => {
+      if (!c.isCip || matchedCip[c.row] || !c.md) return;
+      let reason;
+      if (c.md.m !== res.month) {
+        reason = `${c.md.m}월 항목 (일근무관리 기준 ${res.month}월)`;
+      } else if (!peopleSet[c.key]) {
+        reason = "CIP 담당자 목록(CIP_PEOPLE)에 없는 이름";
+      } else {
+        const wmRows = wmIndex[_cipKey(c.md.m, c.md.d, c.key)] || [];
+        reason = wmRows.length === 0
+          ? "일근무관리에 해당 날짜·이름 행 없음"
+          : `일근무관리 근무시간 "${wmRows.map(r => r.worktime || "공란").join(" / ")}" (H61·L11 아님)`;
+      }
+      res.reverse.push({ row: c.row, name: c.name, key: c.key, md: c.md, work: c.work, reason: reason });
+    });
+    res.reverse.sort((a, b) => (a.md.m - b.md.m) || (a.md.d - b.md.d) || a.name.localeCompare(b.name));
+  }
+
+  res.events.sort((a, b) => (a.date.getTime() - b.date.getTime()) || a.name.localeCompare(b.name));
+
+  Logger.log(`CIP 검증: 이벤트 ${res.events.length}건 / 일치 ${res.counts.ok} / 불일치 ${res.counts.fail} / 확인불가 ${res.counts.na} / 역방향 ${res.reverse.length}`);
+  return res;
+}
+
+
+// ─── 일근무관리 (정리 후) 날짜·이름·근무시간 읽기 ────────────────────────
+function _readWorkMgmtRows(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < WM_DATA_START_ROW) return [];
+
+  const maxCol = Math.max(WM_COL_DATE, WM_COL_NAME, WM_COL_WORKTIME);
+  const vals = _readBlock(sheet, WM_DATA_START_ROW, 1, lastRow - WM_DATA_START_ROW + 1, maxCol);
+
+  const rows = [];
+  vals.forEach((r, i) => {
+    const date = _toDate(r[WM_COL_DATE - 1]);
+    const key  = _normName(r[WM_COL_NAME - 1]);
+    if (!date || !key) return;
+    rows.push({
+      row: WM_DATA_START_ROW + i,
+      date: date,
+      name: String(r[WM_COL_NAME - 1]).trim(),
+      key: key,
+      worktime: String(r[WM_COL_WORKTIME - 1] == null ? "" : r[WM_COL_WORKTIME - 1]).replace(/\s+/g, "")
+    });
+  });
+  return rows;
+}
+
+
+// ─── [1] 품질 CIP 행 읽기 (A5부터, A열 "합계" 직전까지) ──────────────────
+function _readTransportCipRows(sheet) {
+  const nameCol = columnLetterToIndex(TCIP_COL_NAME);
+  const dateCol = columnLetterToIndex(TCIP_COL_DATE);
+  const workCol = columnLetterToIndex(TCIP_COL_WORK);
+  const maxCol  = Math.max(nameCol, dateCol, workCol);
+
+  const lastRow = Math.min(sheet.getLastRow(), TCIP_DATA_START_ROW + TCIP_SCAN_MAX);
+  if (lastRow < TCIP_DATA_START_ROW) return [];
+
+  const vals = _readBlock(sheet, TCIP_DATA_START_ROW, 1, lastRow - TCIP_DATA_START_ROW + 1, maxCol);
+  const sfx  = _cipNormWork(CIP_WORK_SUFFIX);
+  const rows = [];
+
+  for (let i = 0; i < vals.length; i++) {
+    const rawName = vals[i][nameCol - 1];
+    if (_lvIsTotalLabel(rawName)) break;
+    const key = _normName(rawName);
+    if (!key) continue;
+
+    const dateRaw = vals[i][dateCol - 1];
+    const work = String(vals[i][workCol - 1] == null ? "" : vals[i][workCol - 1]).replace(/\s+/g, " ").trim();
+    rows.push({
+      row: TCIP_DATA_START_ROW + i,
+      name: String(rawName).trim(),
+      key: key,
+      dateRaw: dateRaw instanceof Date
+        ? Utilities.formatDate(dateRaw, Session.getScriptTimeZone(), "M월 d일")
+        : String(dateRaw == null ? "" : dateRaw).trim(),
+      md: _cipParseMonthDay(dateRaw),
+      work: work,
+      isCip: _cipNormWork(work).indexOf(sfx) !== -1
+    });
+  }
+  return rows;
+}
+
+
+// ─── [2] 연장야근정산 표 읽기 (B8~"합계" 이름, C5:AG5 일자) ───────────────
+// 반환: { startRow, count, map(이름키→행 idx), names, dayCols(일→열), dayColStart, marks[][] }
+function _readOtSettleTable(sheet) {
+  const nameCol  = columnLetterToIndex(OTS_NAME_COL);
+  const stopCol  = columnLetterToIndex(OTS_STOP_COL);
+  const dayStart = columnLetterToIndex(OTS_DAY_COL_START);
+  const dayEnd   = columnLetterToIndex(OTS_DAY_COL_END);
+  const numCols  = dayEnd - dayStart + 1;
+
+  // 일자 헤더 (없으면 C=1일 … 순서로 가정)
+  const hdr = _readBlock(sheet, OTS_DAY_ROW, dayStart, 1, numCols)[0];
+  const dayCols = {};
+  hdr.forEach((v, i) => {
+    const d = _cipDayNum(v);
+    if (d && dayCols[d] === undefined) dayCols[d] = dayStart + i;
+  });
+  if (Object.keys(dayCols).length === 0) {
+    for (let d = 1; d <= numCols; d++) dayCols[d] = dayStart + d - 1;
+    Logger.log(`[주의] ${OT_SETTLE_SHEET} ${OTS_DAY_ROW}행에서 일자를 못 읽어 열 순서(C=1일)로 가정`);
+  }
+
+  // 이름 행
+  const lastRow = Math.min(sheet.getLastRow(), OTS_NAME_START_ROW + OTS_SCAN_MAX);
+  const map = {}, names = [];
+  let count = 0;
+  if (lastRow >= OTS_NAME_START_ROW) {
+    const left = _readBlock(sheet, OTS_NAME_START_ROW, 1, lastRow - OTS_NAME_START_ROW + 1, Math.max(nameCol, stopCol));
+    for (let i = 0; i < left.length; i++) {
+      if (_lvIsTotalLabel(left[i][stopCol - 1])) break;
+      const key = _normName(left[i][nameCol - 1]);
+      if (key && map[key] === undefined) {
+        map[key] = i;
+        names.push(String(left[i][nameCol - 1]).replace(/\s+/g, " ").trim());
+      }
+      count = i + 1;
+    }
+  }
+
+  const marks = count > 0 ? _readBlock(sheet, OTS_NAME_START_ROW, dayStart, count, numCols) : [];
+  Logger.log(`${OT_SETTLE_SHEET}: 이름 ${names.length}명 (${OTS_NAME_START_ROW}~${OTS_NAME_START_ROW + count - 1}행), 일자 ${Object.keys(dayCols).length}일`);
+
+  return { startRow: OTS_NAME_START_ROW, count: count, map: map, names: names,
+           dayCols: dayCols, dayColStart: dayStart, numCols: numCols, marks: marks };
+}
+
+
+// ─── [3] 근무계획 X월 표 읽기 (일근무관리검증.gs 헬퍼 재사용) ─────────────
+function _readPlanTable(sheet) {
+  const nameRows = _readPlanNameRows(sheet);
+  const dayCols  = _readPlanDayColumns(sheet);
+  const numCols  = PLAN_DAY_COL_END - PLAN_DAY_COL_START + 1;
+  const marks = nameRows.count > 0
+    ? _readBlock(sheet, nameRows.startRow, PLAN_DAY_COL_START, nameRows.count, numCols)
+    : [];
+  return { startRow: nameRows.startRow, count: nameRows.count, map: nameRows.map,
+           dayCols: dayCols, dayColStart: PLAN_DAY_COL_START, numCols: numCols, marks: marks };
+}
+
+
+// ─── 표에서 (이름, 일) 셀에 기대 기호가 있는지 ────────────────────────────
+function _cipCheckMark(table, key, day, expect, label) {
+  if (!table) return { status: "na", value: "-", detail: `${label} 시트 없음` };
+
+  const idx = table.map[key];
+  if (idx === undefined) return { status: "fail", value: "-", detail: `${label}에 이름 없음` };
+
+  const col = table.dayCols[day];
+  if (col === undefined) return { status: "fail", value: "-", detail: `${label}에 ${day}일 열 없음` };
+
+  const cell = table.marks[idx][col - table.dayColStart];
+  const raw  = String(cell == null ? "" : cell).replace(/\s+/g, "");
+  const ok   = raw.indexOf(expect) !== -1;
+  return {
+    status: ok ? "ok" : "fail",
+    value: raw || "(공란)",
+    detail: ok ? "" : `${label} 셀 "${raw || "공란"}" — "${expect}" 있어야 함`
+  };
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [C] 결과 시트 작성
+// ═════════════════════════════════════════════════════════════════════════
+function _buildCipReport(res) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_CIP_VERIFY);
+
+  const notes = sheet ? _cipReadExistingNotes(sheet) : {};
+
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_CIP_VERIFY);
+  } else {
+    sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).breakApart();
+    sheet.clear();
+    sheet.setFrozenRows(0);
+    sheet.setFrozenColumns(0);
+  }
+
+  const tz = Session.getScriptTimeZone();
+  const stamp = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm");
+  const data = [], meta = [];
+  const push = (row, type) => { data.push(row); meta.push(type); };
+  const blankRow = () => new Array(CIP_NCOL).fill("");
+  const line = (text, type) => { const r = blankRow(); r[0] = text; push(r, type); };
+
+  line("CIP 검증 결과 (일근무관리 ↔ 품질 CIP ↔ 연장야근정산 ↔ 근무계획)", "title");
+
+  if (res.error) {
+    line(`실행 ${stamp}`, "sub");
+    line(`⚠️ ${res.error}`, "summary");
+    sheet.getRange(1, 1, data.length, CIP_NCOL).setValues(data);
+    _styleCipReport(sheet, data, meta, 0);
+    return sheet;
+  }
+
+  const c = res.counts;
+  line(`기준 ${res.year}년 ${res.month}월 · 담당자 ${CIP_PEOPLE.join(", ")} · ` +
+       `품질 CIP "${res.sheets.cip || "없음"}" · 연장야근정산 "${res.sheets.settle || "없음"}" · 근무계획 "${res.sheets.plan || "없음"}" · 실행 ${stamp}`, "sub");
+  line(`일근무관리 H61·L11 ${res.events.length}건 — ${R_OK} ${c.ok}건 · ${R_FAIL} ${c.fail}건 · ⚠️ 확인불가 ${c.na}건 · 품질 CIP 역방향 미매칭 ${res.reverse.length}건`,
+       (c.fail + c.na + res.reverse.length) === 0 ? "ok" : "summary");
+  line(`근무(H61) 조기출근 → 근무계획 "조" (연장야근정산은 검사 안 함) / 근무(L11) 연장퇴근 → 연장야근정산 "연" · 근무계획 "연". 품질 CIP는 업무내용에 "${CIP_WORK_SUFFIX}" 포함 여부. 비고는 날짜+이름 기준으로 재실행해도 유지됩니다.`, "note");
+  res.messages.forEach(m => line(`⚠️ ${m}`, "warn"));
+  push(blankRow(), "blank");
+
+  // ── 헤더 ─────────────────────────────────────────────────────────────
+  const g = blankRow(); g[0] = "날짜"; g[1] = "이름"; g[2] = "일근무관리";
+  const h = blankRow(); h[0] = "날짜"; h[1] = "이름"; h[2] = "근무시간";
+  CIP_SOURCES.forEach((s, i) => {
+    const c0 = CIP_FIRST_SRC_COL + 2 * i;
+    g[c0 - 1] = s.label;
+    h[c0 - 1] = "셀 값"; h[c0] = "결과";
+  });
+  g[CIP_OVERALL_COL - 1] = "종합"; g[CIP_NOTE_COL - 1] = "비고";
+  h[CIP_OVERALL_COL - 1] = "종합"; h[CIP_NOTE_COL - 1] = "비고";
+  push(g, "ghead");
+  push(h, "head");
+  const headRow = data.length;
+
+  // ── 정방향 행 ────────────────────────────────────────────────────────
+  if (res.events.length === 0) {
+    line("일근무관리에서 CIP 담당자의 근무(H61)·근무(L11) 행이 없습니다.", "note");
+  }
+  res.events.forEach(ev => {
+    const r = blankRow();
+    const dateStr = Utilities.formatDate(ev.date, tz, "MM-dd (E)");
+    r[0] = dateStr;
+    r[1] = ev.name;
+    r[2] = `${ev.worktime} ${ev.label}`;
+    CIP_SOURCES.forEach((s, i) => {
+      const c0 = CIP_FIRST_SRC_COL + 2 * i;
+      r[c0 - 1] = ev.checks[s.key].value;
+      r[c0]     = CIP_ST[ev.checks[s.key].status];
+    });
+    r[CIP_OVERALL_COL - 1] = ev.overall === "ok" ? R_OK : (ev.overall === "fail" ? R_FAIL : "⚠️ 확인불가");
+
+    const noteKey = _cipNoteKey(dateStr, ev.key);
+    const auto = ev.details.join(" / ");
+    r[CIP_NOTE_COL - 1] = notes[noteKey] || (auto ? `(${auto})` : "");
+    push(r, "data:" + ev.overall);
+  });
+
+  // ── 역방향 ───────────────────────────────────────────────────────────
+  if (res.reverse.length > 0) {
+    push(blankRow(), "blank");
+    line(`품질 CIP에 "${CIP_WORK_SUFFIX}" 행이 있으나 일근무관리 H61·L11과 매칭되지 않음 — ${res.reverse.length}건`, "section");
+    res.reverse.forEach(x => {
+      const r = blankRow();
+      const dateStr = `${_cipPad(x.md.m)}-${_cipPad(x.md.d)}`;
+      r[0] = dateStr;
+      r[1] = x.name;
+      r[2] = x.reason;
+      r[CIP_FIRST_SRC_COL - 1] = x.work;
+      r[CIP_FIRST_SRC_COL]     = `${x.row}행`;
+      r[CIP_OVERALL_COL - 1]   = "⚠️ 역방향";
+      r[CIP_NOTE_COL - 1]      = notes[_cipNoteKey(dateStr, x.key)] || "";
+      push(r, "data:na");
+    });
+  }
+
+  sheet.getRange(1, 1, data.length, CIP_NCOL).setValues(data);
+  _styleCipReport(sheet, data, meta, headRow);
+  return sheet;
+}
+
+
+function _styleCipReport(sheet, data, meta, headRow) {
+  const N = CIP_NCOL;
+
+  sheet.setColumnWidth(1, 90);
+  sheet.setColumnWidth(2, 80);
+  sheet.setColumnWidth(3, 170);
+  CIP_SOURCES.forEach((s, i) => {
+    const c0 = CIP_FIRST_SRC_COL + 2 * i;
+    sheet.setColumnWidth(c0, i === 0 ? 190 : 80);
+    sheet.setColumnWidth(c0 + 1, 90);
+  });
+  sheet.setColumnWidth(CIP_OVERALL_COL, 110);
+  sheet.setColumnWidth(CIP_NOTE_COL, 340);
+
+  sheet.getRange(1, 1, data.length, N)
+    .setFontFamily("Noto Sans KR")
+    .setVerticalAlignment("middle");
+
+  const BG = { ok: "#eaf5ea", fail: "#fdeaea", na: "#fff6e5" };
+  const FC = { ok: "#1e6b34", fail: "#a61b1b", na: "#8a6100" };
+
+  meta.forEach((type, i) => {
+    const r = i + 1;
+    const full = sheet.getRange(r, 1, 1, N);
+
+    if (type === "title") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(16).setFontWeight("bold")
+        .setFontColor("#ffffff").setBackground("#1f3864")
+        .setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 40);
+
+    } else if (type === "sub") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(10).setFontColor("#ffffff").setBackground("#2e5496")
+        .setHorizontalAlignment("center").setWrap(true);
+      sheet.setRowHeight(r, 30);
+
+    } else if (type === "summary" || type === "ok") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(11).setFontWeight("bold")
+        .setBackground(type === "ok" ? BG.ok : BG.fail)
+        .setFontColor(type === "ok" ? FC.ok : FC.fail)
+        .setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 30);
+
+    } else if (type === "note") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(9).setFontColor("#666666").setFontStyle("italic")
+        .setBackground("#f7f9fc").setHorizontalAlignment("center").setWrap(true);
+      sheet.setRowHeight(r, 24);
+
+    } else if (type === "warn") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(10).setFontColor(FC.na).setBackground(BG.na)
+        .setHorizontalAlignment("left");
+      sheet.setRowHeight(r, 24);
+
+    } else if (type === "section") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(11).setFontWeight("bold")
+        .setFontColor("#ffffff").setBackground("#4472c4")
+        .setHorizontalAlignment("left");
+      sheet.setRowHeight(r, 28);
+
+    } else if (type === "ghead") {
+      full.setFontWeight("bold").setBackground("#c5d3ea")
+        .setHorizontalAlignment("center")
+        .setBorder(true, true, true, true, true, true, "#8ea9db", SpreadsheetApp.BorderStyle.SOLID);
+      for (let k = 0; k < CIP_SOURCES.length; k++) {
+        sheet.getRange(r, CIP_FIRST_SRC_COL + 2 * k, 1, 2).merge();
+      }
+      sheet.setRowHeight(r, 26);
+
+    } else if (type === "head") {
+      full.setFontWeight("bold").setBackground("#d9e1f2")
+        .setHorizontalAlignment("center")
+        .setBorder(true, true, true, true, true, true, "#8ea9db", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.setRowHeight(r, 26);
+
+    } else if (type.indexOf("data:") === 0) {
+      const kind = type.slice(5);
+      full.setBackground(BG[kind])
+        .setBorder(true, true, true, true, true, true, "#c9d4e8", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.getRange(r, 1, 1, N - 1).setHorizontalAlignment("center");
+      sheet.getRange(r, 3).setHorizontalAlignment("left");
+      sheet.getRange(r, CIP_FIRST_SRC_COL).setHorizontalAlignment("left").setWrap(true);
+      sheet.getRange(r, CIP_OVERALL_COL).setFontWeight("bold").setFontColor(FC[kind]);
+
+      for (let k = 0; k < CIP_SOURCES.length; k++) {
+        const col = CIP_FIRST_SRC_COL + 2 * k + 1;
+        const v = String(data[i][col - 1]);
+        if (v === CIP_ST.fail) {
+          sheet.getRange(r, col - 1, 1, 2).setBackground("#f9d0d0");
+          sheet.getRange(r, col).setFontWeight("bold").setFontColor(FC.fail);
+        } else if (v === CIP_ST.na) {
+          sheet.getRange(r, col).setFontColor(FC.na);
+        } else if (v === CIP_ST.ok) {
+          sheet.getRange(r, col).setFontColor(FC.ok);
+        } else {
+          sheet.getRange(r, col).setFontColor("#999999");
+        }
+      }
+
+      sheet.getRange(r, CIP_NOTE_COL)
+        .setBackground("#fffbe6").setHorizontalAlignment("left")
+        .setFontColor("#333333").setFontWeight("normal").setWrap(true);
+      sheet.setRowHeight(r, 24);
+
+    } else {
+      sheet.setRowHeight(r, 10);
+    }
+  });
+
+  // ※ 열 고정은 하지 않음 — 제목 행이 전체 열에 걸쳐 병합돼 있어 열 고정 시 예외 발생
+  if (headRow > 0) sheet.setFrozenRows(headRow);
+  sheet.setHiddenGridlines(true);
+}
+
+
+// ─── 기존 비고 읽기 (날짜 MM-dd + 이름 기준; 자동 메모 "( … )"는 제외) ────
+function _cipReadExistingNotes(sheet) {
+  const notes = {};
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow < 1 || lastCol < CIP_NOTE_COL) return notes;
+
+  const vals = sheet.getRange(1, 1, lastRow, CIP_NOTE_COL).getValues();
+  vals.forEach(r => {
+    const dateStr = String(r[0] == null ? "" : r[0]).trim();
+    const key = _normName(r[1]);
+    const note = String(r[CIP_NOTE_COL - 1] == null ? "" : r[CIP_NOTE_COL - 1]).trim();
+    if (!/^\d{2}-\d{2}/.test(dateStr) || !key || !note) return;
+    if (/^\(.*\)$/.test(note)) return;
+    notes[_cipNoteKey(dateStr, key)] = note;
+  });
+  return notes;
+}
+
+
+function _cipNoteKey(dateStr, key) {
+  return `${String(dateStr).slice(0, 5)}|${key}`;
+}
+
+
+// 전체 검증 결과 시트용 요약 행
+function _cipSummaryRows(res) {
+  if (res.error) return [_row("CIP 검증", "", "", R_NA, res.error)];
+
+  const rows = [];
+  rows.push(_row("CIP 대상 건수 (일근무관리 H61·L11)", res.events.length, "",
+    res.events.length > 0 ? R_OK : R_NA, `담당자: ${CIP_PEOPLE.join(", ")}`));
+
+  CIP_SOURCES.forEach(s => {
+    const checked = res.events.filter(e => e.checks[s.key].status !== "skip" && e.checks[s.key].status !== "na");
+    const ok = checked.filter(e => e.checks[s.key].status === "ok").length;
+    const na = res.events.filter(e => e.checks[s.key].status === "na").length;
+    rows.push(_row(`${s.label} 일치`, ok, checked.length,
+      na > 0 ? R_NA : (ok === checked.length ? R_OK : R_FAIL),
+      na > 0 ? `확인불가 ${na}건` : `불일치 ${checked.length - ok}건`));
+  });
+
+  rows.push(_row("품질 CIP 역방향 미매칭", res.reverse.length, 0,
+    res.reverse.length === 0 ? R_OK : R_FAIL, `상세는 "${SHEET_CIP_VERIFY}" 시트`));
+
+  if (res.messages.length > 0) rows.push(_row("소스 확인", "", "", R_NA, res.messages.join(" / ")));
+  return rows;
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [D] 유틸
+// ═════════════════════════════════════════════════════════════════════════
+function _cipKey(m, d, key) {
+  return `${m}-${d}|${key}`;
+}
+
+
+function _cipPad(n) {
+  return n < 10 ? "0" + n : String(n);
+}
+
+
+// "9월 1일" / "9/1" / "9.1" / Date → { m, d }
+function _cipParseMonthDay(v) {
+  if (v instanceof Date && !isNaN(v.getTime())) return { m: v.getMonth() + 1, d: v.getDate() };
+  const s = String(v == null ? "" : v).trim();
+  if (!s) return null;
+  let m = s.match(/(\d{1,2})\s*월\s*(\d{1,2})/);
+  if (!m) m = s.match(/(?:^|\D)(\d{1,2})\s*[\/.\-]\s*(\d{1,2})(?!\d)/);
+  if (!m) return null;
+  const mm = parseInt(m[1], 10), dd = parseInt(m[2], 10);
+  if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
+  return { m: mm, d: dd };
+}
+
+
+// 일자 헤더 셀 → 1~31
+function _cipDayNum(v) {
+  if (v instanceof Date && !isNaN(v.getTime())) return v.getDate();
+  if (typeof v === "number") return (v >= 1 && v <= 31) ? Math.round(v) : null;
+  const m = String(v == null ? "" : v).match(/(\d{1,2})/);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  return (n >= 1 && n <= 31) ? n : null;
+}
+
+
+// 업무내용 비교용: 공백 제거 + 대문자
+function _cipNormWork(s) {
+  return String(s == null ? "" : s).replace(/\s+/g, "").toUpperCase();
+}

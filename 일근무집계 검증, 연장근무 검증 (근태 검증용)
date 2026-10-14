@@ -1,10 +1,14 @@
 /**
- * 검증 모듈
- * - 일근무집계 검증 (식수 대조)
- * - 연장근무 검증 (3개 소스 대조)
- * - 검증 결과 시트 생성
+ * 검증 모듈 (검증.gs)
+ * - 식수 검증 : 일근무집계 ↔ X월 근무현황표를 "이름"으로 매칭해 조·중·석·야식 대조
+ *               (인원이 늘거나 줄어도 자동 대응, 석식은 현황표의 석식+연장식과 비교)
+ *               → "식수 검증" 시트 (비고란은 재실행해도 유지)
+ * - 연장근무 검증 : 3개 소스 대조 → "검증 결과" 시트
+ * - 전체 검증 : 식수 + 휴가(휴가검증.gs) + CIP(CIP검증.gs) + 연장근무를 한 번에 → "검증 결과" 요약 시트
  *
- * ※ 기존 파일의 상수·헬퍼(SS_ID_*, SHEET_*, _findSheetByPatterns, _readBlock 등)를 그대로 사용합니다.
+ * ※ Code.gs의 상수·헬퍼(SS_ID_*, SHEET_*, _getWorkStatusSheet, _findSheetByPatterns,
+ *    _readBlock, columnLetterToIndex)와 일근무관리검증.gs의 _readPlanNameRows를 재사용합니다.
+ * ※ _getWorkStatusSheet()는 Code.gs에만 있어야 합니다 (이 파일에서는 제거됨).
  */
 
 // ─── 교통비 지급 정산서 ──────────────────────────────────────────────────
@@ -13,95 +17,503 @@ const SHEET_TRANSPORT_PRODUCT = "제품생산";
 
 // ─── 결과 시트명 ─────────────────────────────────────────────────────────
 const SHEET_VERIFY_RESULT = "검증 결과";
+const SHEET_MEAL_VERIFY   = "식수 검증";
 
-// ─── 식수 검증 좌표 ──────────────────────────────────────────────────────
-// dailyCell: 일근무집계 시트 / statusCells: X월 근무현황표 (여러 개면 합산)
-const MEAL_CHECKS = [
-  { label: "조식", dailyCell: "D17", statusCells: ["BB23"] },
-  { label: "중식", dailyCell: "E17", statusCells: ["BC23"] },
-  { label: "석식", dailyCell: "F17", statusCells: ["BD23", "BG23"] },
-  { label: "야식", dailyCell: "G17", statusCells: ["BE23"] }
+
+// ═════════════════════════════════════════════════════════════════════════
+// 식수 검증 설정
+// ═════════════════════════════════════════════════════════════════════════
+// 일근무집계 (정리 완료 후 기준) — C2부터 이름, C열 첫 공란 직전까지가 인원
+const DW_DATA_START_ROW = 2;
+const DW_COL_NAME       = "C";
+
+// X월 근무현황표 (근태 정산내역) — B8부터 이름, A열에 "합  계"가 나오면 그 전 행까지
+// ※ 이름이 "김 재 방"처럼 글자 사이에 공백이 있으므로 공백 제거 후 비교
+const WS_NAME_START_ROW = 8;
+const WS_COL_NAME       = "B";
+const WS_COL_STOP       = "A";
+const WS_STOP_LABEL     = "합계";   // 공백 제거 후 포함 여부로 판정
+const WS_SCAN_MAX       = 300;      // 안전 상한 (행)
+
+// 식사별 열 매핑 — wsCols가 여러 개면 합산 (석식 = 석식 + 연장식)
+const MEAL_ITEMS = [
+  { label: "조식", dwCol: "D", wsCols: ["BB"] },
+  { label: "중식", dwCol: "E", wsCols: ["BC"] },
+  { label: "석식", dwCol: "F", wsCols: ["BD", "BG"], wsLabel: "석식+연장식" },
+  { label: "야식", dwCol: "G", wsCols: ["BE"] }
 ];
 
-// ─── 연장야근정산 (근태 정산내역) ────────────────────────────────────────
-const OT_SETTLE_SHEET = "연장야근정산";
-const OT_SETTLE_RANGE = { row: 14, col: 3, numRows: 9, numCols: 31 }; // C14:AG22
-const OT_SETTLE_TOKENS = ["연"]; // 정확 일치로 카운트
+// 결과 시트 열 구성: 이름 | (집계·현황표·차이) × 식사 수 | 결과 | 비고
+const MEAL_RESULT_COL = 2 + 3 * MEAL_ITEMS.length;   // 14
+const MEAL_NOTE_COL   = MEAL_RESULT_COL + 1;         // 15
+const MEAL_NCOL       = MEAL_NOTE_COL;
 
-// ─── 근무계획 근무기호 범위 ──────────────────────────────────────────────
-const PLAN_MARK_RANGE = { row: 5, col: 7, numRows: 15, numCols: 31 }; // G5:AK19
+
+// ═════════════════════════════════════════════════════════════════════════
+// 연장근무 검증 설정
+// ═════════════════════════════════════════════════════════════════════════
+// 연장야근정산 (근태 정산내역) — 행 범위는 고정하지 않고 B8부터 A열 "합계" 직전까지의
+// 이름 행 전체 (CIP검증.gs의 _readOtSettleTable 재사용 → 인원 변동 자동 대응)
+const OT_SETTLE_SHEET  = "연장야근정산";
+const OT_SETTLE_TOKENS = ["연"];   // 정확 일치로 카운트
+
+// 근무계획 근무기호 범위 — 행 수는 고정하지 않고 C5부터 A열 "계" 직전까지
+// (일근무관리검증.gs의 _readPlanNameRows 재사용 → 인원 변동 자동 대응)
+const PLAN_MARK_COL_START = 7;    // G
+const PLAN_MARK_COL_END   = 37;   // AK
 // 공백 제거·대문자 변환 후 정확 일치할 때만 카운트
 const PLAN_MARK_REGEX = /^(?:(?:P|B|L)(?:\/교)?|교\/(?:P|B|L))$/;
 
-// ─── 교통비 제품생산 범위 ────────────────────────────────────────────────
-const TRANSPORT_RANGE = { row: 5, col: 5, numRows: 56, numCols: 1 }; // E5:E60 (E:F 병합)
+// 교통비 제품생산 — 5행부터 A열 "합계" 직전(또는 마지막 행)까지, E열(E:F 병합) 업무내용
+const TRANSPORT_DATA_START_ROW = 5;
+const TRANSPORT_COL_NAME = "A";
+const TRANSPORT_COL_WORK = "E";
+const TRANSPORT_SCAN_MAX = 500;
 // 셀 단위 카운트 — 아래 중 하나라도 포함하면 1회
 const TRANSPORT_KEYWORDS = ["제품 생산", "생산", "BTL 생산", "정비", "정비 연장"];
 
-// ─── 연장근무 시트 근무일 열 ─────────────────────────────────────────────
-const COL_WORK_DATE = 4; // D열
+// 연장근무 시트 근무일 열
+const COL_WORK_DATE = 4;   // D열
 
 // ─── 결과 라벨 ───────────────────────────────────────────────────────────
-const R_OK = "✅ 일치";
+const R_OK   = "✅ 일치";
 const R_FAIL = "❌ 불일치";
-const R_NA = "⚠️ 확인불가";
+const R_NA   = "⚠️ 확인불가";
 
 
 // ═════════════════════════════════════════════════════════════════════════
-// [1] 일근무집계 검증
+// [1] 식수 검증 — 일근무집계 ↔ X월 근무현황표
 // ═════════════════════════════════════════════════════════════════════════
 function verifyDailyWorkSheet() {
+  const ui  = SpreadsheetApp.getUi();
   const res = _collectMealVerification();
+  const sheet = _buildMealReport(res);
+  SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(sheet);
 
-  const lines = res.rows.map(r =>
-    `${r.result} ${r.label}\n 일근무집계 ${_fmt(r.base)} / 근무현황표 ${_fmt(r.compare)}` +
-    (r.note ? `\n ${r.note}` : "")
-  );
+  if (res.error) {
+    ui.alert(`⚠️ 식수 검증 실패\n\n${res.error}`);
+    return;
+  }
 
-  const okCount = res.rows.filter(r => r.result === R_OK).length;
-
-  SpreadsheetApp.getUi().alert(
-    `📊 일근무집계 검증\n기준 월: ${res.month ? res.month + "월" : "확인 불가"}\n` +
-    `${okCount} / ${res.rows.length} 항목 일치\n\n` +
-    lines.join("\n\n")
-  );
+  const s = _mealStats(res);
+  let msg =
+    `📊 식수 검증 완료\n\n` +
+    `기준 월: ${res.month}월 / 근무현황표 "${res.statusSheet}"\n` +
+    `일근무집계 ${res.people.length}명 ↔ 현황표 ${res.statusCount}명\n\n` +
+    `${R_OK} ${s.ok}명\n${R_FAIL} ${s.bad}명\n⚠️ 현황표에 이름 없음 ${s.unmatched}명`;
+  if (res.onlyInStatus.length > 0) {
+    msg += `\n⚠️ 현황표에만 있는 이름 ${res.onlyInStatus.length}명 (${res.onlyInStatus.map(p => p.name).join(", ")})`;
+  }
+  msg += `\n\n자세한 내용은 "${SHEET_MEAL_VERIFY}" 시트를 확인하세요.`;
+  ui.alert(msg);
 }
 
 
-function _collectMealVerification() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const daily = ss.getSheetByName(SHEET_DAILY);
+function _mealStats(res) {
+  const ok        = res.people.filter(p => p.matched && p.mismatch === 0).length;
+  const bad       = res.people.filter(p => p.matched && p.mismatch > 0).length;
+  const unmatched = res.people.filter(p => !p.matched).length;
+  return { ok: ok, bad: bad, unmatched: unmatched };
+}
 
-  let status = null, month = null, srcErr = "";
+
+// ─── 데이터 수집 ─────────────────────────────────────────────────────────
+function _collectMealVerification() {
+  const ss  = SpreadsheetApp.getActiveSpreadsheet();
+  const res = { month: null, statusSheet: null, statusCount: 0, error: null,
+                people: [], onlyInStatus: [], totals: [] };
+
+  const daily = ss.getSheetByName(SHEET_DAILY);
+  if (!daily) { res.error = `"${SHEET_DAILY}" 시트 없음`; return res; }
+
+  let status;
   try {
-    const found = _getWorkStatusSheet();
-    status = found.sheet;
-    month = found.month;
+    const f = _getWorkStatusSheet();
+    status = f.sheet;
+    res.month = f.month;
+    res.statusSheet = status.getName();
   } catch (e) {
-    srcErr = e.message;
+    res.error = e.message;
+    return res;
   }
 
-  const rows = MEAL_CHECKS.map(c => {
-    if (!daily) {
-      return _row(c.label, "", "", R_NA, `"${SHEET_DAILY}" 시트 없음`);
-    }
-    if (!status) {
-      return _row(c.label, daily.getRange(c.dailyCell).getValue(), "", R_NA, srcErr);
-    }
+  const dwRows = _readDailyMealRows(daily);
+  if (dwRows.length === 0) {
+    res.error = `"${SHEET_DAILY}" 시트 ${DW_COL_NAME}${DW_DATA_START_ROW}부터 이름이 없습니다 (정리를 먼저 실행했는지 확인)`;
+    return res;
+  }
 
-    const base = _num(daily.getRange(c.dailyCell).getValue());
+  const wsRows = _readStatusMealRows(status);
+  res.statusCount = wsRows.length;
+  if (wsRows.length === 0) {
+    res.error = `"${res.statusSheet}" 시트 ${WS_COL_NAME}${WS_NAME_START_ROW}부터 이름이 없습니다`;
+    return res;
+  }
 
-    let compare = 0;
-    c.statusCells.forEach(addr => { compare += _num(status.getRange(addr).getValue()); });
+  // 이름(공백 제거) → 현황표 행  (중복 이름이면 첫 행 사용)
+  const wsMap = {};
+  wsRows.forEach(w => { if (!(w.key in wsMap)) wsMap[w.key] = w; });
+  const used = {};
 
-    const note = c.statusCells.length > 1
-      ? `${c.dailyCell} ↔ ${c.statusCells.join(" + ")}`
-      : `${c.dailyCell} ↔ ${c.statusCells[0]}`;
+  dwRows.forEach(d => {
+    const w = wsMap[d.key] || null;
+    if (w) used[d.key] = true;
 
-    return _row(c.label, base, compare, base === compare ? R_OK : R_FAIL, note);
+    const p = { name: d.name, key: d.key, dwRow: d.row,
+                wsRow: w ? w.row : null, matched: !!w, mismatch: 0, meals: [] };
+
+    MEAL_ITEMS.forEach((m, i) => {
+      const base = d.meals[i];
+      const cmp  = w ? w.meals[i] : null;
+      const diff = w ? base - cmp : null;
+      if (w && diff !== 0) p.mismatch++;
+      p.meals.push({ label: m.label, base: base, compare: cmp, diff: diff });
+    });
+    res.people.push(p);
   });
 
-  return { rows: rows, month: month };
+  res.onlyInStatus = wsRows.filter(w => !used[w.key]);
+
+  // 합계: 집계 전체 ↔ 현황표 전체 (매칭 여부와 무관하게 시트 전체 합)
+  res.totals = MEAL_ITEMS.map((m, i) => {
+    let b = 0, c = 0;
+    dwRows.forEach(d => { b += d.meals[i]; });
+    wsRows.forEach(w => { c += w.meals[i]; });
+    return { label: m.label, base: b, compare: c, diff: b - c,
+             note: `집계 ${m.dwCol}열 합 ↔ 현황표 ${m.wsCols.join("+")}열 합` };
+  });
+
+  Logger.log(`식수 검증: 집계 ${dwRows.length}명 / 현황표 ${wsRows.length}명 / ` +
+             `현황표에만 ${res.onlyInStatus.length}명`);
+  return res;
+}
+
+
+// ─── 일근무집계: C2부터 첫 공란 직전까지 ─────────────────────────────────
+function _readDailyMealRows(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < DW_DATA_START_ROW) return [];
+
+  const nameCol  = columnLetterToIndex(DW_COL_NAME);
+  const mealCols = MEAL_ITEMS.map(m => columnLetterToIndex(m.dwCol));
+  const maxCol   = Math.max(nameCol, Math.max.apply(null, mealCols));
+
+  const vals = _readBlock(sheet, DW_DATA_START_ROW, 1, lastRow - DW_DATA_START_ROW + 1, maxCol);
+  const rows = [];
+  for (let i = 0; i < vals.length; i++) {
+    const raw = vals[i][nameCol - 1];
+    const key = _normName(raw);
+    if (!key) break;   // 첫 공란 = 합계 행 → 종료
+    rows.push({
+      row: DW_DATA_START_ROW + i,
+      name: String(raw).trim(),
+      key: key,
+      meals: mealCols.map(c => _num(vals[i][c - 1]))
+    });
+  }
+  return rows;
+}
+
+
+// ─── 근무현황표: B8부터 A열 "합  계" 직전까지 ────────────────────────────
+function _readStatusMealRows(sheet) {
+  const lastRow = Math.min(sheet.getLastRow(), WS_NAME_START_ROW + WS_SCAN_MAX);
+  if (lastRow < WS_NAME_START_ROW) return [];
+
+  const nameCol = columnLetterToIndex(WS_COL_NAME);
+  const stopCol = columnLetterToIndex(WS_COL_STOP);
+  const mealColSets = MEAL_ITEMS.map(m => m.wsCols.map(columnLetterToIndex));
+  const allCols = mealColSets.reduce((acc, set) => acc.concat(set), [nameCol, stopCol]);
+  const maxCol  = Math.max.apply(null, allCols);
+
+  const vals = _readBlock(sheet, WS_NAME_START_ROW, 1, lastRow - WS_NAME_START_ROW + 1, maxCol);
+  const rows = [];
+  for (let i = 0; i < vals.length; i++) {
+    const stop = _normName(vals[i][stopCol - 1]);
+    if (stop.indexOf(WS_STOP_LABEL) !== -1) break;   // "합  계" 행 → 종료
+
+    const raw = vals[i][nameCol - 1];
+    const key = _normName(raw);
+    if (!key) continue;   // 이름 없는 행은 건너뜀
+
+    rows.push({
+      row: WS_NAME_START_ROW + i,
+      name: String(raw).replace(/\s+/g, " ").trim(),
+      key: key,
+      meals: mealColSets.map(set => set.reduce((s, c) => s + _num(vals[i][c - 1]), 0))
+    });
+  }
+  return rows;
+}
+
+
+// 이름 비교용 정규화: 모든 공백(전각 공백 포함) 제거
+function _normName(v) {
+  return String(v == null ? "" : v).replace(/[\s\u3000]+/g, "");
+}
+
+
+// ─── 기존 비고 읽기 (재실행 시 보존) ─────────────────────────────────────
+function _readExistingNotes(sheet) {
+  const notes = {};
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow < 1 || lastCol < MEAL_NOTE_COL) return notes;
+
+  const vals = sheet.getRange(1, 1, lastRow, MEAL_NOTE_COL).getValues();
+  vals.forEach(r => {
+    const key  = _normName(r[0]);
+    const note = String(r[MEAL_NOTE_COL - 1] == null ? "" : r[MEAL_NOTE_COL - 1]).trim();
+    if (key && note && key !== "이름") notes[key] = note;
+  });
+  return notes;
+}
+
+
+// ─── 결과 시트 작성 ──────────────────────────────────────────────────────
+function _buildMealReport(res) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_MEAL_VERIFY);
+
+  const notes = sheet ? _readExistingNotes(sheet) : {};
+
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_MEAL_VERIFY);
+  } else {
+    sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).breakApart();
+    sheet.clear();
+    sheet.setFrozenRows(0);
+    sheet.setFrozenColumns(0);
+  }
+
+  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
+  const data = [];
+  const meta = [];
+  const push  = (row, type) => { data.push(row); meta.push(type); };
+  const blankRow = () => new Array(MEAL_NCOL).fill("");
+  const line = (text, type) => { const r = blankRow(); r[0] = text; push(r, type); };
+
+  line("식수 검증 결과 (일근무집계 ↔ X월 근무현황표)", "title");
+
+  if (res.error) {
+    line(`실행 ${stamp}`, "sub");
+    line(`⚠️ ${res.error}`, "summary");
+    sheet.getRange(1, 1, data.length, MEAL_NCOL).setValues(data);
+    _styleMealReport(sheet, data, meta, 0);
+    return sheet;
+  }
+
+  const s = _mealStats(res);
+  line(`기준 ${res.month}월 · 근무현황표 "${res.statusSheet}" · ` +
+       `일근무집계 ${res.people.length}명 ↔ 현황표 ${res.statusCount}명 · 실행 ${stamp}`, "sub");
+
+  let summary = `${R_OK} ${s.ok}명 · ${R_FAIL} ${s.bad}명 · ⚠️ 현황표에 이름 없음 ${s.unmatched}명`;
+  if (res.onlyInStatus.length > 0) summary += ` · ⚠️ 현황표에만 있는 이름 ${res.onlyInStatus.length}명`;
+  line(summary, (s.bad + s.unmatched + res.onlyInStatus.length) === 0 ? "ok" : "summary");
+  line("석식은 현황표의 석식 + 연장식 합계와 비교합니다. 차이 사유는 맨 오른쪽 '비고'에 적어 두면 재실행해도 유지됩니다.", "note");
+  push(blankRow(), "blank");
+
+  // ── 그룹 헤더 + 소헤더 ───────────────────────────────────────────────
+  const g = blankRow(); g[0] = "이름";
+  const h = blankRow(); h[0] = "이름";
+  MEAL_ITEMS.forEach((m, i) => {
+    const c = 2 + 3 * i;
+    g[c - 1] = m.wsLabel ? `${m.label} (현황표 = ${m.wsLabel})` : m.label;
+    h[c - 1] = "집계";
+    h[c]     = "현황표";
+    h[c + 1] = "차이";
+  });
+  g[MEAL_RESULT_COL - 1] = "결과"; g[MEAL_NOTE_COL - 1] = "비고";
+  h[MEAL_RESULT_COL - 1] = "결과"; h[MEAL_NOTE_COL - 1] = "비고";
+  push(g, "ghead");
+  push(h, "head");
+  const headRow = data.length;
+
+  // ── 인원별 행 ────────────────────────────────────────────────────────
+  res.people.forEach(p => {
+    const r = blankRow();
+    r[0] = p.name;
+    p.meals.forEach((m, i) => {
+      const c = 2 + 3 * i;
+      r[c - 1] = m.base;
+      r[c]     = p.matched ? m.compare : "";
+      r[c + 1] = p.matched ? m.diff : "";
+    });
+    let type, label;
+    if (!p.matched)            { type = "na";   label = "⚠️ 현황표에 이름 없음"; }
+    else if (p.mismatch === 0) { type = "ok";   label = R_OK; }
+    else                       { type = "fail"; label = `${R_FAIL} ${p.mismatch}건`; }
+    r[MEAL_RESULT_COL - 1] = label;
+    r[MEAL_NOTE_COL - 1]   = notes[p.key] || "";
+    push(r, "data:" + type);
+  });
+
+  // ── 합계 행 ──────────────────────────────────────────────────────────
+  const t = blankRow();
+  t[0] = "합계";
+  let totalBad = 0;
+  res.totals.forEach((m, i) => {
+    const c = 2 + 3 * i;
+    t[c - 1] = m.base; t[c] = m.compare; t[c + 1] = m.diff;
+    if (m.diff !== 0) totalBad++;
+  });
+  t[MEAL_RESULT_COL - 1] = totalBad === 0 ? R_OK : `${R_FAIL} ${totalBad}건`;
+  t[MEAL_NOTE_COL - 1]   = notes["합계"] || "";
+  push(t, "total:" + (totalBad === 0 ? "ok" : "fail"));
+
+  // ── 현황표에만 있는 이름 ─────────────────────────────────────────────
+  if (res.onlyInStatus.length > 0) {
+    push(blankRow(), "blank");
+    line(`근무현황표에만 있는 이름 (일근무집계에 없음) — ${res.onlyInStatus.length}명`, "section");
+    res.onlyInStatus.forEach(w => {
+      const r = blankRow();
+      r[0] = w.name;
+      w.meals.forEach((v, i) => { r[2 + 3 * i] = v; });   // 현황표 칸에만 표시
+      r[MEAL_RESULT_COL - 1] = "⚠️ 집계에 이름 없음";
+      r[MEAL_NOTE_COL - 1]   = notes[w.key] || "";
+      push(r, "data:na");
+    });
+  }
+
+  sheet.getRange(1, 1, data.length, MEAL_NCOL).setValues(data);
+  _styleMealReport(sheet, data, meta, headRow);
+  return sheet;
+}
+
+
+// ─── 식수 검증 시트 서식 ─────────────────────────────────────────────────
+function _styleMealReport(sheet, data, meta, headRow) {
+  const N = MEAL_NCOL;
+
+  sheet.setColumnWidth(1, 90);
+  for (let i = 0; i < MEAL_ITEMS.length; i++) {
+    const c = 2 + 3 * i;
+    sheet.setColumnWidth(c, 62);
+    sheet.setColumnWidth(c + 1, 70);
+    sheet.setColumnWidth(c + 2, 62);
+  }
+  sheet.setColumnWidth(MEAL_RESULT_COL, 170);
+  sheet.setColumnWidth(MEAL_NOTE_COL, 320);
+
+  sheet.getRange(1, 1, data.length, N)
+    .setFontFamily("Noto Sans KR")
+    .setVerticalAlignment("middle");
+
+  const BG = { ok: "#eaf5ea", fail: "#fdeaea", na: "#fff6e5" };
+  const FC = { ok: "#1e6b34", fail: "#a61b1b", na: "#8a6100" };
+
+  meta.forEach((type, i) => {
+    const r = i + 1;
+    const full = sheet.getRange(r, 1, 1, N);
+
+    if (type === "title") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(16).setFontWeight("bold")
+        .setFontColor("#ffffff").setBackground("#1f3864")
+        .setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 40);
+
+    } else if (type === "sub") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(10).setFontColor("#ffffff").setBackground("#2e5496")
+        .setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 26);
+
+    } else if (type === "summary" || type === "ok") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(11).setFontWeight("bold")
+        .setBackground(type === "ok" ? BG.ok : BG.fail)
+        .setFontColor(type === "ok" ? FC.ok : FC.fail)
+        .setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 30);
+
+    } else if (type === "note") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(9).setFontColor("#666666").setFontStyle("italic")
+        .setBackground("#f7f9fc").setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 22);
+
+    } else if (type === "section") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(11).setFontWeight("bold")
+        .setFontColor("#ffffff").setBackground("#4472c4")
+        .setHorizontalAlignment("left");
+      sheet.setRowHeight(r, 28);
+
+    } else if (type === "ghead") {
+      full.setFontWeight("bold").setBackground("#c5d3ea")
+        .setHorizontalAlignment("center")
+        .setBorder(true, true, true, true, true, true, "#8ea9db", SpreadsheetApp.BorderStyle.SOLID);
+      // 식사별 3칸 병합
+      for (let k = 0; k < MEAL_ITEMS.length; k++) {
+        sheet.getRange(r, 2 + 3 * k, 1, 3).merge();
+      }
+      sheet.setRowHeight(r, 26);
+
+    } else if (type === "head") {
+      full.setFontWeight("bold").setBackground("#d9e1f2")
+        .setHorizontalAlignment("center")
+        .setBorder(true, true, true, true, true, true, "#8ea9db", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.setRowHeight(r, 26);
+
+    } else if (type.indexOf("data:") === 0 || type.indexOf("total:") === 0) {
+      const isTotal = type.indexOf("total:") === 0;
+      const kind = type.split(":")[1];
+      full.setBackground(BG[kind])
+        .setBorder(true, true, true, true, true, true, "#c9d4e8", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.getRange(r, 1, 1, N - 1).setHorizontalAlignment("center");
+      sheet.getRange(r, MEAL_RESULT_COL).setFontWeight("bold").setFontColor(FC[kind]);
+
+      // 차이가 0이 아닌 칸 강조
+      for (let k = 0; k < MEAL_ITEMS.length; k++) {
+        const diffCol = 4 + 3 * k;
+        const v = data[i][diffCol - 1];
+        if (typeof v === "number" && v !== 0) {
+          sheet.getRange(r, diffCol).setFontWeight("bold").setFontColor("#a61b1b").setBackground("#f9d0d0");
+        }
+      }
+
+      // 비고란: 입력 가능 표시 (연노랑 · 왼쪽 정렬 · 줄바꿈)
+      sheet.getRange(r, MEAL_NOTE_COL)
+        .setBackground("#fffbe6").setHorizontalAlignment("left")
+        .setFontColor("#333333").setFontWeight("normal").setWrap(true);
+
+      if (isTotal) {
+        sheet.getRange(r, 1, 1, N).setFontWeight("bold");
+        sheet.getRange(r, MEAL_NOTE_COL).setFontWeight("normal");
+        sheet.setRowHeight(r, 28);
+      } else {
+        sheet.setRowHeight(r, 24);
+      }
+
+    } else {
+      sheet.setRowHeight(r, 10);
+    }
+  });
+
+  // ※ 열 고정은 하지 않음 — 제목 행이 전체 열에 걸쳐 병합돼 있어 열 고정 시 예외 발생
+  if (headRow > 0) sheet.setFrozenRows(headRow);
+  sheet.setHiddenGridlines(true);
+}
+
+
+// 전체 검증 결과 시트용 요약 행
+function _mealSummaryRows(res) {
+  if (res.error) return [_row("식수 검증", "", "", R_NA, res.error)];
+
+  const rows = res.totals.map(t =>
+    _row(`${t.label} 합계`, t.base, t.compare, t.diff === 0 ? R_OK : R_FAIL, t.note)
+  );
+
+  const s = _mealStats(res);
+  const matched = res.people.length - s.unmatched;
+  const nameOk  = s.unmatched === 0 && res.onlyInStatus.length === 0;
+  rows.push(_row("이름 매칭", matched, res.people.length, nameOk ? R_OK : R_FAIL,
+    nameOk ? "집계·현황표 이름 모두 일치"
+           : `현황표에 없음 ${s.unmatched}명 / 현황표에만 있음 ${res.onlyInStatus.length}명`));
+  rows.push(_row("개인별 불일치 인원", s.bad, 0, s.bad === 0 ? R_OK : R_FAIL,
+    `개인별 상세는 "${SHEET_MEAL_VERIFY}" 시트`));
+  return rows;
 }
 
 
@@ -112,8 +524,8 @@ function verifyOvertimeReport() {
   const res = _collectOvertimeVerification();
 
   const lines = res.rows.map(r =>
-    `${r.result} ${r.label}\n 연장근무 시트 ${_fmt(r.base)}건 / 대상 ${_fmt(r.compare)}건` +
-    (r.note ? `\n ${r.note}` : "")
+    `${r.result}  ${r.label}\n   연장근무 시트 ${_fmt(r.base)}건 / 대상 ${_fmt(r.compare)}건` +
+    (r.note ? `\n   ${r.note}` : "")
   );
 
   const okCount = res.rows.filter(r => r.result === R_OK).length;
@@ -128,7 +540,6 @@ function verifyOvertimeReport() {
 
 
 function _collectOvertimeVerification() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
   const rows = [];
 
   // ── 기준값: 연장근무통합결과보고 계산용 D열 근무일 수 ──────────────────
@@ -147,27 +558,33 @@ function _collectOvertimeVerification() {
     monthErr = e.message;
   }
 
-  // ── (1) 근태 정산내역 — 연장야근정산 "연" 개수 ─────────────────────────
+  // ── (1) 근태 정산내역 — 연장야근정산 "연" 개수 (이름 행 전체, 인원 자동) ──
+  let settleNote = `연장야근정산 이름 행 × ${OTS_DAY_COL_START}:${OTS_DAY_COL_END} 中 "${OT_SETTLE_TOKENS.join(", ")}"`;
   rows.push(_compareCount(
     "근태 정산내역 검증",
     baseCount, baseErr,
     () => {
       const att = SpreadsheetApp.openById(SS_ID_ATTENDANCE);
-      const sh = att.getSheetByName(OT_SETTLE_SHEET);
+      const sh  = att.getSheetByName(OT_SETTLE_SHEET);
       if (!sh) throw new Error(`"${OT_SETTLE_SHEET}" 시트 없음`);
 
-      const vals = _readBlock(sh, OT_SETTLE_RANGE.row, OT_SETTLE_RANGE.col,
-                              OT_SETTLE_RANGE.numRows, OT_SETTLE_RANGE.numCols);
+      const t = _readOtSettleTable(sh);
+      if (t.count === 0) throw new Error(`"${OT_SETTLE_SHEET}" ${OTS_NAME_COL}${OTS_NAME_START_ROW}부터 이름 없음`);
+
       let n = 0;
-      vals.forEach(r => r.forEach(v => {
+      t.marks.forEach(r => r.forEach(v => {
         if (OT_SETTLE_TOKENS.indexOf(String(v).trim()) !== -1) n++;
       }));
+      settleNote = `연장야근정산 ${OTS_DAY_COL_START}${t.startRow}:${OTS_DAY_COL_END}${t.startRow + t.count - 1} ` +
+                   `(${t.names.length}명) 中 "${OT_SETTLE_TOKENS.join(", ")}"`;
       return n;
     },
-    `연장야근정산 C14:AG22 中 "${OT_SETTLE_TOKENS.join(", ")}"`
+    null
   ));
+  rows[rows.length - 1].note = rows[rows.length - 1].note || settleNote;
 
-  // ── (2) 근무계획 — 근무기호 개수 ───────────────────────────────────────
+  // ── (2) 근무계획 — 근무기호 개수 (행 수는 "계" 직전까지 자동) ──────────
+  let planNote = "G5:AK?? 中 P / B / L (교육 병기 포함)";
   rows.push(_compareCount(
     "근무계획 검증",
     baseCount, baseErr,
@@ -176,22 +593,29 @@ function _collectOvertimeVerification() {
 
       const plan = SpreadsheetApp.openById(SS_ID_WORK_PLAN);
       const sh = _findSheetByPatterns(plan, [`${month}월`],
-                                      new RegExp(`(^|[^0-9])${month}\\s*월`));
+        new RegExp(`(^|[^0-9])${month}\\s*월`));
       if (!sh) throw new Error(`"${month}월" 시트 없음`);
 
-      const vals = _readBlock(sh, PLAN_MARK_RANGE.row, PLAN_MARK_RANGE.col,
-                              PLAN_MARK_RANGE.numRows, PLAN_MARK_RANGE.numCols);
+      const nameRows = _readPlanNameRows(sh);
+      if (nameRows.count === 0) throw new Error(`"${sh.getName()}" 시트에서 이름 행을 찾지 못했습니다`);
+
+      const numCols = PLAN_MARK_COL_END - PLAN_MARK_COL_START + 1;
+      const vals = _readBlock(sh, nameRows.startRow, PLAN_MARK_COL_START, nameRows.count, numCols);
       let n = 0;
       vals.forEach(r => r.forEach(v => {
         const s = String(v).toUpperCase().replace(/\s+/g, "");
         if (s && PLAN_MARK_REGEX.test(s)) n++;
       }));
+      planNote = `G${nameRows.startRow}:AK${nameRows.startRow + nameRows.count - 1} ` +
+                 `(${nameRows.count}명) 中 P / B / L (교육 병기 포함)`;
       return n;
     },
-    "G5:AK19 中 P / B / L (교육 병기 포함)"
+    null
   ));
+  rows[rows.length - 1].note = rows[rows.length - 1].note || planNote;
 
-  // ── (3) 교통비 지급 정산서 — 제품생산 시트 ─────────────────────────────
+  // ── (3) 교통비 지급 정산서 — 제품생산 시트 (행 범위 자동) ───────────────
+  let transportNote = `제품생산 ${TRANSPORT_COL_WORK}${TRANSPORT_DATA_START_ROW}~ (셀 단위 1회 카운트)`;
   rows.push(_compareCount(
     "교통비 지급 정산서 검증",
     baseCount, baseErr,
@@ -200,19 +624,28 @@ function _collectOvertimeVerification() {
       const sh = tr.getSheetByName(SHEET_TRANSPORT_PRODUCT);
       if (!sh) throw new Error(`"${SHEET_TRANSPORT_PRODUCT}" 시트 없음`);
 
-      const vals = _readBlock(sh, TRANSPORT_RANGE.row, TRANSPORT_RANGE.col,
-                              TRANSPORT_RANGE.numRows, TRANSPORT_RANGE.numCols);
-      let n = 0;
-      vals.forEach(r => {
-        const s = String(r[0]).replace(/\s+/g, " ").trim();
-        if (!s) return;
+      const nameCol = columnLetterToIndex(TRANSPORT_COL_NAME);
+      const workCol = columnLetterToIndex(TRANSPORT_COL_WORK);
+      const lastRow = Math.min(sh.getLastRow(), TRANSPORT_DATA_START_ROW + TRANSPORT_SCAN_MAX);
+      if (lastRow < TRANSPORT_DATA_START_ROW) return 0;
+
+      const vals = _readBlock(sh, TRANSPORT_DATA_START_ROW, 1,
+                              lastRow - TRANSPORT_DATA_START_ROW + 1, Math.max(nameCol, workCol));
+      let n = 0, endRow = TRANSPORT_DATA_START_ROW - 1;
+      for (let i = 0; i < vals.length; i++) {
+        if (_lvIsTotalLabel(vals[i][nameCol - 1])) break;   // A열 "합계" → 표 끝
+        endRow = TRANSPORT_DATA_START_ROW + i;
+        const s = String(vals[i][workCol - 1] == null ? "" : vals[i][workCol - 1]).replace(/\s+/g, " ").trim();
+        if (!s) continue;
         // 키워드가 여러 개 걸려도 셀 단위로 1회만 카운트
         if (TRANSPORT_KEYWORDS.some(k => s.indexOf(k.replace(/\s+/g, " ")) !== -1)) n++;
-      });
+      }
+      transportNote = `제품생산 ${TRANSPORT_COL_WORK}${TRANSPORT_DATA_START_ROW}:${TRANSPORT_COL_WORK}${endRow} (셀 단위 1회 카운트)`;
       return n;
     },
-    "제품생산 E5:E60 (셀 단위 1회 카운트)"
+    null
   ));
+  rows[rows.length - 1].note = rows[rows.length - 1].note || transportNote;
 
   return { rows: rows, month: month, baseCount: baseCount };
 }
@@ -258,24 +691,39 @@ function _compareCount(label, baseCount, baseErr, counterFn, note) {
 // ═════════════════════════════════════════════════════════════════════════
 function runAllVerifications() {
   const meal = _collectMealVerification();
+  _buildMealReport(meal);                 // "식수 검증" 시트 (개인별 상세)
+  const lv = _runLeaveVerification();     // "휴가 검증" 시트 (개인별 상세) — 휴가검증.gs
+  const cp = _runCipVerification();       // "CIP 검증" 시트 (건별 상세) — CIP검증.gs
   const ot = _collectOvertimeVerification();
 
+  const mealRows  = _mealSummaryRows(meal);
+  const leaveRows = _leaveSummaryRows(lv.res);
+  const cipRows   = _cipSummaryRows(cp.res);
   const sections = [
-    { title: "1. 일근무집계 검증 — 식수 인원 대조",
-      subtitle: "일근무집계 17행 ↔ X월 근무현황표 23행",
-      rows: meal.rows },
-    { title: "2. 연장근무 검증 — 연장근무 일수 대조",
+    { title: "1. 식수 검증 — 일근무집계 ↔ X월 근무현황표 (이름 매칭)",
+      subtitle: `개인별 상세·비고는 "${SHEET_MEAL_VERIFY}" 시트 참고` +
+                (meal.statusSheet ? ` · 근무현황표 "${meal.statusSheet}"` : ""),
+      rows: mealRows },
+    { title: "2. 휴가 검증 — 근태시스템 ↔ 근무계획 ↔ 근태 정산내역 (이름 매칭)",
+      subtitle: `개인별 상세·비고는 "${SHEET_LEAVE_VERIFY}" 시트 참고` +
+                (lv.res.planSheet ? ` · 근무계획 "${lv.res.planSheet}"` : "") +
+                (lv.res.attSheet  ? ` · 근태 "${lv.res.attSheet}"` : ""),
+      rows: leaveRows },
+    { title: "3. CIP 검증 — 일근무관리 H61·L11 ↔ 품질 CIP ↔ 연장야근정산 ↔ 근무계획",
+      subtitle: `건별 상세·비고는 "${SHEET_CIP_VERIFY}" 시트 참고`,
+      rows: cipRows },
+    { title: "4. 연장근무 검증 — 연장근무 일수 대조",
       subtitle: `기준값: 연장근무통합결과보고 계산용 D열 ${_fmt(ot.baseCount)}건`,
       rows: ot.rows }
   ];
 
-  const month = meal.month || ot.month;
+  const month = meal.month || lv.res.month || ot.month;
   const sheet = _buildVerifyReport(month, sections);
 
-  const all = meal.rows.concat(ot.rows);
-  const ok = all.filter(r => r.result === R_OK).length;
+  const all  = mealRows.concat(leaveRows, cipRows, ot.rows);
+  const ok   = all.filter(r => r.result === R_OK).length;
   const fail = all.filter(r => r.result === R_FAIL).length;
-  const na = all.filter(r => r.result === R_NA).length;
+  const na   = all.filter(r => r.result === R_NA).length;
 
   SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(sheet);
 
@@ -283,7 +731,8 @@ function runAllVerifications() {
     `📋 전체 검증 완료\n\n` +
     `기준 월: ${month ? month + "월" : "확인 불가"}\n\n` +
     `${R_OK} ${ok}건\n${R_FAIL} ${fail}건\n${R_NA} ${na}건\n\n` +
-    `자세한 내용은 "${SHEET_VERIFY_RESULT}" 시트를 확인하세요.`
+    `요약은 "${SHEET_VERIFY_RESULT}" 시트,\n` +
+    `상세는 "${SHEET_MEAL_VERIFY}" · "${SHEET_LEAVE_VERIFY}" · "${SHEET_CIP_VERIFY}" 시트를 확인하세요.`
   );
 }
 
@@ -300,23 +749,23 @@ function _buildVerifyReport(month, sections) {
     sheet.clear();
   }
 
-  const NCOL = 6;
+  const NCOL  = 6;
   const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
 
-  const all = sections.reduce((acc, s) => acc.concat(s.rows), []);
-  const ok = all.filter(r => r.result === R_OK).length;
+  const all  = sections.reduce((acc, s) => acc.concat(s.rows), []);
+  const ok   = all.filter(r => r.result === R_OK).length;
   const fail = all.filter(r => r.result === R_FAIL).length;
-  const na = all.filter(r => r.result === R_NA).length;
+  const na   = all.filter(r => r.result === R_NA).length;
 
   const data = [];
   const meta = [];
 
-  const push = (row, type) => { data.push(row); meta.push(type); };
+  const push  = (row, type) => { data.push(row); meta.push(type); };
   const blank = () => push(["", "", "", "", "", ""], "blank");
 
   push(["검증 결과 보고서", "", "", "", "", ""], "title");
-  push([`기준 월 ${month ? month + "월" : "확인 불가"} 실행 ${stamp}`, "", "", "", "", ""], "sub");
-  push([`${R_OK} ${ok}건 ${R_FAIL} ${fail}건 ${R_NA} ${na}건`, "", "", "", "", ""], "summary");
+  push([`기준 월 ${month ? month + "월" : "확인 불가"}   실행 ${stamp}`, "", "", "", "", ""], "sub");
+  push([`${R_OK} ${ok}건    ${R_FAIL} ${fail}건    ${R_NA} ${na}건`, "", "", "", "", ""], "summary");
   blank();
 
   sections.forEach(sec => {
@@ -391,10 +840,10 @@ function _buildVerifyReport(month, sections) {
 
     } else if (type.indexOf("data:") === 0) {
       const result = type.slice(5);
-      const bg = result === R_OK ? "#eaf5ea"
+      const bg = result === R_OK   ? "#eaf5ea"
                : result === R_FAIL ? "#fdeaea"
                : "#fff6e5";
-      const fc = result === R_OK ? "#1e6b34"
+      const fc = result === R_OK   ? "#1e6b34"
                : result === R_FAIL ? "#a61b1b"
                : "#8a6100";
 
@@ -420,36 +869,6 @@ function _buildVerifyReport(month, sections) {
 // ═════════════════════════════════════════════════════════════════════════
 // [4] 유틸
 // ═════════════════════════════════════════════════════════════════════════
-
-// X월 근무현황표 시트 + 기준 월을 함께 반환
-// (시트 이름의 X가 그 시트의 Z3에 연동되므로 패턴으로 탐색)
-function _getWorkStatusSheet() {
-  const att = SpreadsheetApp.openById(SS_ID_ATTENDANCE);
-  const candidates = att.getSheets()
-    .filter(s => /(\d{1,2})\s*월\s*근무현황표/.test(s.getName()));
-
-  if (candidates.length === 0) throw new Error("근무현황표 시트를 찾을 수 없습니다");
-
-  // 시트 이름의 월과 Z3 값이 일치하는 것을 우선 채택
-  let chosen = null;
-  for (const s of candidates) {
-    const nameMonth = parseInt(s.getName().match(/(\d{1,2})\s*월/)[1], 10);
-    const cellMonth = _toMonthNumber(s.getRange(MONTH_SOURCE_CELL).getValue());
-    if (cellMonth && cellMonth === nameMonth) { chosen = s; break; }
-  }
-  if (!chosen) {
-    chosen = candidates[0];
-    Logger.log(`[주의] 이름과 ${MONTH_SOURCE_CELL} 값이 일치하는 근무현황표 없음 → "${chosen.getName()}" 사용`);
-  }
-
-  const month = _toMonthNumber(chosen.getRange(MONTH_SOURCE_CELL).getValue());
-  if (!month) throw new Error(`"${chosen.getName()}"의 ${MONTH_SOURCE_CELL} 값이 유효한 월이 아닙니다`);
-
-  Logger.log(`근무현황표: "${chosen.getName()}" / ${MONTH_SOURCE_CELL} = ${month}`);
-  return { sheet: chosen, month: month };
-}
-
-
 function _row(label, base, compare, result, note) {
   return { label: label, base: base, compare: compare, result: result, note: note || "" };
 }

@@ -1,41 +1,47 @@
 /**
  * 근태 데이터 정리 통합 코드 (Code.gs)
- * - 일근무집계 시트 정리
+ * - 일근무집계 시트 정리 (행 고정 없음 · 열 너비 자동 확보)
  * - 연장근무통합결과보고 계산용 시트 처리 (+ 연장사유 분류)
- * - 근태시스템 휴가관리 시트 정리 (+ 만료행 삭제 + 정렬)
- * - 휴가내역 대조 시트로 3개 소스 통합 전송
+ * - 근태시스템 휴가관리 시트 정리 (+ 만료행 삭제 + 정렬 + 휴가 검증)
  *
- * ※ 검증 기능은 별도 파일(검증.gs)에 있으며, 이 파일의 상수·헬퍼를 참조합니다.
+ * ※ 검증 기능은 별도 파일(검증.gs · 휴가검증.gs · CIP검증.gs · 일근무관리검증.gs)에 있으며,
+ *    이 파일의 상수·헬퍼를 참조합니다.
+ * ※ 예전의 "휴가내역 대조" 시트 전송 기능은 휴가검증.gs의 "휴가 검증" 시트로 대체되었습니다.
+ * ※ _getWorkStatusSheet()는 이 파일에만 존재해야 합니다.
  */
 
 // ─── 시트명 ──────────────────────────────────────────────────────────────
 const SHEET_OVERTIME = "연장근무통합결과보고 계산용";
-const SHEET_DAILY = "일근무집계";
-const SHEET_LEAVE = "근태시스템 휴가관리";
-const SHEET_COMPARE = "휴가내역 대조";
+const SHEET_DAILY    = "일근무집계";
+const SHEET_LEAVE    = "근태시스템 휴가관리";
 
 // ─── 외부 스프레드시트 ID ────────────────────────────────────────────────
-const SS_ID_WORK_PLAN = "12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY"; // 생수공장 근무계획
+const SS_ID_WORK_PLAN  = "12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY"; // 생수공장 근무계획
 const SS_ID_ATTENDANCE = "1UjHzUCH3w4eUQuxIZrzOtgeCi4itVUOTXDq7sm8PcvE"; // 생수공장 근태 정산내역
 
 // 기준 월을 담고 있는 셀 (X월 근무현황표 시트의 Z3)
 const MONTH_SOURCE_CELL = "Z3";
 
 // ─── 연장근무 시트 열 인덱스 (열삭제·1행삭제 후 기준) ────────────────────
-const COL_RESULT_TIME = 9; // I열 → 결과시간
-const COL_REASON = 10; // J열 → 신청사유
-const COL_CATEGORY = 11; // K열 → 연장사유 분류
-const DATA_START_ROW = 2;
+const COL_RESULT_TIME = 9;   // I열 → 결과시간
+const COL_REASON      = 10;  // J열 → 신청사유
+const COL_CATEGORY    = 11;  // K열 → 연장사유 분류
+const DATA_START_ROW  = 2;
+
+// ─── 일근무집계 열 너비 (정리 후 글씨가 잘리지 않도록) ───────────────────
+const DAILY_COL_MIN_WIDTH = 110;
+const DAILY_COL_MAX_WIDTH = 320;
+const DAILY_COL_PADDING   = 24;   // 자동맞춤 결과에 더해주는 여유 폭
 
 // ─── 휴가관리 시트 설정 ──────────────────────────────────────────────────
-const LEAVE_DATA_START_ROW = 2; // 헤더가 2행이면 3으로 변경
-const COL_RETIRE_DATE = 12; // L열 = 퇴사일자 (열 삭제 전 기준)
-const EXPIRE_MONTHS = 2; // 사용종료일 + N개월 경과 시 삭제
+const LEAVE_DATA_START_ROW = 2;   // 헤더가 2행이면 3으로 변경
+const COL_RETIRE_DATE      = 12;  // L열 = 퇴사일자 (열 삭제 전 기준)
+const EXPIRE_MONTHS        = 2;   // 사용종료일 + N개월 경과 시 삭제
 
-const HEADER_LEAVE_TYPE = "휴가구분";
-const HEADER_END_DATE = "사용종료일";
+const HEADER_LEAVE_TYPE      = "휴가구분";
+const HEADER_END_DATE        = "사용종료일";
 const FALLBACK_COL_LEAVE_TYPE = 1; // A열
-const FALLBACK_COL_END_DATE = 6; // F열
+const FALLBACK_COL_END_DATE   = 6; // F열
 
 const LEAVE_TYPE_ORDER = ["연차", "월차", "공휴"];
 
@@ -55,44 +61,6 @@ const LEAVE_DELETE_COLS = [
 
 
 // ═════════════════════════════════════════════════════════════════════════
-// 휴가내역 대조 전송 블록 정의 (좌표는 전부 여기서만 관리)
-// ═════════════════════════════════════════════════════════════════════════
-// source: "leave" → 이 파일의 근태시스템 휴가관리 시트
-// "attendance" → 근태 정산내역의 "X월 근태" 시트
-// "workplan" → 근무계획의 "X월" 시트
-const TRANSFER_BLOCKS = [
-  // ── 근태시스템 휴가관리 → C·H열 ─────────────────────────────────────
-  { label: "휴가관리 연차·월차", source: "leave",
-    srcRow: 2, srcCol: 7, numRows: 15, numCols: 6, // G2:L16
-    dstRow: 3, dstCol: 3, // C3:H17
-    expectTypes: ["연차", "월차"] },
-
-  { label: "휴가관리 공휴", source: "leave",
-    srcRow: 17, srcCol: 7, numRows: 15, numCols: 6, // G17:L31
-    dstRow: 21, dstCol: 3, // C21:H35
-    expectTypes: ["공휴"] },
-
-  // ── X월 근태 → L열 ──────────────────────────────────────────────────
-  { label: "근태 Y열(연차·월차)", source: "attendance",
-    srcRow: 7, srcCol: 25, numRows: 15, numCols: 1, // Y7:Y21
-    dstRow: 3, dstCol: 12 }, // L3:L17
-
-  { label: "근태 Z열(공휴)", source: "attendance",
-    srcRow: 7, srcCol: 26, numRows: 15, numCols: 1, // Z7:Z21
-    dstRow: 21, dstCol: 12 }, // L21:L35
-
-  // ── X월 근무계획 → M열 ──────────────────────────────────────────────
-  { label: "근무계획 AP열(연차·월차)", source: "workplan",
-    srcRow: 5, srcCol: 42, numRows: 15, numCols: 1, // AP5:AP19
-    dstRow: 3, dstCol: 13 }, // M3:M17
-
-  { label: "근무계획 AS열(공휴)", source: "workplan",
-    srcRow: 5, srcCol: 45, numRows: 15, numCols: 1, // AS5:AS19
-    dstRow: 21, dstCol: 13 } // M21:M35
-];
-
-
-// ═════════════════════════════════════════════════════════════════════════
 // [A] 일근무집계 시트 정리
 // ═════════════════════════════════════════════════════════════════════════
 function cleanDailyWorkSheet() {
@@ -102,22 +70,41 @@ function cleanDailyWorkSheet() {
     return;
   }
 
+  // 이전 실행에서 남은 행 고정이 있으면 먼저 해제 (붙여넣기 편의)
+  sheet.setFrozenRows(0);
+
   unmergeHeaderRows(sheet);
   sheet.deleteRow(2);
   SpreadsheetApp.flush();
   deleteColumnsByLetters(sheet, DAILY_DELETE_COLS);
 
   const lastCol = sheet.getLastColumn();
-  _styleHeader(sheet, lastCol, true);
-  sheet.autoResizeColumns(1, lastCol);
+  _styleHeader(sheet, lastCol, false);          // ← 행 고정 안 함
+  _fitColumnWidths(sheet, lastCol, DAILY_COL_MIN_WIDTH, DAILY_COL_MAX_WIDTH, DAILY_COL_PADDING);
 
   SpreadsheetApp.getUi().alert(
     "✅ 일근무집계 정리 완료!\n\n" +
     "• 헤더 병합 해제 후 1행으로 통합\n" +
     "• 2행 삭제\n" +
     `• 불필요한 ${DAILY_DELETE_COLS.length}개 열 삭제\n` +
-    `• 남은 열 수: ${lastCol}개`
+    `• 남은 열 수: ${lastCol}개\n` +
+    `• 열 너비 자동 확보 (최소 ${DAILY_COL_MIN_WIDTH}px)\n` +
+    "• 행 고정 없음 (다음 달 데이터 바로 붙여넣기 가능)"
   );
+}
+
+
+// ─── 열 너비: 자동맞춤 후 최소·최대 폭으로 보정 ──────────────────────────
+function _fitColumnWidths(sheet, lastCol, minW, maxW, padding) {
+  if (lastCol < 1) return;
+  sheet.autoResizeColumns(1, lastCol);
+  SpreadsheetApp.flush();
+
+  for (let c = 1; c <= lastCol; c++) {
+    const w = sheet.getColumnWidth(c);
+    const target = Math.min(maxW, Math.max(minW, w + (padding || 0)));
+    if (target !== w) sheet.setColumnWidth(c, target);
+  }
 }
 
 
@@ -131,28 +118,25 @@ function cleanLeaveSheet() {
     return;
   }
 
-  const removedRetire = deleteRetiredRows(sheet);
+  const removedRetire  = deleteRetiredRows(sheet);
   deleteColumnsByLetters(sheet, LEAVE_DELETE_COLS);
   const removedExpired = deleteExpiredLeaveRows(sheet);
-  const sorted = sortLeaveByType(sheet);
+  const sorted         = sortLeaveByType(sheet);
 
   _styleHeader(sheet, sheet.getLastColumn(), true);
 
-  // 마무리: 휴가내역 대조 전송
-  const result = transferToComparisonSheet();
+  // 마무리: 휴가 검증 (휴가검증.gs) → "휴가 검증" 시트 생성
+  const run = _runLeaveVerification();
+  SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(run.sheet);
 
-  let msg =
+  const msg =
     "✅ 휴가관리 시트 정리 완료!\n\n" +
     `• 퇴사자 ${removedRetire}개 행 삭제\n` +
     `• 사용종료일 ${EXPIRE_MONTHS}개월 경과 ${removedExpired}개 행 삭제\n` +
     `• 휴가구분 정렬 완료 (${sorted}개 행)\n` +
     `• 불필요한 ${LEAVE_DELETE_COLS.length}개 열 삭제\n\n` +
-    `📤 휴가내역 대조 전송 (기준 월: ${result.month || "?"}월)\n` +
-    `• 성공 ${result.ok}개 / 실패 ${result.fail}개 블록`;
-
-  if (result.messages.length > 0) {
-    msg += "\n\n⚠️ 확인 필요\n" + result.messages.join("\n");
-  }
+    `🔎 휴가 검증\n${run.summary}\n\n` +
+    `자세한 내용은 "${SHEET_LEAVE_VERIFY}" 시트를 확인하세요.`;
 
   SpreadsheetApp.getUi().alert(msg);
 }
@@ -165,7 +149,7 @@ function deleteRetiredRows(sheet) {
   if (sheet.getMaxColumns() < COL_RETIRE_DATE) return 0;
 
   const numRows = lastRow - LEAVE_DATA_START_ROW + 1;
-  const values = sheet.getRange(LEAVE_DATA_START_ROW, COL_RETIRE_DATE, numRows, 1).getValues();
+  const values  = sheet.getRange(LEAVE_DATA_START_ROW, COL_RETIRE_DATE, numRows, 1).getValues();
 
   const targets = [];
   values.forEach((row, i) => {
@@ -193,7 +177,7 @@ function deleteExpiredLeaveRows(sheet) {
   threshold.setHours(0, 0, 0, 0);
 
   const numRows = lastRow - LEAVE_DATA_START_ROW + 1;
-  const values = sheet.getRange(LEAVE_DATA_START_ROW, col, numRows, 1).getValues();
+  const values  = sheet.getRange(LEAVE_DATA_START_ROW, col, numRows, 1).getValues();
 
   const targets = [];
   values.forEach((row, i) => {
@@ -217,8 +201,8 @@ function sortLeaveByType(sheet) {
   if (!col) return 0;
 
   const numRows = lastRow - LEAVE_DATA_START_ROW + 1;
-  const range = sheet.getRange(LEAVE_DATA_START_ROW, 1, numRows, lastCol);
-  const values = range.getValues();
+  const range   = sheet.getRange(LEAVE_DATA_START_ROW, 1, numRows, lastCol);
+  const values  = range.getValues();
 
   // 원래 순서(idx)를 같이 들고 가서 동일 구분 내 순서 유지 (안정 정렬)
   const decorated = values.map((row, idx) => ({
@@ -238,110 +222,6 @@ function _leaveTypeRank(value) {
     if (v.indexOf(LEAVE_TYPE_ORDER[i]) !== -1) return i;
   }
   return LEAVE_TYPE_ORDER.length;
-}
-
-
-// ═════════════════════════════════════════════════════════════════════════
-// [C] 휴가내역 대조 시트로 통합 전송
-// ═════════════════════════════════════════════════════════════════════════
-function transferToComparisonSheet() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const dst = ss.getSheetByName(SHEET_COMPARE);
-  if (!dst) {
-    SpreadsheetApp.getUi().alert(`"${SHEET_COMPARE}" 시트를 찾을 수 없습니다.`);
-    return { ok: 0, fail: 0, month: null, messages: [] };
-  }
-
-  const messages = [];
-  let ok = 0, fail = 0;
-
-  // ── 1) 기준 월 확인 ──────────────────────────────────────────────────
-  let month = null;
-  try {
-    month = getTargetMonth();
-    Logger.log(`기준 월: ${month}월`);
-  } catch (e) {
-    messages.push(`• 기준 월 확인 실패: ${e.message}`);
-    Logger.log(`기준 월 확인 실패: ${e.message}`);
-  }
-
-  // ── 2) 소스 시트 준비 (실패해도 나머지는 계속 진행) ──────────────────
-  const sources = {};
-
-  sources.leave = ss.getSheetByName(SHEET_LEAVE);
-  if (!sources.leave) messages.push(`• "${SHEET_LEAVE}" 시트 없음`);
-
-  if (month) {
-    try {
-      const att = SpreadsheetApp.openById(SS_ID_ATTENDANCE);
-      sources.attendance = _findSheetByPatterns(att, [
-        `${month}월 근태`, `${month}월근태`
-      ], new RegExp(`^\\s*${month}\\s*월\\s*근태`));
-      if (!sources.attendance) messages.push(`• 근태 정산내역에서 "${month}월 근태" 시트 없음`);
-    } catch (e) {
-      messages.push(`• 근태 정산내역 열기 실패: ${e.message}`);
-    }
-
-    try {
-      const plan = SpreadsheetApp.openById(SS_ID_WORK_PLAN);
-      sources.workplan = _findSheetByPatterns(plan, [
-        `${month}월`
-      ], new RegExp(`(^|[^0-9])${month}\\s*월`));
-      if (!sources.workplan) messages.push(`• 근무계획에서 "${month}월" 시트 없음`);
-    } catch (e) {
-      messages.push(`• 근무계획 열기 실패: ${e.message}`);
-    }
-  }
-
-  // ── 3) 블록별 전송 ───────────────────────────────────────────────────
-  const typeCol = sources.leave
-    ? _findColumnByHeader(sources.leave, HEADER_LEAVE_TYPE, FALLBACK_COL_LEAVE_TYPE)
-    : null;
-
-  TRANSFER_BLOCKS.forEach(b => {
-    const src = sources[b.source];
-    if (!src) { fail++; return; }
-
-    // 블록 경계 검증 (휴가관리 블록만)
-    if (b.expectTypes && typeCol) {
-      const types = _readBlock(src, b.srcRow, typeCol, b.numRows, 1);
-      let mismatch = 0;
-      types.forEach(r => {
-        const v = String(r[0]).trim();
-        if (!v) return;
-        if (!b.expectTypes.some(t => v.indexOf(t) !== -1)) mismatch++;
-      });
-      if (mismatch > 0) {
-        messages.push(`• ${b.label}: 휴가구분 불일치 ${mismatch}행`);
-      }
-    }
-
-    try {
-      const values = _readBlock(src, b.srcRow, b.srcCol, b.numRows, b.numCols);
-      _ensureRowExists(dst, b.dstRow + b.numRows - 1);
-      _ensureColumnExists(dst, b.dstCol + b.numCols - 1);
-      dst.getRange(b.dstRow, b.dstCol, b.numRows, b.numCols).setValues(values);
-      ok++;
-      Logger.log(`${b.label}: ${b.numRows}×${b.numCols} 전송 완료`);
-    } catch (e) {
-      fail++;
-      messages.push(`• ${b.label} 전송 실패: ${e.message}`);
-    }
-  });
-
-  return { ok: ok, fail: fail, month: month, messages: messages };
-}
-
-
-// 개별 실행용 (정리 없이 전송만)
-function transferComparisonOnly() {
-  const r = transferToComparisonSheet();
-  let msg =
-    `✅ 휴가내역 대조 전송 완료!\n\n` +
-    `• 기준 월: ${r.month || "?"}월\n` +
-    `• 성공 ${r.ok}개 / 실패 ${r.fail}개 블록`;
-  if (r.messages.length > 0) msg += "\n\n⚠️ 확인 필요\n" + r.messages.join("\n");
-  SpreadsheetApp.getUi().alert(msg);
 }
 
 
@@ -409,7 +289,7 @@ function deleteRowsByIndexes(sheet, rows) {
 
 
 // ═════════════════════════════════════════════════════════════════════════
-// [D] 연장근무통합결과보고 계용 시트 처리
+// [D] 연장근무통합결과보고 계산용 시트 처리
 // ═════════════════════════════════════════════════════════════════════════
 function processOvertimeReport() {
   const sheet = _getOvertimeSheet();
@@ -469,32 +349,32 @@ const VOLUME_LABELS = {
 // stripExtension: true → "연장" 제거(생산 계열) / false → "연장" 유지(정비·청소 계열)
 // ※ 순서 중요: 좁은 패턴을 넓은 패턴("생산")보다 먼저
 const VOLUME_ACTIVITIES = [
-  { re: /^b\s*t\s*l\s*(?:[\/·,]\s*(?:c\s*a\s*p|캡)\s*)?생\s*산/i, canonical: "{V} BTL 생산", stripExtension: true },
-  { re: /^병\s*생\s*산/, canonical: "{V} BTL 생산", stripExtension: true },
-  { re: /^캔\s*생\s*산/, canonical: "{V} 캔 생산", stripExtension: true },
-  { re: /^충\s*[진전]\s*실\s*정\s*비/, canonical: "{V} 충진실 정비", stripExtension: false },
-  { re: /^충\s*[진전]\s*실\s*청\s*소/, canonical: "{V} 충진실 청소", stripExtension: false },
-  { re: /^충\s*[진전]\s*실\s*세\s*척/, canonical: "{V} 충진실 세척", stripExtension: false },
-  { re: /^(?:제\s*품\s*)?생\s*산/, canonical: "{V} 제품 생산", stripExtension: true }
+  { re: /^b\s*t\s*l\s*(?:[\/·,]\s*(?:c\s*a\s*p|캡)\s*)?생\s*산/i, canonical: "{V} BTL 생산",   stripExtension: true  },
+  { re: /^병\s*생\s*산/,                                           canonical: "{V} BTL 생산",   stripExtension: true  },
+  { re: /^캔\s*생\s*산/,                                           canonical: "{V} 캔 생산",    stripExtension: true  },
+  { re: /^충\s*[진전]\s*실\s*정\s*비/,                             canonical: "{V} 충진실 정비", stripExtension: false },
+  { re: /^충\s*[진전]\s*실\s*청\s*소/,                             canonical: "{V} 충진실 청소", stripExtension: false },
+  { re: /^충\s*[진전]\s*실\s*세\s*척/,                             canonical: "{V} 충진실 세척", stripExtension: false },
+  { re: /^(?:제\s*품\s*)?생\s*산/,                                 canonical: "{V} 제품 생산",  stripExtension: true  }
 ];
 
 // ※ "연장" 포함 패턴을 반드시 먼저 선언
 const FLAT_PATTERNS = [
   { re: /c\s*i\s*p\s*작업\s*연장/i, canonical: "CIP 작업 연장" },
-  { re: /c\s*i\s*p\s*작업/i, canonical: "CIP 작업" },
-  { re: /c\s*i\s*p\s*연장/i, canonical: "CIP 연장" },
-  { re: /c\s*i\s*p/i, canonical: "CIP" },
+  { re: /c\s*i\s*p\s*작업/i,        canonical: "CIP 작업" },
+  { re: /c\s*i\s*p\s*연장/i,        canonical: "CIP 연장" },
+  { re: /c\s*i\s*p/i,               canonical: "CIP" },
 
   { re: /설비\s*보전\s*연장/, canonical: "설비 보전 연장" },
-  { re: /설비\s*보전/, canonical: "설비 보전" },
+  { re: /설비\s*보전/,        canonical: "설비 보전" },
   { re: /설비\s*점검\s*연장/, canonical: "설비 점검 연장" },
-  { re: /설비\s*점검/, canonical: "설비 점검" },
+  { re: /설비\s*점검/,        canonical: "설비 점검" },
 
   { re: /공장\s*청소\s*연장/, canonical: "공장 청소 연장" },
-  { re: /공장\s*청소/, canonical: "공장 청소" },
+  { re: /공장\s*청소/,        canonical: "공장 청소" },
 
   { re: /재고\s*조사\s*연장/, canonical: "재고 조사 연장" },
-  { re: /재고\s*조사/, canonical: "재고 조사" }
+  { re: /재고\s*조사/,        canonical: "재고 조사" }
 ];
 
 
@@ -547,8 +427,8 @@ function matchVolumePattern(text) {
 
 function toVolumeLabel(raw) {
   let s = String(raw);
-  if (/^0\d+$/.test(s)) s = "0." + s.slice(1); // "033" → "0.33"
-  const key = String(parseFloat(s)); // "0.50"→"0.5", "1.0"→"1"
+  if (/^0\d+$/.test(s)) s = "0." + s.slice(1);   // "033" → "0.33"
+  const key = String(parseFloat(s));             // "0.50"→"0.5", "1.0"→"1"
   return VOLUME_LABELS[key] || null;
 }
 
@@ -558,9 +438,9 @@ function toVolumeLabel(raw) {
 // ═════════════════════════════════════════════════════════════════════════
 // ※ 순서 중요: "정비"를 앞에 둬야 복합 표기가 정비로 잡힘
 const REASON_CATEGORIES = [
-  { keywords: ["정비"], label: "정비" },
+  { keywords: ["정비"],      label: "정비" },
   { keywords: ["BTL", "병"], label: "BTL 생산" },
-  { keywords: ["제품"], label: "제품 생산" }
+  { keywords: ["제품"],      label: "제품 생산" }
 ];
 const CATEGORY_FALLBACK = "확인필요";
 
@@ -580,14 +460,14 @@ function classifyReason(reason) {
 function _normalizeAndClassify(sheet, endRow) {
   _ensureColumnExists(sheet, COL_CATEGORY);
 
-  const numRows = endRow - DATA_START_ROW + 1;
+  const numRows     = endRow - DATA_START_ROW + 1;
   const reasonRange = sheet.getRange(DATA_START_ROW, COL_REASON, numRows, 1);
 
   const normalized = [];
   const categories = [];
 
   reasonRange.getValues().forEach(row => {
-    const raw = String(row[0]).trim();
+    const raw  = String(row[0]).trim();
     const norm = raw ? normalizeReason(raw) : raw;
     normalized.push([norm]);
     categories.push([classifyReason(norm)]);
@@ -611,7 +491,7 @@ function convertTimeToDecimal(val) {
 
   const mFull = val.match(/(\d+)\s*시간\s*(\d+)\s*분/);
   if (mFull) {
-    hours = parseInt(mFull[1], 10);
+    hours   = parseInt(mFull[1], 10);
     minutes = parseInt(mFull[2], 10);
   } else {
     const mHour = val.match(/(\d+)\s*시간/);
@@ -666,7 +546,7 @@ function previewNormalizeReason() {
     const before = String(row[0]).trim();
     if (!before) return;
     const after = normalizeReason(before);
-    const cat = classifyReason(after);
+    const cat   = classifyReason(after);
     Logger.log(`${DATA_START_ROW + i}행: "${before}" → "${after}" [${cat}]`);
     if (cat === CATEGORY_FALLBACK) needCheck.push(`${DATA_START_ROW + i}행: ${after}`);
   });
@@ -687,14 +567,14 @@ function checkExternalSources() {
     try {
       const att = SpreadsheetApp.openById(SS_ID_ATTENDANCE);
       const s = _findSheetByPatterns(att, [`${month}월 근태`, `${month}월근태`],
-                                     new RegExp(`^\\s*${month}\\s*월\\s*근태`));
+        new RegExp(`^\\s*${month}\\s*월\\s*근태`));
       lines.push(s ? `✅ 근태 시트: "${s.getName()}"` : `❌ "${month}월 근태" 시트 없음`);
     } catch (e) { lines.push(`❌ 근태 정산내역: ${e.message}`); }
 
     try {
       const plan = SpreadsheetApp.openById(SS_ID_WORK_PLAN);
       const s = _findSheetByPatterns(plan, [`${month}월`],
-                                     new RegExp(`(^|[^0-9])${month}\\s*월`));
+        new RegExp(`(^|[^0-9])${month}\\s*월`));
       lines.push(s ? `✅ 근무계획 시트: "${s.getName()}"` : `❌ "${month}월" 시트 없음`);
       Logger.log(`근무계획 전체 시트: ${plan.getSheets().map(x => x.getName()).join(", ")}`);
     } catch (e) { lines.push(`❌ 근무계획: ${e.message}`); }
@@ -713,7 +593,7 @@ function checkExternalSources() {
 
 // ─── X월 근무현황표 시트 + 기준 월 반환 ──────────────────────────────────
 // 시트 이름의 X가 그 시트의 Z3에 연동되므로 이름으로 직접 찾을 수 없어 패턴 탐색
-// ※ 이 함수는 Code.gs에만 존재해야 합니다 (검증.gs에서는 삭제)
+// ※ 이 함수는 Code.gs에만 존재해야 합니다
 function _getWorkStatusSheet() {
   const att = SpreadsheetApp.openById(SS_ID_ATTENDANCE);
   const candidates = att.getSheets()
@@ -777,12 +657,12 @@ function deleteColumnsByLetters(sheet, letters) {
 
 function unmergeHeaderRows(sheet) {
   const lastCol = sheet.getLastColumn();
-  const merges = sheet.getRange(1, 1, 2, lastCol).getMergedRanges();
+  const merges  = sheet.getRange(1, 1, 2, lastCol).getMergedRanges();
 
   merges.forEach(r => {
-    const value = r.getCell(1, 1).getValue();
+    const value    = r.getCell(1, 1).getValue();
     const startCol = r.getColumn();
-    const numCols = r.getNumColumns();
+    const numCols  = r.getNumColumns();
     r.breakApart();
     sheet.getRange(1, startCol, 1, numCols).setValue(value);
   });
@@ -879,7 +759,7 @@ function _findEndRow(sheet) {
 
 
 function _convertResultTimeRange(sheet, endRow) {
-  const range = sheet.getRange(DATA_START_ROW, COL_RESULT_TIME, endRow - DATA_START_ROW + 1, 1);
+  const range  = sheet.getRange(DATA_START_ROW, COL_RESULT_TIME, endRow - DATA_START_ROW + 1, 1);
   const values = range.getValues();
   let count = 0;
 
@@ -905,8 +785,11 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("🔧 근태 데이터 처리")
     .addItem("🗂 일근무집계 정리", "cleanDailyWorkSheet")
-    .addItem("🏖 휴가관리 정리 (+ 대조 전송)", "cleanLeaveSheet")
-    .addItem("↪️ 휴가내역 대조 전송만", "transferComparisonOnly")
+    .addItem("🍚 식수 검증 (일근무집계 ↔ 근무현황표)", "verifyDailyWorkSheet")
+    .addSeparator()
+    .addItem("🏖 휴가관리 정리 (+ 휴가 검증)", "cleanLeaveSheet")
+    .addItem("🔎 휴가 검증 (근태시스템 ↔ 근무계획 ↔ 정산내역)", "verifyLeaveSheet")
+    .addItem("　└ 휴가관리 열 매핑 미리보기", "previewLeaveColumns")
     .addItem("🔗 외부 소스 점검", "checkExternalSources")
     .addSeparator()
     .addItem("📋 연장근무 전체 처리", "processOvertimeReport")
@@ -917,9 +800,9 @@ function onOpen() {
     .addItem("🧾 일근무관리 정리", "cleanWorkMgmtSheet")
     .addItem("　└ 열 매핑 미리보기(로그)", "previewWorkMgmtHeaders")
     .addItem("🔎 일근무관리 검증", "verifyWorkMgmtSheet")
+    .addItem("🧪 CIP 검증 (일근무관리 ↔ 품질 CIP ↔ 연장야근정산 ↔ 근무계획)", "verifyCipSheet")
     .addSeparator()
-    .addItem("✅ 전체 검증 (결과 시트 생성)", "runAllVerifications")
-    .addItem("　└ 일근무집계 검증", "verifyDailyWorkSheet")
+    .addItem("✅ 전체 검증 (식수·휴가·CIP·연장근무 → 결과 시트)", "runAllVerifications")
     .addItem("　└ 연장근무 검증", "verifyOvertimeReport")
     .addToUi();
 }

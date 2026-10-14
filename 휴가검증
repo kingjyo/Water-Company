@@ -1,0 +1,658 @@
+/**
+ * 휴가 검증 (휴가검증.gs)
+ *
+ * 3개 소스의 잔여휴가·잔여공휴를 "이름"으로 매칭해 대조합니다.
+ *   [1] 근태시스템 휴가관리 (이 파일, 정리 완료 후) — 휴가구분 연차·월차 → 잔여휴가 / 공휴 → 잔여공휴
+ *   [2] 근무계획 "X월" 시트 — C5부터 이름(A열 "계" 직전까지), AP = 잔여휴가, AS = 잔여공휴
+ *   [3] 근태 정산내역 "X월 근태" 시트 — D7부터 이름(A열 "계" 직전까지), Y = 잔여휴가, Z = 잔여공휴
+ *   기준 월: X월 근무현황표의 Z3 (Code.gs getTargetMonth)
+ *
+ * 결과: "휴가 검증" 시트 (인원이 늘거나 줄어도 자동 대응, 비고란은 재실행해도 이름 기준으로 보존)
+ *
+ * ※ 재사용: Code.gs(SS_ID_*, SHEET_LEAVE, LEAVE_DATA_START_ROW, HEADER_LEAVE_TYPE,
+ *    FALLBACK_COL_LEAVE_TYPE, getTargetMonth, _findSheetByPatterns, _readBlock,
+ *    _findColumnByHeader, columnLetterToIndex),
+ *    검증.gs(_normName, _row, R_OK/R_FAIL/R_NA), 일근무관리검증.gs(_readPlanNameRows, PLAN_NAME_COL)
+ */
+
+// ─── 결과 시트명 ─────────────────────────────────────────────────────────
+const SHEET_LEAVE_VERIFY = "휴가 검증";
+
+// ─── [1] 근태시스템 휴가관리 (정리 후) — 열은 헤더 키워드로 탐색 ─────────
+// 헤더에서 못 찾으면 FALLBACK 열 문자(예: "B")를 사용, 그것도 null이면 오류로 알려줌
+// → "휴가관리 열 매핑 미리보기(로그)" 메뉴로 어떤 열이 잡히는지 확인 가능
+const LV_HEADER_NAME_KEYS    = ["이름", "성명", "사원명", "직원명"];
+const LV_HEADER_REMAIN_KEYS  = ["잔여"];
+const LV_FALLBACK_COL_NAME   = null;
+const LV_FALLBACK_COL_REMAIN = null;
+
+// ─── 검증 그룹 (휴가구분 → 근무계획 열 / 정산내역 열) ────────────────────
+// ※ 월차는 연차와 같은 "잔여휴가"로 취급
+const LV_GROUPS = [
+  { key: "leave",   label: "잔여휴가", types: ["연차", "월차"], planCol: "AP", attCol: "Y" },
+  { key: "holiday", label: "잔여공휴", types: ["공휴"],         planCol: "AS", attCol: "Z" }
+];
+
+// ─── [3] 근태 정산내역 "X월 근태" 시트 구조 ─────────────────────────────
+const ATT_NAME_COL       = "D";
+const ATT_NAME_START_ROW = 7;
+const ATT_STOP_COL       = "A";    // 이 열에 "계"가 나오면 표 끝
+const ATT_SCAN_MAX       = 100;
+
+// ─── 소스 정의 (결과 시트 열 순서) ───────────────────────────────────────
+const LV_SOURCES = [
+  { key: "system", label: "근태시스템" },
+  { key: "plan",   label: "근무계획" },
+  { key: "att",    label: "정산내역" }
+];
+
+const LV_EPS = 0.001;   // 소수 비교 허용 오차
+
+// ─── 결과 시트 열 구성: 이름 | (소스 3 + 결과) × 그룹 | 종합 | 비고 ──────
+const LV_GROUP_W     = LV_SOURCES.length + 1;                 // 4
+const LV_OVERALL_COL = 2 + LV_GROUP_W * LV_GROUPS.length;     // 10
+const LV_NOTE_COL    = LV_OVERALL_COL + 1;                    // 11
+const LV_NCOL        = LV_NOTE_COL;
+
+const LV_ST = { ok: "✅", fail: "❌ 불일치", na: "⚠️ 누락" };
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [A] 메뉴 진입
+// ═════════════════════════════════════════════════════════════════════════
+function verifyLeaveSheet() {
+  const ui = SpreadsheetApp.getUi();
+  const run = _runLeaveVerification();
+  SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(run.sheet);
+
+  if (run.res.error) {
+    ui.alert(`⚠️ 휴가 검증 실패\n\n${run.res.error}`);
+    return;
+  }
+  ui.alert(`📊 휴가 검증 완료\n\n${run.summary}\n\n자세한 내용은 "${SHEET_LEAVE_VERIFY}" 시트를 확인하세요.`);
+}
+
+
+// 수집 + 시트 작성 + 요약문 (cleanLeaveSheet, runAllVerifications에서도 사용)
+function _runLeaveVerification() {
+  const res = _collectLeaveVerification();
+  const sheet = _buildLeaveReport(res);
+  return { res: res, sheet: sheet, summary: _leaveSummaryText(res) };
+}
+
+
+function _leaveSummaryText(res) {
+  if (res.error) return `⚠️ ${res.error}`;
+  const c = res.counts;
+  let s =
+    `기준 월: ${res.month}월 · 근무계획 "${res.planSheet || "없음"}" · 근태 "${res.attSheet || "없음"}"\n` +
+    `대상 ${res.people.length}명\n` +
+    `${R_OK} ${c.ok}명 / ${R_FAIL} ${c.fail}명 / ⚠️ 확인필요 ${c.na}명`;
+  if (res.messages.length > 0) s += "\n\n⚠️ 확인 필요\n" + res.messages.map(m => "• " + m).join("\n");
+  return s;
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [B] 데이터 수집
+// ═════════════════════════════════════════════════════════════════════════
+function _collectLeaveVerification() {
+  const ss  = SpreadsheetApp.getActiveSpreadsheet();
+  const res = { month: null, planSheet: null, attSheet: null, error: null,
+                messages: [], people: [], counts: { ok: 0, fail: 0, na: 0 },
+                available: { system: true, plan: false, att: false } };
+
+  const leaveSheet = ss.getSheetByName(SHEET_LEAVE);
+  if (!leaveSheet) { res.error = `"${SHEET_LEAVE}" 시트 없음`; return res; }
+
+  // ── 기준 월 ──────────────────────────────────────────────────────────
+  try {
+    res.month = getTargetMonth();
+  } catch (e) {
+    res.error = `기준 월 확인 실패: ${e.message}`;
+    return res;
+  }
+
+  // ── [1] 근태시스템 휴가관리 ──────────────────────────────────────────
+  let sys;
+  try {
+    sys = _readLeaveSystem(leaveSheet);
+  } catch (e) {
+    res.error = e.message;
+    return res;
+  }
+  if (sys.skipped.length > 0) {
+    res.messages.push(`휴가관리에서 연차·월차·공휴가 아닌 행 ${sys.skipped.length}건 제외 (${sys.skipped.slice(0, 3).join(", ")}${sys.skipped.length > 3 ? " …" : ""})`);
+  }
+
+  // ── [2] 근무계획 X월 ─────────────────────────────────────────────────
+  let plan = null;
+  try {
+    const book = SpreadsheetApp.openById(SS_ID_WORK_PLAN);
+    const sh = _findSheetByPatterns(book, [`${res.month}월`],
+      new RegExp(`(^|[^0-9])${res.month}\\s*월`));
+    if (!sh) throw new Error(`"${res.month}월" 시트 없음`);
+    res.planSheet = sh.getName();
+    plan = _readLeavePlan(sh);
+    res.available.plan = true;
+  } catch (e) {
+    res.messages.push(`근무계획: ${e.message}`);
+  }
+
+  // ── [3] 근태 정산내역 X월 근태 ───────────────────────────────────────
+  let att = null;
+  try {
+    const book = SpreadsheetApp.openById(SS_ID_ATTENDANCE);
+    const sh = _findSheetByPatterns(book, [`${res.month}월 근태`, `${res.month}월근태`],
+      new RegExp(`^\\s*${res.month}\\s*월\\s*근태`));
+    if (!sh) throw new Error(`"${res.month}월 근태" 시트 없음`);
+    res.attSheet = sh.getName();
+    att = _readLeaveAtt(sh);
+    res.available.att = true;
+  } catch (e) {
+    res.messages.push(`근태 정산내역: ${e.message}`);
+  }
+
+  // ── 이름 합집합 (휴가관리 → 근무계획 → 정산내역 순서) ────────────────
+  const order = [];
+  const seen  = {};
+  const addAll = list => list.forEach(p => {
+    if (!seen[p.key]) { seen[p.key] = true; order.push({ key: p.key, name: p.name }); }
+  });
+  addAll(sys.list);
+  if (plan) addAll(plan.list);
+  if (att)  addAll(att.list);
+
+  // ── 인원별 대조 ──────────────────────────────────────────────────────
+  order.forEach(o => {
+    const person = { name: o.name, key: o.key, groups: [], overall: "ok", failCount: 0,
+                     present: { system: !!sys.map[o.key],
+                                plan:   plan ? !!plan.map[o.key] : null,
+                                att:    att  ? !!att.map[o.key]  : null } };
+
+    LV_GROUPS.forEach(g => {
+      // undefined = 소스 시트 자체가 없음 / null = 시트는 있지만 이 사람·구분 행 없음
+      const vals = {
+        system: sys.map[o.key] && sys.map[o.key].rows[g.key] ? sys.map[o.key].rows[g.key].sum : null,
+        plan:   plan ? (plan.map[o.key] ? plan.map[o.key][g.key] : null) : undefined,
+        att:    att  ? (att.map[o.key]  ? att.map[o.key][g.key]  : null) : undefined
+      };
+
+      const avail = LV_SOURCES.map(s => vals[s.key]).filter(v => v !== undefined);
+      const nums  = avail.map(v => v === null ? 0 : v);
+      let status = "ok";
+      for (let i = 1; i < nums.length; i++) {
+        if (Math.abs(nums[i] - nums[0]) > LV_EPS) { status = "fail"; break; }
+      }
+      if (status === "ok" && avail.length < LV_SOURCES.length) status = "na";
+
+      const notes = [];
+      if (sys.map[o.key] && sys.map[o.key].rows[g.key] && sys.map[o.key].rows[g.key].count > 1) {
+        notes.push(`휴가관리 ${g.label} 행 ${sys.map[o.key].rows[g.key].count}개 합산`);
+      }
+
+      if (status === "fail") person.failCount++;
+      person.groups.push({ key: g.key, label: g.label, vals: vals, status: status, notes: notes });
+    });
+
+    // 어느 소스에 이름이 없는지 (전체 누락 → 확인필요)
+    const missing = LV_SOURCES.filter(s => person.present[s.key] === false).map(s => s.label);
+    person.missing = missing;
+
+    if (person.failCount > 0)                 person.overall = "fail";
+    else if (missing.length > 0 ||
+             person.groups.some(g => g.status === "na")) person.overall = "na";
+    else                                      person.overall = "ok";
+
+    res.counts[person.overall]++;
+    res.people.push(person);
+  });
+
+  Logger.log(`휴가 검증: 대상 ${res.people.length}명 / 일치 ${res.counts.ok} / 불일치 ${res.counts.fail} / 확인필요 ${res.counts.na}`);
+  return res;
+}
+
+
+// ─── [1] 휴가관리 시트 읽기 ──────────────────────────────────────────────
+function _readLeaveSystem(sheet) {
+  const cols = _leaveSystemColumns(sheet);
+  const missing = [];
+  if (!cols.type)   missing.push(`휴가구분("${HEADER_LEAVE_TYPE}")`);
+  if (!cols.name)   missing.push(`이름(${LV_HEADER_NAME_KEYS.join("/")})`);
+  if (!cols.remain) missing.push(`잔여(${LV_HEADER_REMAIN_KEYS.join("/")})`);
+  if (missing.length > 0) {
+    throw new Error(`"${SHEET_LEAVE}" 헤더에서 ${missing.join(", ")} 열을 찾지 못했습니다.\n` +
+                    `현재 헤더: ${_leaveHeaders(sheet).join(" | ")}\n` +
+                    `→ 휴가검증.gs 상단의 LV_HEADER_*_KEYS 또는 LV_FALLBACK_COL_*을 맞춰 주세요.`);
+  }
+
+  const map = {}, list = [], skipped = [];
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= LEAVE_DATA_START_ROW) {
+    const maxCol = Math.max(cols.type, cols.name, cols.remain);
+    const vals = _readBlock(sheet, LEAVE_DATA_START_ROW, 1, lastRow - LEAVE_DATA_START_ROW + 1, maxCol);
+
+    vals.forEach((r, i) => {
+      const rawName = r[cols.name - 1];
+      const key = _normName(rawName);
+      if (!key) return;
+
+      const type = String(r[cols.type - 1] == null ? "" : r[cols.type - 1]).replace(/\s+/g, "");
+      const g = LV_GROUPS.find(g => g.types.some(t => type.indexOf(t) !== -1));
+      if (!g) { skipped.push(`${LEAVE_DATA_START_ROW + i}행 ${key} "${type || "공란"}"`); return; }
+
+      if (!map[key]) {
+        map[key] = { name: String(rawName).trim(), rows: {} };
+        list.push({ key: key, name: map[key].name });
+      }
+      const slot = map[key].rows[g.key] || (map[key].rows[g.key] = { sum: 0, count: 0 });
+      slot.sum   += _lvNum(r[cols.remain - 1]);
+      slot.count += 1;
+    });
+  }
+  return { map: map, list: list, skipped: skipped, cols: cols };
+}
+
+
+function _leaveSystemColumns(sheet) {
+  return {
+    type:   _findColumnByHeader(sheet, HEADER_LEAVE_TYPE, FALLBACK_COL_LEAVE_TYPE),
+    name:   _lvFindCol(sheet, LV_HEADER_NAME_KEYS,   LV_FALLBACK_COL_NAME),
+    remain: _lvFindCol(sheet, LV_HEADER_REMAIN_KEYS, LV_FALLBACK_COL_REMAIN)
+  };
+}
+
+
+function _lvFindCol(sheet, keys, fallbackLetter) {
+  for (const k of keys) {
+    const c = _findColumnByHeader(sheet, k, null);
+    if (c) return c;
+  }
+  if (fallbackLetter) {
+    const idx = columnLetterToIndex(fallbackLetter);
+    if (idx <= sheet.getLastColumn()) return idx;
+  }
+  return null;
+}
+
+
+function _leaveHeaders(sheet) {
+  const lastCol = sheet.getLastColumn();
+  if (lastCol < 1) return [];
+  return sheet.getRange(1, 1, 1, lastCol).getValues()[0]
+    .map((h, i) => `${_lvColLetter(i + 1)}:${String(h).trim() || "(빈칸)"}`);
+}
+
+
+// ─── [2] 근무계획 X월 읽기 (C5 ~ A열 "계" 직전, AP/AS) ───────────────────
+function _readLeavePlan(sheet) {
+  const nameRows = _readPlanNameRows(sheet);
+  if (nameRows.count === 0) throw new Error(`"${sheet.getName()}" 시트에서 이름 행을 찾지 못했습니다`);
+
+  const groupCols = LV_GROUPS.map(g => columnLetterToIndex(g.planCol));
+  const maxCol = Math.max(PLAN_NAME_COL, Math.max.apply(null, groupCols));
+  const block = _readBlock(sheet, nameRows.startRow, 1, nameRows.count, maxCol);
+
+  return _lvBuildSourceMap(block, PLAN_NAME_COL, groupCols);
+}
+
+
+// ─── [3] 근태 정산내역 X월 근태 읽기 (D7 ~ A열 "계" 직전, Y/Z) ───────────
+function _readLeaveAtt(sheet) {
+  const nameCol = columnLetterToIndex(ATT_NAME_COL);
+  const stopCol = columnLetterToIndex(ATT_STOP_COL);
+  const groupCols = LV_GROUPS.map(g => columnLetterToIndex(g.attCol));
+  const maxCol = Math.max(nameCol, stopCol, Math.max.apply(null, groupCols));
+
+  const lastRow = Math.min(sheet.getLastRow(), ATT_NAME_START_ROW + ATT_SCAN_MAX);
+  if (lastRow < ATT_NAME_START_ROW) throw new Error(`"${sheet.getName()}" 시트 ${ATT_NAME_COL}${ATT_NAME_START_ROW}부터 데이터 없음`);
+
+  const all = _readBlock(sheet, ATT_NAME_START_ROW, 1, lastRow - ATT_NAME_START_ROW + 1, maxCol);
+  const block = [];
+  for (let i = 0; i < all.length; i++) {
+    if (_lvIsTotalLabel(all[i][stopCol - 1])) break;
+    block.push(all[i]);
+  }
+  const out = _lvBuildSourceMap(block, nameCol, groupCols);
+  if (out.list.length === 0) throw new Error(`"${sheet.getName()}" 시트 ${ATT_NAME_COL}${ATT_NAME_START_ROW}부터 이름이 없습니다`);
+  return out;
+}
+
+
+// 블록 → { map: key → {name, leave, holiday}, list: [{key, name}] } (중복 이름은 첫 행)
+function _lvBuildSourceMap(block, nameCol, groupCols) {
+  const map = {}, list = [];
+  block.forEach(r => {
+    const rawName = r[nameCol - 1];
+    const key = _normName(rawName);
+    if (!key || map[key]) return;
+    const entry = { name: String(rawName).replace(/\s+/g, " ").trim() };
+    LV_GROUPS.forEach((g, i) => { entry[g.key] = _lvNum(r[groupCols[i] - 1]); });
+    map[key] = entry;
+    list.push({ key: key, name: entry.name });
+  });
+  return { map: map, list: list };
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [C] 결과 시트 작성
+// ═════════════════════════════════════════════════════════════════════════
+function _buildLeaveReport(res) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_LEAVE_VERIFY);
+
+  const notes = sheet ? _lvReadExistingNotes(sheet) : {};
+
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_LEAVE_VERIFY);
+  } else {
+    sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).breakApart();
+    sheet.clear();
+    sheet.setFrozenRows(0);
+    sheet.setFrozenColumns(0);
+  }
+
+  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
+  const data = [], meta = [];
+  const push = (row, type) => { data.push(row); meta.push(type); };
+  const blankRow = () => new Array(LV_NCOL).fill("");
+  const line = (text, type) => { const r = blankRow(); r[0] = text; push(r, type); };
+
+  line("휴가 검증 결과 (근태시스템 ↔ 근무계획 ↔ 근태 정산내역)", "title");
+
+  if (res.error) {
+    line(`실행 ${stamp}`, "sub");
+    line(`⚠️ ${res.error}`, "summary");
+    sheet.getRange(1, 1, data.length, LV_NCOL).setValues(data);
+    _styleLeaveReport(sheet, data, meta, 0);
+    return sheet;
+  }
+
+  const c = res.counts;
+  line(`기준 ${res.month}월 · 근무계획 "${res.planSheet || "없음"}" · 근태 "${res.attSheet || "없음"}" · ` +
+       `대상 ${res.people.length}명 · 실행 ${stamp}`, "sub");
+  line(`${R_OK} ${c.ok}명 · ${R_FAIL} ${c.fail}명 · ⚠️ 확인필요 ${c.na}명`,
+       (c.fail + c.na) === 0 ? "ok" : "summary");
+  line("연차·월차 = 잔여휴가, 공휴 = 잔여공휴. 근태시스템에 행이 없으면 '-'(0으로 비교). 차이 사유는 맨 오른쪽 '비고'에 적어 두면 재실행해도 유지됩니다.", "note");
+  res.messages.forEach(m => line(`⚠️ ${m}`, "warn"));
+  push(blankRow(), "blank");
+
+  // ── 그룹 헤더 + 소헤더 ───────────────────────────────────────────────
+  const g = blankRow(); g[0] = "이름";
+  const h = blankRow(); h[0] = "이름";
+  LV_GROUPS.forEach((grp, i) => {
+    const c0 = 2 + LV_GROUP_W * i;
+    g[c0 - 1] = `${grp.label} (근무계획 ${grp.planCol} · 근태 ${grp.attCol})`;
+    LV_SOURCES.forEach((s, j) => { h[c0 - 1 + j] = s.label; });
+    h[c0 - 1 + LV_SOURCES.length] = "결과";
+  });
+  g[LV_OVERALL_COL - 1] = "종합"; g[LV_NOTE_COL - 1] = "비고";
+  h[LV_OVERALL_COL - 1] = "종합"; h[LV_NOTE_COL - 1] = "비고";
+  push(g, "ghead");
+  push(h, "head");
+  const headRow = data.length;
+
+  // ── 인원별 행 ────────────────────────────────────────────────────────
+  res.people.forEach(p => {
+    const r = blankRow();
+    r[0] = p.name;
+    const extra = [];
+
+    p.groups.forEach((grp, i) => {
+      const c0 = 2 + LV_GROUP_W * i;
+      LV_SOURCES.forEach((s, j) => { r[c0 - 1 + j] = _lvFmtVal(grp.vals[s.key]); });
+      r[c0 - 1 + LV_SOURCES.length] = LV_ST[grp.status];
+      grp.notes.forEach(n => extra.push(n));
+    });
+
+    if (p.missing.length > 0) extra.push(`${p.missing.join("·")}에 이름 없음`);
+
+    let overallLabel;
+    if (p.overall === "fail")    overallLabel = `${R_FAIL} ${p.failCount}건`;
+    else if (p.overall === "na") overallLabel = "⚠️ 확인필요";
+    else                         overallLabel = R_OK;
+    r[LV_OVERALL_COL - 1] = overallLabel;
+
+    const saved = notes[p.key] || "";
+    const auto  = extra.join(" / ");
+    // 자동 메모는 비고가 비어 있을 때만 채우고, 사용자가 적은 비고는 그대로 둠
+    r[LV_NOTE_COL - 1] = saved || (auto ? `(${auto})` : "");
+
+    push(r, "data:" + p.overall);
+  });
+
+  sheet.getRange(1, 1, data.length, LV_NCOL).setValues(data);
+  _styleLeaveReport(sheet, data, meta, headRow);
+  return sheet;
+}
+
+
+function _styleLeaveReport(sheet, data, meta, headRow) {
+  const N = LV_NCOL;
+
+  sheet.setColumnWidth(1, 90);
+  for (let i = 0; i < LV_GROUPS.length; i++) {
+    const c0 = 2 + LV_GROUP_W * i;
+    for (let j = 0; j < LV_SOURCES.length; j++) sheet.setColumnWidth(c0 + j, 80);
+    sheet.setColumnWidth(c0 + LV_SOURCES.length, 90);
+  }
+  sheet.setColumnWidth(LV_OVERALL_COL, 120);
+  sheet.setColumnWidth(LV_NOTE_COL, 340);
+
+  sheet.getRange(1, 1, data.length, N)
+    .setFontFamily("Noto Sans KR")
+    .setVerticalAlignment("middle");
+
+  const BG = { ok: "#eaf5ea", fail: "#fdeaea", na: "#fff6e5" };
+  const FC = { ok: "#1e6b34", fail: "#a61b1b", na: "#8a6100" };
+
+  meta.forEach((type, i) => {
+    const r = i + 1;
+    const full = sheet.getRange(r, 1, 1, N);
+
+    if (type === "title") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(16).setFontWeight("bold")
+        .setFontColor("#ffffff").setBackground("#1f3864")
+        .setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 40);
+
+    } else if (type === "sub") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(10).setFontColor("#ffffff").setBackground("#2e5496")
+        .setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 26);
+
+    } else if (type === "summary" || type === "ok") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(11).setFontWeight("bold")
+        .setBackground(type === "ok" ? BG.ok : BG.fail)
+        .setFontColor(type === "ok" ? FC.ok : FC.fail)
+        .setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 30);
+
+    } else if (type === "note") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(9).setFontColor("#666666").setFontStyle("italic")
+        .setBackground("#f7f9fc").setHorizontalAlignment("center");
+      sheet.setRowHeight(r, 22);
+
+    } else if (type === "warn") {
+      full.merge().setValue(data[i][0])
+        .setFontSize(10).setFontColor(FC.na).setBackground(BG.na)
+        .setHorizontalAlignment("left");
+      sheet.setRowHeight(r, 24);
+
+    } else if (type === "ghead") {
+      full.setFontWeight("bold").setBackground("#c5d3ea")
+        .setHorizontalAlignment("center")
+        .setBorder(true, true, true, true, true, true, "#8ea9db", SpreadsheetApp.BorderStyle.SOLID);
+      for (let k = 0; k < LV_GROUPS.length; k++) {
+        sheet.getRange(r, 2 + LV_GROUP_W * k, 1, LV_GROUP_W).merge();
+      }
+      sheet.setRowHeight(r, 26);
+
+    } else if (type === "head") {
+      full.setFontWeight("bold").setBackground("#d9e1f2")
+        .setHorizontalAlignment("center")
+        .setBorder(true, true, true, true, true, true, "#8ea9db", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.setRowHeight(r, 26);
+
+    } else if (type.indexOf("data:") === 0) {
+      const kind = type.slice(5);
+      full.setBackground(BG[kind])
+        .setBorder(true, true, true, true, true, true, "#c9d4e8", SpreadsheetApp.BorderStyle.SOLID);
+      sheet.getRange(r, 1, 1, N - 1).setHorizontalAlignment("center");
+      sheet.getRange(r, LV_OVERALL_COL).setFontWeight("bold").setFontColor(FC[kind]);
+
+      // 그룹별 결과 칸 강조
+      for (let k = 0; k < LV_GROUPS.length; k++) {
+        const col = 2 + LV_GROUP_W * k + LV_SOURCES.length;
+        const v = String(data[i][col - 1]);
+        if (v === LV_ST.fail) {
+          sheet.getRange(r, 2 + LV_GROUP_W * k, 1, LV_GROUP_W)
+            .setBackground("#f9d0d0");
+          sheet.getRange(r, col).setFontWeight("bold").setFontColor(FC.fail);
+        } else if (v === LV_ST.na) {
+          sheet.getRange(r, col).setFontColor(FC.na);
+        } else {
+          sheet.getRange(r, col).setFontColor(FC.ok);
+        }
+      }
+
+      // 비고란: 입력 가능 표시
+      sheet.getRange(r, LV_NOTE_COL)
+        .setBackground("#fffbe6").setHorizontalAlignment("left")
+        .setFontColor("#333333").setFontWeight("normal").setWrap(true);
+
+      sheet.setRowHeight(r, 24);
+
+    } else {
+      sheet.setRowHeight(r, 10);
+    }
+  });
+
+  // ※ 열 고정은 하지 않음 — 제목 행이 전체 열에 걸쳐 병합돼 있어 열 고정 시 예외 발생
+  if (headRow > 0) sheet.setFrozenRows(headRow);
+  sheet.setHiddenGridlines(true);
+}
+
+
+// ─── 기존 비고 읽기 (재실행 시 보존; 자동 메모 "( … )"는 보존 대상 아님) ──
+function _lvReadExistingNotes(sheet) {
+  const notes = {};
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow < 1 || lastCol < LV_NOTE_COL) return notes;
+
+  const vals = sheet.getRange(1, 1, lastRow, LV_NOTE_COL).getValues();
+  vals.forEach(r => {
+    const key  = _normName(r[0]);
+    const note = String(r[LV_NOTE_COL - 1] == null ? "" : r[LV_NOTE_COL - 1]).trim();
+    if (!key || !note || key === "이름") return;
+    if (/^\(.*\)$/.test(note)) return;   // 자동 메모는 매번 다시 계산
+    notes[key] = note;
+  });
+  return notes;
+}
+
+
+// 전체 검증 결과 시트용 요약 행
+function _leaveSummaryRows(res) {
+  if (res.error) return [_row("휴가 검증", "", "", R_NA, res.error)];
+
+  const rows = [];
+  LV_GROUPS.forEach((g, i) => {
+    const ok   = res.people.filter(p => p.groups[i].status === "ok").length;
+    const fail = res.people.filter(p => p.groups[i].status === "fail").length;
+    rows.push(_row(`${g.label} 일치 인원`, ok, res.people.length,
+      fail === 0 && ok === res.people.length ? R_OK : (fail > 0 ? R_FAIL : R_NA),
+      `불일치 ${fail}명 · 근무계획 ${g.planCol} ↔ 근태 ${g.attCol}`));
+  });
+
+  const missing = res.people.filter(p => p.missing.length > 0).length;
+  rows.push(_row("이름 매칭", res.people.length - missing, res.people.length,
+    missing === 0 ? R_OK : R_FAIL,
+    missing === 0 ? "3개 소스 이름 모두 일치" : `어느 한 소스에 없는 이름 ${missing}명 — "${SHEET_LEAVE_VERIFY}" 시트 참고`));
+
+  if (res.messages.length > 0) {
+    rows.push(_row("소스 확인", "", "", R_NA, res.messages.join(" / ")));
+  }
+  return rows;
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [D] 미리보기 — 휴가관리 열 매핑 확인 (실제 변경 없음)
+// ═════════════════════════════════════════════════════════════════════════
+function previewLeaveColumns() {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_LEAVE);
+  if (!sheet) { ui.alert(`"${SHEET_LEAVE}" 시트를 찾을 수 없습니다.`); return; }
+
+  const cols = _leaveSystemColumns(sheet);
+  const headers = _leaveHeaders(sheet);
+  Logger.log("─── 휴가관리 헤더 ───");
+  headers.forEach(h => Logger.log(h));
+
+  const fmt = c => c ? `${_lvColLetter(c)}열` : "❌ 못 찾음";
+  let msg =
+    `🔍 휴가관리 열 매핑\n\n` +
+    `• 휴가구분: ${fmt(cols.type)}\n` +
+    `• 이름: ${fmt(cols.name)}\n` +
+    `• 잔여: ${fmt(cols.remain)}\n\n` +
+    `헤더: ${headers.join(" | ")}`;
+
+  if (cols.type && cols.name && cols.remain) {
+    try {
+      const sys = _readLeaveSystem(sheet);
+      const sample = sys.list.slice(0, 5).map(p => {
+        const e = sys.map[p.key];
+        const parts = LV_GROUPS.map(g => e.rows[g.key] ? `${g.label} ${e.rows[g.key].sum}` : null).filter(Boolean);
+        return `${p.name}: ${parts.join(", ") || "-"}`;
+      });
+      msg += `\n\n읽은 인원 ${sys.list.length}명 (앞 5명)\n${sample.join("\n")}`;
+      if (sys.skipped.length > 0) msg += `\n\n제외 ${sys.skipped.length}건: ${sys.skipped.slice(0, 5).join(", ")}`;
+      Logger.log(`읽은 인원: ${sys.list.map(p => p.name).join(", ")}`);
+    } catch (e) {
+      msg += `\n\n⚠️ ${e.message}`;
+    }
+  }
+  ui.alert(msg);
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [E] 유틸
+// ═════════════════════════════════════════════════════════════════════════
+function _lvNum(v) {
+  if (typeof v === "number") return v;
+  const s = String(v == null ? "" : v).replace(/,/g, "").trim();
+  if (!s) return 0;
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+}
+
+
+function _lvFmtVal(v) {
+  if (v === undefined || v === null) return "-";
+  return v;
+}
+
+
+function _lvIsTotalLabel(v) {
+  const s = _normName(v);
+  return s === "계" || s === "총계" || s.indexOf("합계") !== -1;
+}
+
+
+function _lvColLetter(index) {
+  let letter = "", n = index;
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    letter = String.fromCharCode(65 + rem) + letter;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letter;
+}

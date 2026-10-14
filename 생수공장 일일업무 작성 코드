@@ -8,7 +8,7 @@
 const PROD_PLAN_ID = '1ibZaOX0NKni6vRTVE0i2Wb5AXNHn9D72F5CFWSxH3qQ';
 const PROD_ACTUAL_ID = '1oVZcMTvWiG_-IehOVR8gsPe3XnwevtnbRX5lZjG-VZ8';
 const WORK_SCHED_ID = '12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY';
-const WASTE_WATER_ID = '1c5njunIqLbuPFOR4dFnDELSInNVcf6tOP_C-bh5L-q8';
+const WASTE_WATER_ID = '1tMX3RovZ-Gxt4-grMCTAYXlxVx-hifRJ18wLRhLCAJU';
 const WATER_LEVEL_ID = '1WAHcipjiORBl6Jv3j-T1Xqv6CpFzZkj9n7LUzem1wso';
 const WEATHER_DATA_ID = '1paz1MbqB5zmfdzK8ebzmob8s_T69ICa-GRTgRr7XBBg';
 // 제품생산일지 (1순위: 일반 제품 생산량 C9~C12, C14)
@@ -33,8 +33,8 @@ function onOpen() {
 function fillDailyReportByDate() {
   const ui = SpreadsheetApp.getUi();
   const response = ui.prompt(
-'날짜 지정 테스트',
-'날짜를 YYYY-MM-DD 형식으로 입력하세요.\n예) 2025-06-15',
+    '날짜 지정 테스트',
+    '날짜를 YYYY-MM-DD 형식으로 입력하세요.\n예) 2025-06-15',
     ui.ButtonSet.OK_CANCEL
   );
   if (response.getSelectedButton() !== ui.Button.OK) return;
@@ -108,7 +108,7 @@ function fillDailyReportCore(today) {
 
   let weatherDataSS = null;
   try {
-weatherDataSS = SpreadsheetApp.openById(WEATHER_DATA_ID);
+    weatherDataSS = SpreadsheetApp.openById(WEATHER_DATA_ID);
   } catch(e) {
     Logger.log(`기상데이터 스프레드시트 열기 실패: ${e.message}`);
   }
@@ -139,7 +139,7 @@ weatherDataSS = SpreadsheetApp.openById(WEATHER_DATA_ID);
   // ════════════════════════════════════════════════════════
   let jilsiLabel = '실 시 사 항';
   if (prevProdDate) {
-jilsiLabel = `실 시 사 항 (${prevProdDate.month}/${String(prevProdDate.day).padStart(2,'0')})`;
+    jilsiLabel = `실 시 사 항 (${prevProdDate.month}/${String(prevProdDate.day).padStart(2,'0')})`;
   }
   const yejungLabel = `예 정 사 항 (${month}/${String(day).padStart(2,'0')})`;
   todaySheet.getRange('A5').setValue(jilsiLabel);
@@ -154,6 +154,7 @@ jilsiLabel = `실 시 사 항 (${prevProdDate.month}/${String(prevProdDate.day).
 
   // ════════════════════════════════════════════════════════
   // 6. A6 = 이전 생산일 시트의 H6 내용 복사
+  // (실제 생산량/연장 여부에 따른 보정은 9-1 단계에서 수행)
   // ════════════════════════════════════════════════════════
   if (prevProdDate) {
     const prevSheetName = `${prevProdDate.month}월 ${prevProdDate.day}일`;
@@ -198,6 +199,17 @@ jilsiLabel = `실 시 사 항 (${prevProdDate.month}/${String(prevProdDate.day).
   if (c13val === '' || c13val === null) todaySheet.getRange('C13').setValue(0);
 
   // ════════════════════════════════════════════════════════
+  // 9-1. A6 실시사항 보정
+  // - 실제 생산량(C9~C14)이 0인 품목은 "제품 생산" 줄에서 제거
+  // - 이전 생산일 근무계획에 P/B 코드가 없으면 "(연장)" 제거
+  // - 보정 내역은 완료 alert에 표시
+  // ════════════════════════════════════════════════════════
+  let jilsiNotes = [];
+  if (prevProdDate) {
+    jilsiNotes = adjustJilsiText(todaySheet, workSchedSS, prevProdDate);
+  }
+
+  // ════════════════════════════════════════════════════════
   // 10. B15:B16, D15, D16 = 폐수/지하수
   // ════════════════════════════════════════════════════════
   fillWasteWater(todaySheet, waterLevelSS, wasteWaterSS, prevWorkDate);
@@ -224,10 +236,13 @@ jilsiLabel = `실 시 사 항 (${prevProdDate.month}/${String(prevProdDate.day).
   fillWaterLevelData(todaySheet, waterLevelSS, prevWorkDate, monthFirstLabel, year);
 
   // ════════════════════════════════════════════════════════
-  // 15. N25 = 이전 근무일 평균기온/최저기온
+  // 15. N25 = 이전 근무일 최고기온/최저기온
+  // L24:M24 = 강수량 라벨(+강수 시간대), L25:M25 = 일강수량
   // ════════════════════════════════════════════════════════
+  todaySheet.getRange('L24').setValue('강수량');
   if (weatherDataSS) {
     fillTemperature(todaySheet, weatherDataSS, prevWorkDate);
+    fillRainfall(todaySheet, weatherDataSS, prevWorkDate);
   }
 
   // ════════════════════════════════════════════════════════
@@ -242,15 +257,138 @@ jilsiLabel = `실 시 사 항 (${prevProdDate.month}/${String(prevProdDate.day).
                  prevWorkDate, prevWorkMonth, prevWorkDay);
 
   SpreadsheetApp.flush();
-  SpreadsheetApp.getUi().alert(`"${todaySheetName}" 시트 업무보고 작성 완료!`);
+
+  // ── 완료 alert (실시사항 보정 내역 포함) ──
+  let doneMsg = `"${todaySheetName}" 시트 업무보고 작성 완료!`;
+  if (jilsiNotes.length > 0) {
+    doneMsg += '\n\n[실시사항(A6) 자동 보정]\n' + jilsiNotes.map(n => '- ' + n).join('\n');
+  }
+  SpreadsheetApp.getUi().alert(doneMsg);
 }
 
 
 // ════════════════════════════════════════════════════════
-// [신규] G8:O16 = 장비별 점검 및 특이사항
+// A6 실시사항 보정
+// - "… 제품 생산 (연장)" 줄: C9~C14 실제 생산량이 0인 품목 제거,
+// 전부 0이면 "- " 만 남김. 근무계획에 P 없으면 "(연장)" 제거
+// - "… BTL/CAP 생산 (연장)" 줄: 근무계획에 B 없으면 "(연장)" 제거
+// - 근무계획을 확인할 수 없으면 "(연장)"은 건드리지 않음
+// 반환: 보정 내역 문자열 배열 (완료 alert 표시용)
 // ════════════════════════════════════════════════════════
+function adjustJilsiText(todaySheet, workSchedSS, prevProdDate) {
+  const notes = [];
+  const a6Cell = todaySheet.getRange('A6');
+  const text = String(a6Cell.getValue() || '');
+  if (!text.trim()) return notes;
+
+  // 실제 생산량 (C9~C14)
+  const PROD_CELL_MAP = {
+    '18.9L': 'C9', '1.5L': 'C10', '0.5L': 'C11',
+    '0.33L': 'C12', '0.19L': 'C13', '0.12L': 'C14'
+  };
+  const actual = {};
+  for (const name in PROD_CELL_MAP) {
+    const v = todaySheet.getRange(PROD_CELL_MAP[name]).getValue();
+    const n = Number(v);
+    actual[name] = isNaN(n) ? 0 : n;
+  }
+
+  // 이전 생산일 근무계획의 연장 코드 (P/교, B/교 등 슬래시 코드 포함)
+  const ext = getExtFlagsLoose(workSchedSS, prevProdDate.month, prevProdDate.day);
+
+  const lines = text.split('\n');
+  let changed = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // ① 제품 생산 줄: "- 18.9L / 1.5L / 0.12L 제품 생산 (연장)"
+    let m = line.match(/^(\s*-\s*)(.*?)\s*제품 생산\s*(\(\s*연장\s*\))?\s*$/);
+    if (m) {
+      const prefix = m[1];
+      const items = m[2].split('/').map(s => s.trim()).filter(Boolean);
+      let hasExt = !!m[3];
+
+      const kept = [];
+      const removed = [];
+      for (const it of items) {
+        if (PROD_CELL_MAP.hasOwnProperty(it) && !(actual[it] > 0)) removed.push(it);
+        else kept.push(it);
+      }
+
+      if (removed.length > 0) {
+        changed = true;
+        notes.push(`${removed.join('/')} 실제 생산량 0 → 실시사항에서 제외`);
+      }
+
+      // (연장) 제거: 근무계획 확인 가능 + P 코드 없음
+      // ※ L 코드도 연장으로 봐야 하면 !ext.P → !(ext.P || ext.L) 로 변경
+      if (hasExt && ext.verified && !ext.P) {
+        hasExt = false;
+        changed = true;
+        notes.push('근무계획에 P 코드 없음 → 제품 생산 (연장) 제거');
+      }
+
+      if (kept.length === 0) {
+        lines[i] = prefix.replace(/\s+$/, '') + ' '; // "- "
+        if (removed.length > 0) notes.push('제품 생산 전량 없음 → 해당 줄 공백 처리');
+      } else {
+        lines[i] = `${prefix}${kept.join(' / ')} 제품 생산${hasExt ? ' (연장)' : ''}`;
+      }
+      continue;
+    }
+
+    // ② BTL/CAP 생산 줄: "- 1.5L BTL/CAP 생산 (연장)" → B 코드 없으면 (연장)만 제거
+    m = line.match(/^(\s*-\s*)(.+?)\s*생산\s*\(\s*연장\s*\)\s*$/);
+    if (m && /BTL|CAP/i.test(m[2])) {
+      if (ext.verified && !ext.B) {
+        lines[i] = `${m[1]}${m[2]} 생산`;
+        changed = true;
+        notes.push('근무계획에 B 코드 없음 → BTL/CAP 생산 (연장) 제거');
+      }
+      continue;
+    }
+  }
+
+  if (changed) {
+    a6Cell.setValue(lines.join('\n'));
+    Logger.log(`A6 실시사항 보정: ${notes.join(' | ')}`);
+  }
+  return notes;
+}
+
+
 // ════════════════════════════════════════════════════════
-// [신규] G8:O16 = 장비별 점검 및 특이사항
+// 근무계획 P/B/L 여부 (슬래시 복합코드 인식: P/교, B/교, L/교 등)
+// verified=false 이면 근무계획 시트/날짜 열을 못 찾은 것
+// ════════════════════════════════════════════════════════
+function getExtFlagsLoose(workSchedSS, month, day) {
+  const flags = { P: false, B: false, L: false, verified: false };
+  const workSheet = getWorkSheet(workSchedSS, month);
+  if (!workSheet) return flags;
+
+  const dateRow = workSheet.getRange('G3:AK3').getValues()[0];
+  const colOffset = findDayOffset(dateRow, day);
+  if (colOffset === -1) return flags;
+
+  const { firstWorkerRow, lastWorkerRow } = getWorkerRowRange(workSheet);
+  const workerCount = lastWorkerRow - firstWorkerRow + 1;
+  if (workerCount <= 0) return flags;
+
+  flags.verified = true;
+  const colVals = workSheet.getRange(firstWorkerRow, 7 + colOffset, workerCount, 1).getValues();
+  for (const row of colVals) {
+    const tokens = String(row[0] || '').toUpperCase().split(/[\/,\s]+/).map(t => t.trim());
+    if (tokens.includes('P')) flags.P = true;
+    if (tokens.includes('B')) flags.B = true;
+    if (tokens.includes('L')) flags.L = true;
+  }
+  return flags;
+}
+
+
+// ════════════════════════════════════════════════════════
+// G8:O16 = 장비별 점검 및 특이사항
 // ════════════════════════════════════════════════════════
 function fillSafetySection(todaySheet, workSchedSS, prodPlanSS, ss, today, month, day, year) {
 
@@ -447,8 +585,8 @@ function fillSafetySection(todaySheet, workSchedSS, prodPlanSS, ss, today, month
 
   // ── G8 셀에 입력 + 가. 줄만 파란색 적용 ────────────────
   // ※ setValue()를 먼저 쓰면 첫 런(파란색)이 셀 기본 글자색으로 굳어져서
-  //   이후 사용자가 직접 타이핑하는 글자까지 파랗게 들어감.
-  //   → setValue 없이 리치텍스트만으로 입력하고, 기본색은 검정으로 먼저 고정.
+  // 이후 사용자가 직접 타이핑하는 글자까지 파랗게 들어감.
+  // → setValue 없이 리치텍스트만으로 입력하고, 기본색은 검정으로 먼저 고정.
   const cell = todaySheet.getRange('G8');
   const BLUE = '#0000FF';
   const BLACK = '#000000';
@@ -499,8 +637,8 @@ function getPrevDaySheet(ss, today) {
     const sheetDate = new Date(todayYear, sm - 1, sd);
     if (sheetDate.getTime() > todayMs) sheetDate.setFullYear(todayYear - 1);
     if (sheetDate.getTime() < todayMs && sheetDate.getTime() > latestMs) {
-latestMs = sheetDate.getTime();
-prevSheet = s;
+      latestMs = sheetDate.getTime();
+      prevSheet = s;
     }
   }
   return prevSheet;
@@ -529,7 +667,7 @@ function pickDifferent(arr, prevName, seed) {
 
 
 // ════════════════════════════════════════════════════════
-// [헬퍼] 이전 근무일 평균기온/최저기온 → N25
+// [헬퍼] 이전 근무일 최고기온/최저기온 → N25
 // ════════════════════════════════════════════════════════
 function fillTemperature(todaySheet, weatherDataSS, prevWorkDate) {
   const tz = Session.getScriptTimeZone();
@@ -556,10 +694,10 @@ function fillTemperature(todaySheet, weatherDataSS, prevWorkDate) {
 
     let dateStr = '';
     if (raw instanceof Date) {
-dateStr = Utilities.formatDate(raw, tz, 'yyyy-MM-dd');
+      dateStr = Utilities.formatDate(raw, tz, 'yyyy-MM-dd');
     } else {
       const s = String(raw).trim();
-dateStr = s.split(' ')[0].split('T')[0];
+      dateStr = s.split(' ')[0].split('T')[0];
     }
 
     if (dateStr !== targetStr) continue;
@@ -572,12 +710,113 @@ dateStr = s.split(' ')[0].split('T')[0];
 
   if (temps.length === 0) return;
 
-  const avg = temps.reduce((a, b) => a + b, 0) / temps.length;
+  const max = Math.max(...temps);
   const min = Math.min(...temps);
-  const avgStr = Math.round(avg * 10) / 10;
+  const maxStr = Math.round(max * 10) / 10;
   const minStr = Math.round(min * 10) / 10;
 
-  todaySheet.getRange('N25').setValue(`${avgStr}℃/${minStr}℃`);
+  todaySheet.getRange('N25').setValue(`${maxStr}℃/${minStr}℃`);
+}
+
+
+// ════════════════════════════════════════════════════════
+// [헬퍼] 강수량 → L25 (일강수량), L24 (강수 시간대)
+// - 일강수량: 기상데이터 F열. 해당일 강수량은 "다음날 00:00" 행에 기록됨
+// - 다음날 00:00 행이 없으면 해당일 행 F열 최대값으로 보조
+// - 강수량 0 → L25 "-"
+// - 강수 시간대: 해당일(00:00~23:00) 행 중 G열(1시간 강수량) > 0 인
+// 행의 가장 이른 시각 ~ 가장 늦은 시각을 L24에 표시
+// ════════════════════════════════════════════════════════
+function fillRainfall(todaySheet, weatherDataSS, prevWorkDate) {
+  const tz = Session.getScriptTimeZone();
+  const labelCell = todaySheet.getRange('L24');
+  const valueCell = todaySheet.getRange('L25');
+  labelCell.setValue('강수량');
+
+  const weatherSheet = weatherDataSS.getSheetByName('기상데이터');
+  if (!weatherSheet) {
+    Logger.log('기상데이터 시트를 찾을 수 없음 (강수량)');
+    return;
+  }
+
+  const lastRow = weatherSheet.getLastRow();
+  if (lastRow < 2) return;
+
+  const targetDate = new Date(prevWorkDate);
+  const nextDate = new Date(prevWorkDate);
+  nextDate.setDate(nextDate.getDate() + 1);
+  const targetStr = Utilities.formatDate(targetDate, tz, 'yyyy-MM-dd');
+  const nextStr = Utilities.formatDate(nextDate, tz, 'yyyy-MM-dd');
+
+  // A~G열 한 번에 읽기 (A=일시, F=일강수량, G=1시간 강수량)
+  const vals = weatherSheet.getRange(2, 1, lastRow - 1, 7).getValues();
+
+  let dailyTotal = null; // 다음날 00:00 행의 F열
+  let maxSameDay = null; // 보조: 해당일 행들의 F열 최대값
+  const rainTimes = []; // G열 > 0 인 행의 { dateStr, timeStr }
+
+  for (const row of vals) {
+    const raw = row[0];
+    if (!raw) continue;
+
+    let dateStr = '', timeStr = '';
+    if (raw instanceof Date) {
+      dateStr = Utilities.formatDate(raw, tz, 'yyyy-MM-dd');
+      timeStr = Utilities.formatDate(raw, tz, 'HH:mm');
+    } else {
+      const s = String(raw).trim().replace('T', ' ');
+      const parts = s.split(' ');
+      dateStr = parts[0] || '';
+      timeStr = (parts[1] || '').slice(0, 5);
+    }
+
+    const isTarget = dateStr === targetStr;
+    const isNextMidnight = dateStr === nextStr && timeStr === '00:00';
+    if (!isTarget && !isNextMidnight) continue;
+
+    const f = row[5];
+    const g = row[6];
+
+    if (isNextMidnight && typeof f === 'number' && !isNaN(f)) dailyTotal = f;
+
+    if (isTarget) {
+      if (typeof f === 'number' && !isNaN(f)) {
+        if (maxSameDay === null || f > maxSameDay) maxSameDay = f;
+      }
+      if (typeof g === 'number' && g > 0) rainTimes.push({ dateStr, timeStr });
+    }
+  }
+
+  // ── L25: 일강수량 ──
+  let total = dailyTotal;
+  if (total === null) {
+    total = maxSameDay;
+    if (total !== null) Logger.log(`${nextStr} 00:00 행 없음 → ${targetStr} F열 최대값(${total}) 사용`);
+  }
+  if (total === null) {
+    Logger.log(`${targetStr} 일강수량 데이터를 찾을 수 없음 → L25 비워둠`);
+    return;
+  }
+
+  const totalRounded = Math.round(total * 10) / 10;
+  if (totalRounded <= 0) {
+    valueCell.setValue('-');
+    return;
+  }
+  valueCell.setValue(totalRounded);
+
+  // ── L24: 강수 시간대 ──
+  if (rainTimes.length === 0) return;
+
+  rainTimes.sort((a, b) => (a.dateStr + a.timeStr).localeCompare(b.dateStr + b.timeStr));
+  const fmt = t => {
+    const p = t.dateStr.split('-');
+    return `${parseInt(p[1])}/${parseInt(p[2])} ${t.timeStr}`;
+  };
+  const start = fmt(rainTimes[0]);
+  const end = fmt(rainTimes[rainTimes.length - 1]);
+  labelCell.setValue(`강수량\n(${start} ~\n ${end})`);
+  Logger.log(`강수 시간대: ${start} ~ ${end}, 일강수량 ${totalRounded}`);
 }
 
 
@@ -598,7 +837,7 @@ function getMonthFirstLabel(workSchedSS, today, month, day, year) {
       if (testDate.getMonth() + 1 !== month) break;
       if (testDate.getDay() === 0 || testDate.getDay() === 6) continue;
       if (isWorkDayByOffset(workSheet, offset, firstWorkerRow, lastWorkerRow)) {
-firstWorkDay = d;
+        firstWorkDay = d;
         break;
       }
     }
@@ -675,13 +914,13 @@ function getWaterLevelAvg(wlSheet, targetDate) {
     let timeStr = '';
 
     if (raw instanceof Date) {
-dateStr = Utilities.formatDate(raw, tz, 'yyyy-MM-dd');
-timeStr = Utilities.formatDate(raw, tz, 'HH:mm:ss');
+      dateStr = Utilities.formatDate(raw, tz, 'yyyy-MM-dd');
+      timeStr = Utilities.formatDate(raw, tz, 'HH:mm:ss');
     } else {
       const s = String(raw).trim();
       const parts = s.split(' ');
-dateStr = parts[0] || '';
-timeStr = parts[1] || '';
+      dateStr = parts[0] || '';
+      timeStr = parts[1] || '';
     }
 
     if (dateStr !== targetStr) continue;
@@ -793,13 +1032,13 @@ function fillAttendance(todaySheet, workSchedSS, prodPlanSS, today, month, day, 
   let prevSheet2 = workSheet;
 
   if (prevWorkMonth === month) {
-prevColOffset = findDayOffset(dateRow, prevWorkDay);
+    prevColOffset = findDayOffset(dateRow, prevWorkDay);
   } else {
     if (prevWorkSheet) {
       const prevDateRow = prevWorkSheet.getRange('G3:AK3').getValues()[0];
-prevColOffset = findDayOffset(prevDateRow, prevWorkDay);
-prevWorkerRange = getWorkerRowRange(prevWorkSheet);
-prevSheet2 = prevWorkSheet;
+      prevColOffset = findDayOffset(prevDateRow, prevWorkDay);
+      prevWorkerRange = getWorkerRowRange(prevWorkSheet);
+      prevSheet2 = prevWorkSheet;
     }
   }
 
@@ -947,6 +1186,9 @@ function buildAbsenceText(info) {
 
 // ════════════════════════════════════════════════════════
 // [헬퍼] 연장근무 사유 생성 (E34)
+// - 제품 용량과 BTL 용량이 같으면 "0.33L 제품/BTL 생산" 으로 합침
+// (CAP 계획도 있으면 "0.33L 제품/BTL/CAP 생산")
+// - 용량이 다르면 "1.5L 제품/0.33L BTL 생산" 형식 유지
 // ════════════════════════════════════════════════════════
 function buildExtReason(prodPlanSS, month, day, year, todayInfo) {
   if (!todayInfo.hasP && !todayInfo.hasB) return '';
@@ -971,6 +1213,11 @@ function buildExtReason(prodPlanSS, month, day, year, todayInfo) {
     for (const p of EXT_PROD) {
       if (typeof prodRow[p.idx] === 'number' && prodRow[p.idx] > 0) prodParts.push(p.name);
     }
+    // 1.5L/0.5L/0.33L 생산이 없고 G열(0.12L, idx 4)에 생산 수치가 있으면
+    // → 0.12L 생산 목적의 연장으로 보고 사유에 반영
+    if (prodParts.length === 0 && typeof prodRow[4] === 'number' && prodRow[4] > 0) {
+      prodParts.push('0.12L');
+    }
   }
   if (todayInfo.hasB) {
     for (const b of EXT_BTL) {
@@ -981,13 +1228,24 @@ function buildExtReason(prodPlanSS, month, day, year, todayInfo) {
 
   if (prodParts.length > 0 && btlParts.length === 0) return `${prodParts.join('/')} 제품 생산`;
   if (prodParts.length === 0 && btlParts.length > 0) return `${btlParts.join('/')} 생산`;
-  if (prodParts.length > 0 && btlParts.length > 0) return `${prodParts.join('/')} 제품/${btlParts.join('/')} 생산`;
+  if (prodParts.length > 0 && btlParts.length > 0) {
+    // 제품 용량 목록과 BTL 용량 목록이 완전히 같으면 합쳐서 표기
+    const btlSizes = btlParts.filter(p => p !== 'CAP').map(p => p.replace(' BTL', ''));
+    const hasCap = btlParts.includes('CAP');
+    const sameSizes = btlSizes.length === prodParts.length
+      && btlSizes.every(s => prodParts.includes(s));
+    if (sameSizes) {
+      return `${prodParts.join('/')} 제품/BTL${hasCap ? '/CAP' : ''} 생산`;
+    }
+    return `${prodParts.join('/')} 제품/${btlParts.join('/')} 생산`;
+  }
   return '';
 }
 
 
 // ════════════════════════════════════════════════════════
 // [헬퍼] 야간근무 사유 생성 (E35)
+// - BTL 계획이 있으면 CAP 계획 유무와 관계없이 항상 "BTL/CAP 생산"
 // ════════════════════════════════════════════════════════
 function buildNightReason(prodPlanSS, month, day, year, todayInfo) {
   if (todayInfo.nightCount === 0) return '';
@@ -1008,7 +1266,13 @@ function buildNightReason(prodPlanSS, month, day, year, todayInfo) {
   for (const b of NIGHT_BTL) {
     if (typeof prodRow[b.idx] === 'number' && prodRow[b.idx] > 0) parts.push(b.name);
   }
-  if (typeof prodRow[9] === 'number' && prodRow[9] > 0) parts.push('CAP');
+
+  if (parts.length > 0) {
+    parts.push('CAP'); // BTL 있으면 CAP 항상 포함
+  } else if (typeof prodRow[9] === 'number' && prodRow[9] > 0) {
+    parts.push('CAP'); // BTL 없이 CAP만 있는 날
+  }
+
   if (parts.length === 0) return '';
   return `${parts.join('/')} 생산`;
 }
@@ -1023,7 +1287,7 @@ function copyLatestSheetAsTemplate(ss, todaySheetName, today) {
   const existingSheet = ss.getSheetByName(todaySheetName);
   if (existingSheet) {
     const resp = ui.alert(
-'시트 이미 존재',
+      '시트 이미 존재',
       `"${todaySheetName}" 시트가 이미 존재합니다.\n덮어쓰시겠습니까?\n(취소 시 기존 시트에 데이터만 갱신합니다)`,
       ui.ButtonSet.OK_CANCEL
     );
@@ -1050,20 +1314,20 @@ function copyLatestSheetAsTemplate(ss, todaySheetName, today) {
     const sheetDate = new Date(todayYear, sm - 1, sd);
     if (sheetDate.getTime() > todayMs) sheetDate.setFullYear(todayYear - 1);
     if (sheetDate.getTime() < todayMs && sheetDate.getTime() > latestMs) {
-latestMs = sheetDate.getTime();
-templateSheet = s;
+      latestMs = sheetDate.getTime();
+      templateSheet = s;
     }
   }
 
   let newSheet;
   if (templateSheet) {
-newSheet = templateSheet.copyTo(ss);
+    newSheet = templateSheet.copyTo(ss);
     newSheet.setName(todaySheetName);
     ss.setActiveSheet(newSheet);
     ss.moveActiveSheet(1);
     clearDataRanges(newSheet);
   } else {
-newSheet = ss.insertSheet(todaySheetName);
+    newSheet = ss.insertSheet(todaySheetName);
   }
 
   return newSheet;
@@ -1075,28 +1339,28 @@ newSheet = ss.insertSheet(todaySheetName);
 // ════════════════════════════════════════════════════════
 function clearDataRanges(sheet) {
   const dataCells = [
-'A4','B4','C4',
-'A5','H5',
-'A6','H6',
-'C7',
-'G8',
-'B9','B10','B11','B12','B13','B14',
-'C9','C10','C11','C12','C13','C14','C15',
-'D9','D10','D11','D12','D13','D14',
-'D17','D18',
-'D19','F19','H19',
-'D20','F20','H20',
-'D21','F21','H21',
-'D22','F22','H22',
-'A23',
-'N25',
-'A29','A30',
-'C29','C30','D29','D30','E29','E30',
-'G29','G30','H29','H30','I29','I30','K29','K30',
-'A31',
-'A34','A35',
-'E34','E35',
-'I34','I35'
+    'A4','B4','C4',
+    'A5','H5',
+    'A6','H6',
+    'C7',
+    'G8',
+    'B9','B10','B11','B12','B13','B14',
+    'C9','C10','C11','C12','C13','C14','C15',
+    'D9','D10','D11','D12','D13','D14',
+    'D17','D18',
+    'D19','F19','H19',
+    'D20','F20','H20',
+    'D21','F21','H21',
+    'D22','F22','H22',
+    'A23',
+    'L24','L25','N25',
+    'A29','A30',
+    'C29','C30','D29','D30','E29','E30',
+    'G29','G30','H29','H30','I29','I30','K29','K30',
+    'A31',
+    'A34','A35',
+    'E34','E35',
+    'I34','I35'
   ];
   for (const cell of dataCells) {
     try { sheet.getRange(cell).setValue(''); } catch(e) {}
@@ -1223,12 +1487,13 @@ function buildTodayPrediction(prodPlanSS, workSchedSS, today, month, day, year) 
 
   const blocks = [];
   if (prodItems.length > 0) {
-    const ext = workFlags.P ? '(연장)' : '';
+    const ext = workFlags.P ? ' (연장)' : '';
     blocks.push(`- ${prodItems.join(' / ')} 제품 생산${ext}`);
   }
   if (btlItems.length > 0 || capProduced) {
-    const ext = workFlags.B ? '(연장)' : '';
-    const combined = [btlItems.join('/'), capProduced ? 'CAP' : ''].filter(Boolean).join('/');
+    const ext = workFlags.B ? ' (연장)' : '';
+    // BTL 계획이 있으면 CAP 계획 유무와 관계없이 항상 "BTL/CAP" 으로 표기
+    const combined = btlItems.length > 0 ? `${btlItems.join('/')}/CAP` : 'CAP';
     blocks.push(`- ${combined} 생산${ext}`);
   }
   if (lcInfoProd) blocks.push(`- 포장실 LINE CHANGE (${lcInfoProd.from} → ${lcInfoProd.to})`);
@@ -1246,13 +1511,13 @@ function buildTodayPrediction(prodPlanSS, workSchedSS, today, month, day, year) 
 function detectLC(planSheet, prodPlanSS, rowIdx, type, month, day, year) {
   let lcColStart, lcColEnd, names, lcPattern;
   if (type === 'prod') {
-lcColStart = 3; lcColEnd = 8;
-names = ['18.9L','1.5L','0.5L','0.33L','0.12L','0.19L'];
-lcPattern = /^L\/C$/i;
+    lcColStart = 3; lcColEnd = 8;
+    names = ['18.9L','1.5L','0.5L','0.33L','0.12L','0.19L'];
+    lcPattern = /^L\/C$/i;
   } else {
-lcColStart = 9; lcColEnd = 11;
-names = ['1.5L','0.5L','0.33L'];
-lcPattern = /^L\/C\(1,2,3\)$/i;
+    lcColStart = 9; lcColEnd = 11;
+    names = ['1.5L','0.5L','0.33L'];
+    lcPattern = /^L\/C\(1,2,3\)$/i;
   }
 
   const rowVals = planSheet.getRange(rowIdx, lcColStart, 1, lcColEnd - lcColStart + 1).getValues()[0];
@@ -1451,8 +1716,8 @@ function fillActualProduction(todaySheet, prodActualSS, prodLogSS, sodaLogSS, pr
 
   // ── 최종값 결정: 1순위 없으면 2순위 사용 ──────────────────────────
   // fallbackVals 인덱스: 0=18.9L(c9), 1=1.5L(c10), 2=0.5L(c11),
-  //                     3=0.33L(c12), 4=0.19L(c13), 5=0.12L(c14)
-  const c9  = logVal_c9  !== null ? logVal_c9  : (fallbackVals[0] !== null ? fallbackVals[0] : 0);
+  // 3=0.33L(c12), 4=0.19L(c13), 5=0.12L(c14)
+  const c9 = logVal_c9 !== null ? logVal_c9 : (fallbackVals[0] !== null ? fallbackVals[0] : 0);
   const c10 = logVal_c10 !== null ? logVal_c10 : (fallbackVals[1] !== null ? fallbackVals[1] : 0);
   const c11 = logVal_c11 !== null ? logVal_c11 : (fallbackVals[2] !== null ? fallbackVals[2] : 0);
   const c12 = logVal_c12 !== null ? logVal_c12 : (fallbackVals[3] !== null ? fallbackVals[3] : 0);
