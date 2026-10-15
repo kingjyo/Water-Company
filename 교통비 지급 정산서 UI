@@ -1,356 +1,569 @@
 <!DOCTYPE html>
 <html>
+
 <head>
-<base target="_top">
-<meta charset="utf-8">
-<style>
-  * { box-sizing: border-box; }
-  body { font-family: 'Malgun Gothic', '맑은 고딕', Arial, sans-serif; font-size: 13px; color: #202124; margin: 0; padding: 12px 14px; }
-  .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-  .top b { font-size: 15px; }
-  .mode { color: #5f6368; }
-  .box { border: 1px solid #dadce0; border-radius: 6px; padding: 6px 10px; margin-bottom: 10px; }
-  .row { display: flex; align-items: flex-start; margin: 6px 0; }
-  .lab { width: 56px; flex: none; font-weight: bold; padding-top: 7px; }
-  .ctl { flex: 1; }
-  .btn { display: inline-block; min-width: 30px; text-align: center; padding: 5px 10px; margin: 2px; border: 1px solid #bdc1c6; border-radius: 4px; background: #f8f9fa; cursor: pointer; user-select: none; }
-  .btn:hover { background: #e8eaed; }
-  .btn.on, .btn.on:hover { background: #1a73e8; border-color: #1a73e8; color: #fff; }
-  .btn.unknown { border-color: #d93025; border-width: 2px; }
-  .btn.day { min-width: 34px; padding: 4px 0; }
-  .hint { color: #5f6368; font-size: 12px; margin: 2px; }
-  .hint.red { color: #d93025; }
-  input[type=text] { padding: 6px 8px; margin: 3px 2px; border: 1px solid #bdc1c6; border-radius: 4px; font-size: 13px; font-family: inherit; }
-  button.act { padding: 7px 14px; margin-right: 6px; border: 1px solid #bdc1c6; border-radius: 4px; background: #fff; font-size: 13px; font-family: inherit; cursor: pointer; }
-  button.act.primary { background: #1a73e8; border-color: #1a73e8; color: #fff; }
-  button.act:disabled { opacity: .5; cursor: default; }
-  #msg { margin-left: 6px; }
-  #msg.err { color: #d93025; }
-  #msg.ok { color: #188038; }
-  .listHead { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-  .listHead a { margin-left: auto; color: #d93025; font-size: 12px; }
-  .listWrap { border: 1px solid #dadce0; border-radius: 6px; max-height: 190px; overflow-y: auto; margin-bottom: 10px; }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { padding: 5px 8px; border-bottom: 1px solid #eee; text-align: left; }
-  th { background: #f1f3f4; position: sticky; top: 0; }
-  td.del { width: 40px; text-align: center; color: #d93025; cursor: pointer; font-weight: bold; }
-  td.empty { text-align: center; color: #80868b; padding: 14px; }
-  .dup { color: #e37400; font-size: 12px; margin-left: 4px; }
-  .foot { display: flex; align-items: center; }
-  #busy { color: #5f6368; margin-left: 4px; }
-  #resultText { white-space: pre-wrap; font-family: inherit; font-size: 13px; line-height: 1.6; border: 1px solid #dadce0; border-radius: 6px; padding: 12px; margin: 0 0 12px 0; }
-  #loading { padding: 40px 0; text-align: center; color: #5f6368; }
-</style>
+  <base target="_top">
+  <meta charset="utf-8">
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Malgun Gothic', '맑은 고딕', Arial, sans-serif;
+      font-size: 13px;
+      color: #202124;
+      margin: 0;
+      padding: 12px 14px;
+    }
+
+    .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .top b {
+      font-size: 15px;
+    }
+
+    .mode {
+      color: #5f6368;
+    }
+
+    .box {
+      border: 1px solid #dadce0;
+      border-radius: 6px;
+      padding: 6px 10px;
+      margin-bottom: 10px;
+    }
+
+    .row {
+      display: flex;
+      align-items: flex-start;
+      margin: 6px 0;
+    }
+
+    .lab {
+      width: 56px;
+      flex: none;
+      font-weight: bold;
+      padding-top: 7px;
+    }
+
+    .ctl {
+      flex: 1;
+    }
+
+    .btn {
+      display: inline-block;
+      min-width: 30px;
+      text-align: center;
+      padding: 5px 10px;
+      margin: 2px;
+      border: 1px solid #bdc1c6;
+      border-radius: 4px;
+      background: #f8f9fa;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .btn:hover {
+      background: #e8eaed;
+    }
+
+    .btn.on,
+    .btn.on:hover {
+      background: #1a73e8;
+      border-color: #1a73e8;
+      color: #fff;
+    }
+
+    .btn.unknown {
+      border-color: #d93025;
+      border-width: 2px;
+    }
+
+    .btn.day {
+      min-width: 34px;
+      padding: 4px 0;
+    }
+
+    .hint {
+      color: #5f6368;
+      font-size: 12px;
+      margin: 2px;
+    }
+
+    .hint.red {
+      color: #d93025;
+    }
+
+    input[type=text] {
+      padding: 6px 8px;
+      margin: 3px 2px;
+      border: 1px solid #bdc1c6;
+      border-radius: 4px;
+      font-size: 13px;
+      font-family: inherit;
+    }
+
+    button.act {
+      padding: 7px 14px;
+      margin-right: 6px;
+      border: 1px solid #bdc1c6;
+      border-radius: 4px;
+      background: #fff;
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+    }
+
+    button.act.primary {
+      background: #1a73e8;
+      border-color: #1a73e8;
+      color: #fff;
+    }
+
+    button.act:disabled {
+      opacity: .5;
+      cursor: default;
+    }
+
+    #msg {
+      margin-left: 6px;
+    }
+
+    #msg.err {
+      color: #d93025;
+    }
+
+    #msg.ok {
+      color: #188038;
+    }
+
+    .listHead {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .listHead a {
+      margin-left: auto;
+      color: #d93025;
+      font-size: 12px;
+    }
+
+    .listWrap {
+      border: 1px solid #dadce0;
+      border-radius: 6px;
+      max-height: 190px;
+      overflow-y: auto;
+      margin-bottom: 10px;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+    }
+
+    th,
+    td {
+      padding: 5px 8px;
+      border-bottom: 1px solid #eee;
+      text-align: left;
+    }
+
+    th {
+      background: #f1f3f4;
+      position: sticky;
+      top: 0;
+    }
+
+    td.del {
+      width: 40px;
+      text-align: center;
+      color: #d93025;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    td.empty {
+      text-align: center;
+      color: #80868b;
+      padding: 14px;
+    }
+
+    .dup {
+      color: #e37400;
+      font-size: 12px;
+      margin-left: 4px;
+    }
+
+    .foot {
+      display: flex;
+      align-items: center;
+    }
+
+    #busy {
+      color: #5f6368;
+      margin-left: 4px;
+    }
+
+    #resultText {
+      white-space: pre-wrap;
+      font-family: inherit;
+      font-size: 13px;
+      line-height: 1.6;
+      border: 1px solid #dadce0;
+      border-radius: 6px;
+      padding: 12px;
+      margin: 0 0 12px 0;
+    }
+
+    #loading {
+      padding: 40px 0;
+      text-align: center;
+      color: #5f6368;
+    }
+  </style>
 </head>
+
 <body>
 
-<div id="loading">불러오는 중… (근무현황표·근무계획 시트를 읽고 있습니다)</div>
+  <div id="loading">불러오는 중… (근무현황표·근무계획 시트를 읽고 있습니다)</div>
 
-<div id="main" style="display:none">
-  <div class="top">
-    <b id="ttl"></b>
-    <span class="mode" id="modeLbl"></span>
+  <div id="main" style="display:none">
+    <div class="top">
+      <b id="ttl"></b>
+      <span class="mode" id="modeLbl"></span>
+    </div>
+
+    <div class="box">
+      <div class="row">
+        <div class="lab">시트</div>
+        <div class="ctl" id="tabs"></div>
+      </div>
+      <div class="row">
+        <div class="lab">이름</div>
+        <div class="ctl">
+          <div id="names"></div>
+          <input type="text" id="customName" placeholder="직접 입력 (여러 명은 쉼표로 구분)" style="width:280px">
+          <div class="hint red" id="unknownHint" style="display:none">빨간 테두리: 근무계획 C열에 없는 이름입니다. 표기를 확인하세요.</div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="lab">일자</div>
+        <div class="ctl">
+          <div id="days"></div>
+          <div class="hint">여러 날짜를 동시에 선택할 수 있습니다.</div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="lab">사유</div>
+        <div class="ctl">
+          <div id="reasons"></div>
+          <input type="text" id="reason" placeholder="위 버튼을 누르거나 직접 입력" style="width:380px">
+        </div>
+      </div>
+      <div class="row">
+        <div class="lab"></div>
+        <div class="ctl">
+          <button class="act primary" id="addBtn">＋ 목록에 추가</button>
+          <span id="msg"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="listHead">
+      <b>이번 달 특이사항 목록</b><span id="cnt" class="hint"></span>
+      <a href="#" id="clearAll">전체 삭제</a>
+    </div>
+    <div class="listWrap">
+      <table>
+        <thead>
+          <tr>
+            <th>시트</th>
+            <th>일자</th>
+            <th>이름</th>
+            <th>사유</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="list"></tbody>
+      </table>
+    </div>
+
+    <div class="foot">
+      <button class="act primary" id="runBtn">저장 후 정산 실행</button>
+      <button class="act" id="saveBtn">저장만</button>
+      <button class="act" id="closeBtn">닫기</button>
+      <span id="busy"></span>
+    </div>
   </div>
 
-  <div class="box">
-    <div class="row"><div class="lab">시트</div><div class="ctl" id="tabs"></div></div>
-    <div class="row"><div class="lab">이름</div><div class="ctl">
-      <div id="names"></div>
-      <input type="text" id="customName" placeholder="직접 입력 (여러 명은 쉼표로 구분)" style="width:280px">
-      <div class="hint red" id="unknownHint" style="display:none">빨간 테두리: 근무계획 C열에 없는 이름입니다. 표기를 확인하세요.</div>
-    </div></div>
-    <div class="row"><div class="lab">일자</div><div class="ctl">
-      <div id="days"></div>
-      <div class="hint">여러 날짜를 동시에 선택할 수 있습니다.</div>
-    </div></div>
-    <div class="row"><div class="lab">사유</div><div class="ctl">
-      <div id="reasons"></div>
-      <input type="text" id="reason" placeholder="위 버튼을 누르거나 직접 입력" style="width:380px">
-    </div></div>
-    <div class="row"><div class="lab"></div><div class="ctl">
-      <button class="act primary" id="addBtn">＋ 목록에 추가</button>
-      <span id="msg"></span>
-    </div></div>
+  <div id="result" style="display:none">
+    <pre id="resultText"></pre>
+    <button class="act primary" id="doneBtn">닫기</button>
   </div>
 
-  <div class="listHead">
-    <b>이번 달 특이사항 목록</b><span id="cnt" class="hint"></span>
-    <a href="#" id="clearAll">전체 삭제</a>
-  </div>
-  <div class="listWrap">
-    <table>
-      <thead><tr><th>시트</th><th>일자</th><th>이름</th><th>사유</th><th></th></tr></thead>
-      <tbody id="list"></tbody>
-    </table>
-  </div>
+  <script>
+    var RUN_MODE = <?!= JSON.stringify(mode) ?>;
+    var MODE_LABEL = { ALL: '전체 시트', BTL: 'BTL 생산 시트만', SEJEUM: '제품생산 시트만', CIP: '품질 CIP 시트만' };
 
-  <div class="foot">
-    <button class="act primary" id="runBtn">저장 후 정산 실행</button>
-    <button class="act" id="saveBtn">저장만</button>
-    <button class="act" id="closeBtn">닫기</button>
-    <span id="busy"></span>
-  </div>
-</div>
+    var INIT = null;
+    var curSheet = null;
+    var selNames = {};
+    var selDays = {};
+    var entries = [];
+    var dirty = false;
 
-<div id="result" style="display:none">
-  <pre id="resultText"></pre>
-  <button class="act primary" id="doneBtn">닫기</button>
-</div>
+    function $(id) { return document.getElementById(id); }
+    function el(tag, cls, text) {
+      var e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text !== undefined) e.textContent = text;
+      return e;
+    }
+    function trim(s) { return String(s).replace(/^\s+|\s+$/g, ''); }
+    function sheetCfg(key) {
+      for (var i = 0; i < INIT.sheets.length; i++) if (INIT.sheets[i].key === key) return INIT.sheets[i];
+      return null;
+    }
+    function sheetIndex(key) {
+      for (var i = 0; i < INIT.sheets.length; i++) if (INIT.sheets[i].key === key) return i;
+      return 99;
+    }
+    function setMsg(text, isErr) {
+      var m = $('msg');
+      m.textContent = text || '';
+      m.className = isErr ? 'err' : 'ok';
+    }
 
-<script>
-  var RUN_MODE = <?!= JSON.stringify(mode) ?>;
-  var MODE_LABEL = { ALL: '전체 시트', BTL: 'BTL 생산 시트만', SEJEUM: '제품생산 시트만', CIP: '품질 CIP 시트만' };
+    // ── 초기화 ──
+    google.script.run
+      .withSuccessHandler(onInit)
+      .withFailureHandler(function (err) {
+        $('loading').textContent = '오류: ' + err.message;
+      })
+      .getDialogInit();
 
-  var INIT = null;
-  var curSheet = null;
-  var selNames = {};
-  var selDays = {};
-  var entries = [];
-  var dirty = false;
+    function onInit(data) {
+      INIT = data;
+      entries = data.entries || [];
+      curSheet = (RUN_MODE !== 'ALL' && sheetCfg(RUN_MODE)) ? RUN_MODE : data.sheets[0].key;
 
-  function $(id) { return document.getElementById(id); }
-  function el(tag, cls, text) {
-    var e = document.createElement(tag);
-    if (cls) e.className = cls;
-    if (text !== undefined) e.textContent = text;
-    return e;
-  }
-  function trim(s) { return String(s).replace(/^\s+|\s+$/g, ''); }
-  function sheetCfg(key) {
-    for (var i = 0; i < INIT.sheets.length; i++) if (INIT.sheets[i].key === key) return INIT.sheets[i];
-    return null;
-  }
-  function sheetIndex(key) {
-    for (var i = 0; i < INIT.sheets.length; i++) if (INIT.sheets[i].key === key) return i;
-    return 99;
-  }
-  function setMsg(text, isErr) {
-    var m = $('msg');
-    m.textContent = text || '';
-    m.className = isErr ? 'err' : 'ok';
-  }
+      $('ttl').textContent = data.month + '월 특이사항 입력';
+      $('modeLbl').textContent = '실행 대상: ' + (MODE_LABEL[RUN_MODE] || RUN_MODE);
+      if (data.unknownNames && data.unknownNames.length > 0) $('unknownHint').style.display = 'block';
 
-  // ── 초기화 ──
-  google.script.run
-    .withSuccessHandler(onInit)
-    .withFailureHandler(function (err) {
-      $('loading').textContent = '오류: ' + err.message;
-    })
-    .getDialogInit();
+      renderTabs(); renderNames(); renderDays(); renderReasons(); renderList();
+      $('loading').style.display = 'none';
+      $('main').style.display = 'block';
+    }
 
-  function onInit(data) {
-    INIT = data;
-    entries = data.entries || [];
-    curSheet = (RUN_MODE !== 'ALL' && sheetCfg(RUN_MODE)) ? RUN_MODE : data.sheets[0].key;
-
-    $('ttl').textContent = data.month + '월 특이사항 입력';
-    $('modeLbl').textContent = '실행 대상: ' + (MODE_LABEL[RUN_MODE] || RUN_MODE);
-    if (data.unknownNames && data.unknownNames.length > 0) $('unknownHint').style.display = 'block';
-
-    renderTabs(); renderNames(); renderDays(); renderReasons(); renderList();
-    $('loading').style.display = 'none';
-    $('main').style.display = 'block';
-  }
-
-  // ── 렌더링 ──
-  function renderTabs() {
-    var box = $('tabs'); box.innerHTML = '';
-    INIT.sheets.forEach(function (s) {
-      var b = el('span', 'btn' + (s.key === curSheet ? ' on' : ''), s.sheetName);
-      b.onclick = function () {
-        if (curSheet === s.key) return;
-        curSheet = s.key;
-        selNames = {};
-        $('customName').value = '';
-        $('reason').value = '';
-        setMsg('');
-        renderTabs(); renderNames(); renderReasons();
-      };
-      box.appendChild(b);
-    });
-  }
-
-  function renderNames() {
-    var box = $('names'); box.innerHTML = '';
-    var cfg = sheetCfg(curSheet);
-    cfg.names.forEach(function (n) {
-      var unknown = INIT.unknownNames.indexOf(n) >= 0;
-      var b = el('span', 'btn' + (selNames[n] ? ' on' : '') + (unknown ? ' unknown' : ''), n);
-      if (unknown) b.title = '근무계획 C열에 없는 이름';
-      b.onclick = function () { selNames[n] = !selNames[n]; renderNames(); };
-      box.appendChild(b);
-    });
-  }
-
-  function renderDays() {
-    var box = $('days'); box.innerHTML = '';
-    for (var d = 1; d <= INIT.daysInMonth; d++) {
-      (function (day) {
-        var b = el('span', 'btn day' + (selDays[day] ? ' on' : ''), String(day));
-        b.onclick = function () { selDays[day] = !selDays[day]; renderDays(); };
+    // ── 렌더링 ──
+    function renderTabs() {
+      var box = $('tabs'); box.innerHTML = '';
+      INIT.sheets.forEach(function (s) {
+        var b = el('span', 'btn' + (s.key === curSheet ? ' on' : ''), s.sheetName);
+        b.onclick = function () {
+          if (curSheet === s.key) return;
+          curSheet = s.key;
+          selNames = {};
+          $('customName').value = '';
+          $('reason').value = '';
+          setMsg('');
+          renderTabs(); renderNames(); renderReasons();
+        };
         box.appendChild(b);
-      })(d);
-    }
-  }
-
-  function renderReasons() {
-    var box = $('reasons'); box.innerHTML = '';
-    var cfg = sheetCfg(curSheet);
-    var cur = trim($('reason').value);
-    if (cfg.reasons.length === 0) {
-      box.appendChild(el('span', 'hint', '(등록된 사유 버튼 없음 — 아래에 직접 입력)'));
-      return;
-    }
-    cfg.reasons.forEach(function (r) {
-      var b = el('span', 'btn' + (cur === r ? ' on' : ''), r);
-      b.onclick = function () { $('reason').value = r; renderReasons(); };
-      box.appendChild(b);
-    });
-  }
-  $('reason').oninput = renderReasons;
-
-  function renderList() {
-    var body = $('list'); body.innerHTML = '';
-    $('cnt').textContent = '(' + entries.length + '건)';
-
-    if (entries.length === 0) {
-      var tr0 = el('tr'); var td0 = el('td', 'empty', '입력된 특이사항이 없습니다. 없으면 그대로 "저장 후 정산 실행"을 누르세요.');
-      td0.colSpan = 5; tr0.appendChild(td0); body.appendChild(tr0);
-      return;
-    }
-
-    var count = {};
-    entries.forEach(function (e) {
-      var k = e.sheetKey + '|' + e.name + '|' + e.day;
-      count[k] = (count[k] || 0) + 1;
-    });
-
-    var sorted = entries.slice().sort(function (a, b) {
-      var sa = sheetIndex(a.sheetKey), sb = sheetIndex(b.sheetKey);
-      if (sa !== sb) return sa - sb;
-      if (a.day !== b.day) return a.day - b.day;
-      return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
-    });
-
-    sorted.forEach(function (e) {
-      var tr = el('tr');
-      tr.appendChild(el('td', '', sheetCfg(e.sheetKey).sheetName));
-      tr.appendChild(el('td', '', INIT.month + '월 ' + e.day + '일'));
-      var tdName = el('td', '', e.name);
-      if (count[e.sheetKey + '|' + e.name + '|' + e.day] > 1) tdName.appendChild(el('span', 'dup', '⚠ 같은 날 중복'));
-      tr.appendChild(tdName);
-      tr.appendChild(el('td', '', e.reason));
-      var del = el('td', 'del', '✕');
-      del.title = '삭제';
-      del.onclick = function () {
-        var idx = entries.indexOf(e);
-        if (idx >= 0) entries.splice(idx, 1);
-        dirty = true;
-        renderList();
-      };
-      tr.appendChild(del);
-      body.appendChild(tr);
-    });
-  }
-
-  // ── 목록에 추가 ──
-  function collectNames() {
-    var cfg = sheetCfg(curSheet);
-    var names = cfg.names.filter(function (n) { return selNames[n]; });
-    $('customName').value.split(/[,，]/).forEach(function (raw) {
-      var n = trim(raw);
-      if (n && names.indexOf(n) < 0) names.push(n);
-    });
-    return names;
-  }
-  function collectDays() {
-    var days = [];
-    for (var d = 1; d <= INIT.daysInMonth; d++) if (selDays[d]) days.push(d);
-    return days;
-  }
-
-  $('addBtn').onclick = function () {
-    var names = collectNames();
-    var days = collectDays();
-    var reason = trim($('reason').value);
-
-    if (names.length === 0) return setMsg('이름을 선택하거나 입력하세요.', true);
-    if (days.length === 0) return setMsg('일자를 선택하세요.', true);
-    if (!reason) return setMsg('사유를 선택하거나 입력하세요.', true);
-
-    var added = 0, skipped = 0;
-    names.forEach(function (n) {
-      days.forEach(function (d) {
-        var exists = entries.some(function (e) {
-          return e.sheetKey === curSheet && e.name === n && e.day === d && e.reason === reason;
-        });
-        if (exists) { skipped++; return; }
-        entries.push({ sheetKey: curSheet, name: n, day: d, reason: reason });
-        added++;
       });
-    });
+    }
 
-    if (added > 0) dirty = true;
-    selNames = {}; selDays = {};
-    $('customName').value = '';
-    $('reason').value = '';
-    renderNames(); renderDays(); renderReasons(); renderList();
-    setMsg(added + '건 추가됨' + (skipped > 0 ? ' (이미 있는 ' + skipped + '건 제외)' : ''), false);
-  };
+    function renderNames() {
+      var box = $('names'); box.innerHTML = '';
+      var cfg = sheetCfg(curSheet);
+      cfg.names.forEach(function (n) {
+        var unknown = INIT.unknownNames.indexOf(n) >= 0;
+        var b = el('span', 'btn' + (selNames[n] ? ' on' : '') + (unknown ? ' unknown' : ''), n);
+        if (unknown) b.title = '근무계획 C열에 없는 이름';
+        b.onclick = function () { selNames[n] = !selNames[n]; renderNames(); };
+        box.appendChild(b);
+      });
+    }
 
-  $('clearAll').onclick = function (ev) {
-    ev.preventDefault();
-    if (entries.length === 0) return;
-    if (!confirm(INIT.month + '월 특이사항 ' + entries.length + '건을 모두 삭제할까요?\n(저장 버튼을 눌러야 실제로 반영됩니다)')) return;
-    entries = [];
-    dirty = true;
-    renderList();
-  };
+    function renderDays() {
+      var box = $('days'); box.innerHTML = '';
+      for (var d = 1; d <= INIT.daysInMonth; d++) {
+        (function (day) {
+          var b = el('span', 'btn day' + (selDays[day] ? ' on' : ''), String(day));
+          b.onclick = function () { selDays[day] = !selDays[day]; renderDays(); };
+          box.appendChild(b);
+        })(d);
+      }
+    }
 
-  // ── 저장 / 실행 ──
-  function hasPendingSelection() {
-    return collectNames().length > 0 || collectDays().length > 0 || trim($('reason').value) !== '';
-  }
-  function setBusy(on, text) {
-    ['runBtn', 'saveBtn', 'closeBtn', 'addBtn'].forEach(function (id) { $(id).disabled = on; });
-    $('busy').textContent = on ? (text || '') : '';
-  }
+    function renderReasons() {
+      var box = $('reasons'); box.innerHTML = '';
+      var cfg = sheetCfg(curSheet);
+      var cur = trim($('reason').value);
+      if (cfg.reasons.length === 0) {
+        box.appendChild(el('span', 'hint', '(등록된 사유 버튼 없음 — 아래에 직접 입력)'));
+        return;
+      }
+      cfg.reasons.forEach(function (r) {
+        var b = el('span', 'btn' + (cur === r ? ' on' : ''), r);
+        b.onclick = function () { $('reason').value = r; renderReasons(); };
+        box.appendChild(b);
+      });
+    }
+    $('reason').oninput = renderReasons;
 
-  function submit(runAfter) {
-    if (hasPendingSelection() &&
+    function renderList() {
+      var body = $('list'); body.innerHTML = '';
+      $('cnt').textContent = '(' + entries.length + '건)';
+
+      if (entries.length === 0) {
+        var tr0 = el('tr'); var td0 = el('td', 'empty', '입력된 특이사항이 없습니다. 없으면 그대로 "저장 후 정산 실행"을 누르세요.');
+        td0.colSpan = 5; tr0.appendChild(td0); body.appendChild(tr0);
+        return;
+      }
+
+      var count = {};
+      entries.forEach(function (e) {
+        var k = e.sheetKey + '|' + e.name + '|' + e.day;
+        count[k] = (count[k] || 0) + 1;
+      });
+
+      var sorted = entries.slice().sort(function (a, b) {
+        var sa = sheetIndex(a.sheetKey), sb = sheetIndex(b.sheetKey);
+        if (sa !== sb) return sa - sb;
+        if (a.day !== b.day) return a.day - b.day;
+        return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+      });
+
+      sorted.forEach(function (e) {
+        var tr = el('tr');
+        tr.appendChild(el('td', '', sheetCfg(e.sheetKey).sheetName));
+        tr.appendChild(el('td', '', INIT.month + '월 ' + e.day + '일'));
+        var tdName = el('td', '', e.name);
+        if (count[e.sheetKey + '|' + e.name + '|' + e.day] > 1) tdName.appendChild(el('span', 'dup', '⚠ 같은 날 중복'));
+        tr.appendChild(tdName);
+        tr.appendChild(el('td', '', e.reason));
+        var del = el('td', 'del', '✕');
+        del.title = '삭제';
+        del.onclick = function () {
+          var idx = entries.indexOf(e);
+          if (idx >= 0) entries.splice(idx, 1);
+          dirty = true;
+          renderList();
+        };
+        tr.appendChild(del);
+        body.appendChild(tr);
+      });
+    }
+
+    // ── 목록에 추가 ──
+    function collectNames() {
+      var cfg = sheetCfg(curSheet);
+      var names = cfg.names.filter(function (n) { return selNames[n]; });
+      $('customName').value.split(/[,，]/).forEach(function (raw) {
+        var n = trim(raw);
+        if (n && names.indexOf(n) < 0) names.push(n);
+      });
+      return names;
+    }
+    function collectDays() {
+      var days = [];
+      for (var d = 1; d <= INIT.daysInMonth; d++) if (selDays[d]) days.push(d);
+      return days;
+    }
+
+    $('addBtn').onclick = function () {
+      var names = collectNames();
+      var days = collectDays();
+      var reason = trim($('reason').value);
+
+      if (names.length === 0) return setMsg('이름을 선택하거나 입력하세요.', true);
+      if (days.length === 0) return setMsg('일자를 선택하세요.', true);
+      if (!reason) return setMsg('사유를 선택하거나 입력하세요.', true);
+
+      var added = 0, skipped = 0;
+      names.forEach(function (n) {
+        days.forEach(function (d) {
+          var exists = entries.some(function (e) {
+            return e.sheetKey === curSheet && e.name === n && e.day === d && e.reason === reason;
+          });
+          if (exists) { skipped++; return; }
+          entries.push({ sheetKey: curSheet, name: n, day: d, reason: reason });
+          added++;
+        });
+      });
+
+      if (added > 0) dirty = true;
+      selNames = {}; selDays = {};
+      $('customName').value = '';
+      $('reason').value = '';
+      renderNames(); renderDays(); renderReasons(); renderList();
+      setMsg(added + '건 추가됨' + (skipped > 0 ? ' (이미 있는 ' + skipped + '건 제외)' : ''), false);
+    };
+
+    $('clearAll').onclick = function (ev) {
+      ev.preventDefault();
+      if (entries.length === 0) return;
+      if (!confirm(INIT.month + '월 특이사항 ' + entries.length + '건을 모두 삭제할까요?\n(저장 버튼을 눌러야 실제로 반영됩니다)')) return;
+      entries = [];
+      dirty = true;
+      renderList();
+    };
+
+    // ── 저장 / 실행 ──
+    function hasPendingSelection() {
+      return collectNames().length > 0 || collectDays().length > 0 || trim($('reason').value) !== '';
+    }
+    function setBusy(on, text) {
+      ['runBtn', 'saveBtn', 'closeBtn', 'addBtn'].forEach(function (id) { $(id).disabled = on; });
+      $('busy').textContent = on ? (text || '') : '';
+    }
+
+    function submit(runAfter) {
+      if (hasPendingSelection() &&
         !confirm('선택만 하고 아직 "목록에 추가"하지 않은 내용이 있습니다.\n이 내용은 반영되지 않습니다. 그대로 진행할까요?')) return;
 
-    setMsg('');
-    setBusy(true, runAfter ? '저장 후 정산 실행 중… (외부 시트를 읽느라 10~30초 걸릴 수 있습니다)' : '저장 중…');
+      setMsg('');
+      setBusy(true, runAfter ? '저장 후 정산 실행 중… (외부 시트를 읽느라 10~30초 걸릴 수 있습니다)' : '저장 중…');
 
-    var runner = google.script.run
-      .withSuccessHandler(function (res) {
-        setBusy(false);
-        dirty = false;
-        if (runAfter) {
-          $('main').style.display = 'none';
-          $('resultText').textContent = res;
-          $('result').style.display = 'block';
-        } else {
-          setMsg('저장됨 (' + res + '건)', false);
-        }
-      })
-      .withFailureHandler(function (err) {
-        setBusy(false);
-        setMsg('오류: ' + err.message, true);
-      });
+      var runner = google.script.run
+        .withSuccessHandler(function (res) {
+          setBusy(false);
+          dirty = false;
+          if (runAfter) {
+            $('main').style.display = 'none';
+            $('resultText').textContent = res;
+            $('result').style.display = 'block';
+          } else {
+            setMsg('저장됨 (' + res + '건)', false);
+          }
+        })
+        .withFailureHandler(function (err) {
+          setBusy(false);
+          setMsg('오류: ' + err.message, true);
+        });
 
-    if (runAfter) runner.saveSpecialsAndRun(INIT.month, entries, RUN_MODE);
-    else runner.saveSpecials(INIT.month, entries);
-  }
+      if (runAfter) runner.saveSpecialsAndRun(INIT.month, entries, RUN_MODE);
+      else runner.saveSpecials(INIT.month, entries);
+    }
 
-  $('runBtn').onclick = function () { submit(true); };
-  $('saveBtn').onclick = function () { submit(false); };
-  $('closeBtn').onclick = function () {
-    if (dirty && !confirm('저장하지 않은 변경 사항이 있습니다. 그냥 닫을까요?')) return;
-    google.script.host.close();
-  };
-  $('doneBtn').onclick = function () { google.script.host.close(); };
-</script>
+    $('runBtn').onclick = function () { submit(true); };
+    $('saveBtn').onclick = function () { submit(false); };
+    $('closeBtn').onclick = function () {
+      if (dirty && !confirm('저장하지 않은 변경 사항이 있습니다. 그냥 닫을까요?')) return;
+      google.script.host.close();
+    };
+    $('doneBtn').onclick = function () { google.script.host.close(); };
+  </script>
 </body>
+
 </html>

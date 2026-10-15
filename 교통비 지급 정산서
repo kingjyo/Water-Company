@@ -12,12 +12,22 @@ const ATTENDANCE_SS_ID = '1UjHzUCH3w4eUQuxIZrzOtgeCi4itVUOTXDq7sm8PcvE'; // 근�
 const MENU_OWNER_EMAIL = 'youngjoonkim@kas.co.kr';
 
 // ───────────────────────────────────────────
-// 시트 레이아웃 설정
+// 근무계획 시트 레이아웃 ★ 이름은 C5부터, A열에 "계"가 나오는 행 전까지
 // ───────────────────────────────────────────
-const DATA_START_ROW = 5;          // 데이터 시작 행
-const TEMPLATE_ROW = 6;            // 행 추가/수식 복구 시 기준이 되는 행
-const TARGET_SUM_ROW = 100;        // 합계 행 목표 위치 (K100)
-const SUM_COL = 11;                // K열
+const WP_HEADER_ROW = 3; // 일자 헤더 행 (G3:AK3)
+const WP_NAME_START_ROW = 5; // 이름 시작 행
+const WP_END_MARK_COL = 1; // A열 — "계"가 나오면 그 위까지가 사람
+const WP_NAME_COL = 3; // C열
+const WP_DAY_START_COL = 7; // G열
+const WP_DAY_COUNT = 31; // G~AK
+
+// ───────────────────────────────────────────
+// 정산 시트 레이아웃 설정
+// ───────────────────────────────────────────
+const DATA_START_ROW = 5; // 데이터 시작 행
+const TEMPLATE_ROW = 6; // 행 추가/수식 복구 시 기준이 되는 행
+const TARGET_SUM_ROW = 100; // 합계 행 목표 위치 (K100)
+const SUM_COL = 11; // K열
 const DATE_FORMAT = 'm"월" d"일"'; // B열 표시 형식
 const ROUTE_TEXT = '공장 ↔ 제주시';
 
@@ -25,10 +35,10 @@ const ROUTE_TEXT = '공장 ↔ 제주시';
 // 특이사항 설정 ★ 이름/사유 버튼은 여기서 수정
 // ───────────────────────────────────────────
 const SPECIAL_SHEET_NAME = '특이사항'; // 특이사항 저장용 (숨김 시트, 자동 생성)
-const SPECIAL_EXPIRE_DAYS = 200;       // 이 일수보다 오래된 특이사항은 무시 (작년 같은 달 방지)
+const SPECIAL_EXPIRE_DAYS = 200; // 이 일수보다 오래된 특이사항은 무시 (작년 같은 달 방지)
 
 const PRODUCTION_NAMES = ['이정묵', '김일수', '양공호', '김정운', '강영우', '임상균', '양진복', '강은철', '고남호', '이청훈'];
-const QUALITY_NAMES = ['박수형', '고혁진', '진성령']; // ← 이름 표기 확인 필요
+const QUALITY_NAMES = ['박수형', '고혁진', '진성령', '김은혁'];
 
 const SHEET_CFG = {
   SEJEUM: {
@@ -47,7 +57,7 @@ const SHEET_CFG = {
     reasons: []
   }
 };
-const UI_SHEET_ORDER = ['SEJEUM', 'CIP', 'BTL'];  // 입력창 탭 순서
+const UI_SHEET_ORDER = ['SEJEUM', 'CIP', 'BTL']; // 입력창 탭 순서
 const RUN_SHEET_ORDER = ['BTL', 'SEJEUM', 'CIP']; // 전체 실행 순서
 
 // ───────────────────────────────────────────
@@ -64,6 +74,7 @@ function onOpen() {
       .addItem('제품생산 시트만', 'fillSejeumSheet')
       .addItem('품질 CIP 시트만', 'fillCIPSheet')
       .addSeparator()
+      .addItem('근무계획 이름 확인', 'checkWorkPlanNames')
       .addItem('⚙ 합계 행을 100행으로 맞추기 (최초 1회)', 'setupSumRow100')
       .addItem('도움말', 'showHelp')
       .addToUi();
@@ -71,10 +82,10 @@ function onOpen() {
 }
 
 // 메뉴 → 모두 특이사항 입력창을 먼저 띄움
-function fillAllSheets()   { openSpecialDialog_('ALL'); }
-function fillBTLSheet()    { openSpecialDialog_('BTL'); }
+function fillAllSheets() { openSpecialDialog_('ALL'); }
+function fillBTLSheet() { openSpecialDialog_('BTL'); }
 function fillSejeumSheet() { openSpecialDialog_('SEJEUM'); }
-function fillCIPSheet()    { openSpecialDialog_('CIP'); }
+function fillCIPSheet() { openSpecialDialog_('CIP'); }
 
 function openSpecialDialog_(mode) {
   const t = HtmlService.createTemplateFromFile('SpecialDialog');
@@ -121,9 +132,15 @@ function getMonthNumber() {
   throw new Error('근무현황표 스프레드시트의 "근무현황표" 시트 Z3에서 월을 읽지 못했습니다. Z3 셀을 확인해주세요.');
 }
 
+/** A열 값이 "계"(합계/소계 포함)인지 */
+function isEndMark_(v) {
+  return /^(합|소)?계$/.test(String(v === null || v === undefined ? '' : v).replace(/\s+/g, ''));
+}
+
 /**
  * 근무계획 → 해당 월 시트 파싱 + 직급 순위 매핑
- * 반환: { records: [...], rankMap: { "김일수": 0, ... } }
+ * 범위: C5부터 A열에 "계"가 나오는 행 전까지 (못 찾으면 시트 마지막 행까지)
+ * 반환: { records: [...], rankMap: { "김일수": 0, ... }, endRow, endMarkFound }
  */
 function parseMonthlyWorkData(month) {
   const ss = SpreadsheetApp.openById(WORK_PLAN_SS_ID);
@@ -133,21 +150,34 @@ function parseMonthlyWorkData(month) {
     throw new Error(`근무계획 스프레드시트에서 "${monthName}" 시트를 찾을 수 없습니다.`);
   }
 
-  const dayRow = monthSheet.getRange('G3:AK3').getValues()[0];
-  const nameCol = monthSheet.getRange('C5:C20').getValues();
-  const workGrid = monthSheet.getRange('G5:AK20').getValues();
+  const lastRow = monthSheet.getLastRow();
+  if (lastRow < WP_NAME_START_ROW) {
+    throw new Error(`"${monthName}" 시트 ${WP_NAME_START_ROW}행 이후에 데이터가 없습니다.`);
+  }
+
+  // A열에서 "계" 행 찾기 → 그 위까지가 사람
+  const markCol = monthSheet.getRange(WP_NAME_START_ROW, WP_END_MARK_COL, lastRow - WP_NAME_START_ROW + 1, 1).getValues();
+  let numRows = markCol.length;
+  let endMarkFound = false;
+  for (let i = 0; i < markCol.length; i++) {
+    if (isEndMark_(markCol[i][0])) { numRows = i; endMarkFound = true; break; }
+  }
+  if (numRows === 0) {
+    throw new Error(`"${monthName}" 시트 ${WP_NAME_START_ROW}행 A열이 이미 "계"라 읽을 이름이 없습니다.`);
+  }
+
+  const dayRow = monthSheet.getRange(WP_HEADER_ROW, WP_DAY_START_COL, 1, WP_DAY_COUNT).getValues()[0];
+  const nameCol = monthSheet.getRange(WP_NAME_START_ROW, WP_NAME_COL, numRows, 1).getValues();
+  const workGrid = monthSheet.getRange(WP_NAME_START_ROW, WP_DAY_START_COL, numRows, WP_DAY_COUNT).getValues();
 
   const records = [];
   const rankMap = {};
 
   for (let r = 0; r < nameCol.length; r++) {
     const name = String(nameCol[r][0]).trim();
-    if (name && !(name in rankMap)) rankMap[name] = r;
-  }
-
-  for (let r = 0; r < nameCol.length; r++) {
-    const name = String(nameCol[r][0]).trim();
     if (!name) continue;
+    if (!(name in rankMap)) rankMap[name] = r;
+
     for (let c = 0; c < dayRow.length; c++) {
       const dayVal = dayRow[c];
       if (!dayVal && dayVal !== 0) continue;
@@ -156,14 +186,13 @@ function parseMonthlyWorkData(month) {
 
       const rawType = String(workGrid[r][c]).trim();
       if (!rawType) continue;
-
       const type = normalizeType(rawType);
       if (!type) continue;
 
       records.push({ name, day, type, rawType, monthName });
     }
   }
-  return { records, rankMap };
+  return { records, rankMap, endRow: WP_NAME_START_ROW + numRows - 1, endMarkFound };
 }
 
 /**
@@ -244,7 +273,7 @@ function insertDataRows_(sheet, sumRow, count) {
 }
 
 // ───────────────────────────────────────────
-// 사유 생성 함수들 (BTL, 제품생산, CIP) — 기존 로직 그대로
+// 사유 생성 함수들 (BTL, 제품생산, CIP)
 // ───────────────────────────────────────────
 function getBTLReason(dayPlan) {
   if (!dayPlan) return 'BTL/CAP 생산';
@@ -323,7 +352,7 @@ function getCIPReasonName(col) {
 }
 
 // ───────────────────────────────────────────
-// 공통 시트 쓰기 ★ 전면 개선
+// 공통 시트 쓰기
 // 반환: { count, sumRow, addedRows }
 // ───────────────────────────────────────────
 function writeToSheet(targetSheet, rows, monthName) {
@@ -388,7 +417,7 @@ function rankOf_(rankMap, name) {
 
 // ───────────────────────────────────────────
 // 자동 입력 행 생성 (근무계획 기반)
-// kind: CIP는 조=0, 연=1 / 나머지는 0  (특이사항은 2)
+// kind: CIP는 조=0, 연=1 / 나머지는 0 (특이사항은 2)
 // ───────────────────────────────────────────
 function buildAutoRows_(key, data) {
   const records = data.records, plan = data.plan, rankMap = data.rankMap;
@@ -436,7 +465,7 @@ function buildAutoRows_(key, data) {
 // ───────────────────────────────────────────
 // 자동 입력 + 특이사항 병합 정렬
 // • BTL/제품생산: 날짜 → 직급 → (자동 먼저)
-// • 품질 CIP    : 날짜 → 조 → 연 → 특이사항 → 직급
+// • 품질 CIP : 날짜 → 조 → 연 → 특이사항 → 직급
 // ───────────────────────────────────────────
 function mergeAndSort_(key, autoRows, specials, rankMap) {
   const all = autoRows.concat(specials.map(s => ({
@@ -490,7 +519,7 @@ function runFill_(mode, expectedMonth) {
 
     specials.forEach(s => {
       if (autoRows.some(a => a.name === s.name && a.day === s.day)) {
-        warns.push(`  - ${cfg.sheetName} / ${s.name} / ${monthName} ${s.day}일 (${s.reason})`);
+        warns.push(` - ${cfg.sheetName} / ${s.name} / ${monthName} ${s.day}일 (${s.reason})`);
       }
     });
   }
@@ -502,6 +531,38 @@ function runFill_(mode, expectedMonth) {
     msg += '\n\n⚠ 같은 사람·같은 날에 자동 입력 건과 겹치는 특이사항 (두 행 모두 입력됨, 확인 필요)\n' + warns.join('\n');
   }
   return msg;
+}
+
+// ═══════════════════════════════════════════
+// 근무계획 이름 확인 (입사·표 변경 후 점검용)
+// ═══════════════════════════════════════════
+function checkWorkPlanNames() {
+  const month = getMonthNumber();
+  const parsed = parseMonthlyWorkData(month);
+  const rankMap = parsed.rankMap, records = parsed.records;
+  const names = Object.keys(rankMap).sort((a, b) => rankMap[a] - rankMap[b]);
+
+  const lines = names.map(n => {
+    const cnt = {};
+    records.filter(r => r.name === n).forEach(r => { cnt[r.type] = (cnt[r.type] || 0) + 1; });
+    const summary = Object.keys(cnt).map(t => `${t}${cnt[t]}`).join(' ');
+    return `${rankMap[n] + WP_NAME_START_ROW}행 ${n} ${summary ? '(' + summary + ')' : '(표기 없음)'}`;
+  });
+
+  const cfgNames = [];
+  Object.keys(SHEET_CFG).forEach(k => SHEET_CFG[k].names.forEach(n => { if (cfgNames.indexOf(n) < 0) cfgNames.push(n); }));
+  const missing = cfgNames.filter(n => !(n in rankMap));
+
+  let msg = `${month}월 근무계획에서 읽은 인원 ${names.length}명 ` +
+            `(${WP_NAME_START_ROW}행 ~ ${parsed.endRow}행)\n`;
+  msg += parsed.endMarkFound
+    ? `A열 "계" 행: ${parsed.endRow + 1}행\n\n`
+    : `⚠ A열에서 "계" 행을 찾지 못해 시트 끝까지 읽었습니다.\n\n`;
+  msg += lines.join('\n');
+  if (missing.length > 0) {
+    msg += `\n\n⚠ 코드 이름 목록에는 있지만 근무계획에 없는 이름: ${missing.join(', ')}`;
+  }
+  SpreadsheetApp.getUi().alert(msg);
 }
 
 // ═══════════════════════════════════════════
@@ -705,6 +766,7 @@ function showHelp() {
     '교통비 정산 자동화 사용법\n\n' +
     '【데이터 소스】\n' +
     '• 근무 데이터: 근무계획 스프레드시트 → "X월" 시트\n' +
+    ' (이름은 C5부터, A열에 "계"가 나오는 행 바로 위까지 자동 인식)\n' +
     '• 생산 계획: 제품생산 계획 스프레드시트 → "X월 제품생산 계획..." 시트\n' +
     '• 기준 월: "X월 근무현황표" 시트 Z3\n\n' +
     '【특이사항】\n' +
@@ -716,12 +778,14 @@ function showHelp() {
     '• "교" 단독 표기는 제외\n\n' +
     '【정렬 규칙】\n' +
     '• BTL/제품생산: 날짜 → 직급 순 (특이사항도 직급 순으로 섞임)\n' +
-    '• 품질 CIP: 날짜 → 조 → 연 → 특이사항 → 직급 순\n\n' +
+    '• 품질 CIP: 날짜 → 조 → 연 → 특이사항 → 직급 순\n' +
+    '• 직급 순 = 근무계획 시트의 행 순서\n\n' +
     '【합계】\n' +
     '• "합 계" 행을 시트 끝까지 자동 탐색 (기본 100행), 행이 모자라면 자동 추가\n\n' +
     '【실행 순서】\n' +
     '1. Z3 월 확인\n' +
-    '2. 메뉴 → 전체 시트 자동 채우기\n' +
-    '3. 특이사항 입력 → "저장 후 정산 실행"'
+    '2. (인원 변경 시) 메뉴 → 근무계획 이름 확인\n' +
+    '3. 메뉴 → 전체 시트 자동 채우기\n' +
+    '4. 특이사항 입력 → "저장 후 정산 실행"'
   );
 }
