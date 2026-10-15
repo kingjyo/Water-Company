@@ -1,8 +1,44 @@
+/*************** 설정 ***************/
+const TEMPLATE_ID = "10SAwz1skAVXBGJdr14I6OtSHsdoysNNhRkQ7ws5RxB8";
+const WEATHER_FOLDER_ID = "1WFuBum-34qx8qvPgodkB7-AaNuPqk9PU";
+const RIVER_FOLDER_ID = "1gVXRW61WeE_ZUV53tmqNwinLo39WMVT7";
+
+// 생수공장 하천관측 스프레드시트
+const RIVER_SS_ID = "1qCTaWO1mYhemqJWlseohoH0FOoP2tOU63vjS4UvYYMQ";
+const RIVER_SHEET_NAME = "보고용 표";
+const RIVER_START_ROW = 3; // 데이터 시작 행
+const RIVER_START_COL = 2; // 데이터 시작 열 (2 = B열)
+const RIVER_MAX_ROWS = 12; // 템플릿 표 13행 - 헤더 1행
+const RIVER_COLS = 7; // 열 개수 (B~H)
+const RIVER_DAY_COL = 0; // 강우 이벤트 발생일이 있는 열 (0 = B열)
+const RIVER_FONT_SIZE = 12; // 하천 표 글자 크기
+const RIVER_FONT_FAMILY = "Malgun Gothic"; // 하천 표 글꼴 (맑은 고딕)
+const REMOVE_RIVER_TABLE_IF_EMPTY = true; // 하천유출 없을 때 표 자체를 삭제
+
+// ── 강수량 보정 (제주가시리 기준) ──
+const GASIRI_SS_ID = "1paz1MbqB5zmfdzK8ebzmob8s_T69ICa-GRTgRr7XBBg";
+const GASIRI_SHEET_NAME = "기상데이터";
+const GASIRI_DATE_COL = 1; // A열: 일시
+const GASIRI_RAIN_COL = 7; // G열: 1시간강수량
+
+const DATA_SHEET_NAME = "기상관측 데이터";
+const DATA_START_ROW = 5; // A5부터
+const DATA_DATE_COL = 1; // A열: 일시
+const DATA_RAIN_COL = 13; // M열: 강수량
+
+const RAIN_LOG_SHEET_NAME = "강수량 보정 로그";
+const TREAT_BLANK_AS_ZERO = true; // 가시리 G열이 비어 있으면 0mm로 간주
+/************************************/
+
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("🌤️ 기상 보고")
     .addItem("보고용 표 작성", "fillWeatherReport")
     .addItem("보고서 문서 생성", "createWeatherReport")
+    .addSeparator()
+    .addItem("강수량 보정 (가시리 기준)", "correctRainfallFromGasiri")
+    .addItem("강수량 보정 화면 다시 보기", "showLastRainCorrection")
+    .addItem("강수량 보정 되돌리기", "revertRainfallCorrection")
     .addSeparator()
     .addItem("작성 결과 초기화", "clearReport")
     .addToUi();
@@ -104,7 +140,6 @@ function fillWeatherReport() {
   }
 
   // 강우 이벤트 시작 시각 = 강우가 처음 잡힌 행의 "직전 행" 시각
-  // (관측값은 직전 관측 시각 ~ 해당 시각까지 누적된 강우량이므로)
   function getEventStartDate(idx) {
     if (idx > 0) return new Date(aValues[idx - 1][0]);
     return new Date(new Date(aValues[0][0]).getTime() - stepMs);
@@ -132,7 +167,6 @@ function fillWeatherReport() {
     events.push({ startIdx: eventStart, endIdx: mNums.length - 1, sum });
   }
 
-  // 30mm 이상 이벤트 중 큰 값 상위 9개 선정 후, 시간순으로 재정렬
   const heavyRains = events
     .filter(e => e.sum >= 30)
     .sort((a, b) => b.sum - a.sum)
@@ -150,16 +184,12 @@ function fillWeatherReport() {
     const e = heavyRains[i];
     const earliest = getEventStartDate(e.startIdx);
     const latest = new Date(aValues[e.endIdx][0]);
-    const rangeStr = `${formatDateKo(earliest)} ~ ${formatDateKo(latest)}`;
-    const sumStr = toInt(e.sum) + " mm";
-    reportSheet.getRange(6 + i, 3).setValue(rangeStr);
-    reportSheet.getRange(6 + i, 4).setValue(sumStr);
+    reportSheet.getRange(6 + i, 3).setValue(`${formatDateKo(earliest)} ~ ${formatDateKo(latest)}`);
+    reportSheet.getRange(6 + i, 4).setValue(toInt(e.sum) + " mm");
   }
 
   if (heavyRains.length < 9) {
-    const hideStart = 6 + heavyRains.length;
-    const hideCount = 9 - heavyRains.length;
-    reportSheet.hideRows(hideStart, hideCount);
+    reportSheet.hideRows(6 + heavyRains.length, 9 - heavyRains.length);
   }
 
   SpreadsheetApp.getUi().alert("✅ 보고용 표 작성 완료!");
@@ -216,11 +246,52 @@ function writeDocCell(tableRow, colIdx, text, fontSize, fontFamily) {
   para.setAlignment(DocumentApp.HorizontalAlignment.CENTER);
 }
 
-function createWeatherReport() {
-  const TEMPLATE_ID = "10SAwz1skAVXBGJdr14I6OtSHsdoysNNhRkQ7ws5RxB8";
-  const WEATHER_FOLDER_ID = "1WFuBum-34qx8qvPgodkB7-AaNuPqk9PU";
-  const RIVER_FOLDER_ID = "1gVXRW61WeE_ZUV53tmqNwinLo39WMVT7";
+// ── 하천관측 "보고용 표" 시트 읽기 ──
+// 반환: { rows: [[7개 값], ...], days: ["8월 17일", ...] }
+function readRiverReport() {
+  const result = { rows: [], days: [] };
 
+  let sheet;
+  try {
+    sheet = SpreadsheetApp.openById(RIVER_SS_ID).getSheetByName(RIVER_SHEET_NAME);
+  } catch (e) {
+    Logger.log(`하천관측 스프레드시트 열기 실패: ${e.message}`);
+    return result;
+  }
+  if (!sheet) {
+    Logger.log(`하천관측 스프레드시트에 '${RIVER_SHEET_NAME}' 시트가 없습니다.`);
+    return result;
+  }
+
+  const availRows = sheet.getMaxRows() - RIVER_START_ROW + 1;
+  const readRows = Math.min(RIVER_MAX_ROWS, availRows);
+  if (readRows <= 0) return result;
+
+  const range = sheet.getRange(RIVER_START_ROW, RIVER_START_COL, readRows, RIVER_COLS);
+  const disp = range.getDisplayValues();
+  const raw = range.getValues();
+
+  for (let i = 0; i < disp.length; i++) {
+    const row = disp[i].map(v => String(v).trim());
+    if (row.every(v => v === "")) continue; // 빈 행 제외
+    result.rows.push(row);
+
+    // 발생일 추출 (Date 값이면 직접 포맷, 아니면 "N월 N일" 패턴 매칭)
+    let day = "";
+    const rawDay = raw[i][RIVER_DAY_COL];
+    if (rawDay instanceof Date) {
+      day = `${rawDay.getMonth() + 1}월 ${rawDay.getDate()}일`;
+    } else {
+      const m = row[RIVER_DAY_COL].match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+      if (m) day = `${Number(m[1])}월 ${Number(m[2])}일`;
+    }
+    if (day && result.days.indexOf(day) === -1) result.days.push(day);
+  }
+
+  return result;
+}
+
+function createWeatherReport() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const dataSheet = ss.getSheetByName("기상관측 데이터");
   const reportSheet = ss.getSheetByName("보고용 표");
@@ -262,6 +333,12 @@ function createWeatherReport() {
     return;
   }
 
+  // 하천관측 데이터 읽기
+  const river = readRiverReport();
+  const outflowText = river.days.length > 0
+    ? river.days.map(d => d + " 발생").join(", ")
+    : "없음";
+
   // 파일 검색
   const weatherKeyword = `${yy}년 ${m}월 기상관측`;
   const riverKeyword = `${yy}년 ${m}월 하천관측`;
@@ -288,63 +365,406 @@ function createWeatherReport() {
     docHeader.replaceText("\\{\\{M\\}\\}", String(m));
   }
 
+  // "다. 하천유출 : ~~" 줄 치환
+  body.replaceText("다\\.\\s*하천유출\\s*:.*", "다. 하천유출 : " + outflowText);
+
   // Click 링크 적용
   if (weatherUrl) applyLinkToText(body, "Click", weatherUrl, false);
   if (riverUrl) applyLinkToText(body, "Click", riverUrl, true);
 
-  // 보고용 표 찾기: 16행 이상인 첫 번째 표
+  // 표 찾기: 기상 표 = 16행 이상, 하천 표 = 7열
   const tables = body.getTables();
-  let targetTable = null;
+  let weatherTable = null;
+  let riverTable = null;
   for (const table of tables) {
-    if (table.getNumRows() >= 16) {
-      targetTable = table;
-      break;
+    const cols = table.getRow(0).getNumCells();
+    if (!weatherTable && table.getNumRows() >= 16 && cols < RIVER_COLS) {
+      weatherTable = table;
+    } else if (!riverTable && cols === RIVER_COLS) {
+      riverTable = table;
     }
   }
 
-  if (!targetTable) {
+  if (!weatherTable) {
     doc.saveAndClose();
-    SpreadsheetApp.getUi().alert("템플릿에서 보고용 표를 찾지 못했습니다.");
+    SpreadsheetApp.getUi().alert("템플릿에서 기상 보고용 표를 찾지 못했습니다.");
     return;
   }
 
   const FS = 13;
   const FF = "Malgun Gothic";
 
-  // 1단계: 기온 결과 입력
-  writeDocCell(targetTable.getRow(1), 2, d3, FS, FF);
-  writeDocCell(targetTable.getRow(2), 2, d4, FS, FF);
-  writeDocCell(targetTable.getRow(3), 2, d5, FS, FF);
+  /*** 기상 표 채우기 ***/
+  writeDocCell(weatherTable.getRow(1), 2, d3, FS, FF);
+  writeDocCell(weatherTable.getRow(2), 2, d4, FS, FF);
+  writeDocCell(weatherTable.getRow(3), 2, d5, FS, FF);
 
-  // 2단계: 강우량 이벤트 행 입력
   for (let i = 0; i < rainRows.length; i++) {
-    writeDocCell(targetTable.getRow(4 + i), 1, rainRows[i].period, FS, FF);
-    writeDocCell(targetTable.getRow(4 + i), 2, rainRows[i].amount, FS, FF);
+    writeDocCell(weatherTable.getRow(4 + i), 1, rainRows[i].period, FS, FF);
+    writeDocCell(weatherTable.getRow(4 + i), 2, rainRows[i].amount, FS, FF);
   }
 
-  // 3단계: 빈 강우량 행만 뒤에서부터 삭제
   for (let i = 8; i >= rainRows.length; i--) {
-    targetTable.removeRow(4 + i);
+    weatherTable.removeRow(4 + i);
   }
 
-  // 4단계: 재계산된 행 인덱스로 월합계/습도/지중온도 입력
   const monthSumRowIdx = 1 + 3 + rainRows.length;
-  const humidityRowIdx = monthSumRowIdx + 1;
-  const groundTempRowIdx = monthSumRowIdx + 2;
+  writeDocCell(weatherTable.getRow(monthSumRowIdx), 2, d15, FS, FF);
+  writeDocCell(weatherTable.getRow(monthSumRowIdx + 1), 2, d16, FS, FF);
+  writeDocCell(weatherTable.getRow(monthSumRowIdx + 2), 2, d17, FS, FF);
 
-  writeDocCell(targetTable.getRow(monthSumRowIdx), 2, d15, FS, FF);
-  writeDocCell(targetTable.getRow(humidityRowIdx), 2, d16, FS, FF);
-  writeDocCell(targetTable.getRow(groundTempRowIdx), 2, d17, FS, FF);
+  /*** 하천 표 채우기 ***/
+  if (riverTable) {
+    if (river.rows.length === 0) {
+      if (REMOVE_RIVER_TABLE_IF_EMPTY) {
+        riverTable.removeFromParent();
+      } else {
+        for (let r = riverTable.getNumRows() - 1; r >= 1; r--) riverTable.removeRow(r);
+      }
+    } else {
+      const capacity = riverTable.getNumRows() - 1; // 헤더 제외
+      const useRows = Math.min(river.rows.length, capacity);
+
+      for (let i = 0; i < useRows; i++) {
+        const docRow = riverTable.getRow(1 + i);
+        const cellCount = Math.min(docRow.getNumCells(), RIVER_COLS);
+        for (let c = 0; c < cellCount; c++) {
+          writeDocCell(docRow, c, river.rows[i][c], RIVER_FONT_SIZE, RIVER_FONT_FAMILY);
+        }
+      }
+      // 남는 빈 행 삭제 (뒤에서부터)
+      for (let r = riverTable.getNumRows() - 1; r >= 1 + useRows; r--) {
+        riverTable.removeRow(r);
+      }
+    }
+  } else {
+    Logger.log("템플릿에서 하천 보고용 표(7열)를 찾지 못했습니다.");
+  }
 
   doc.saveAndClose();
 
-  const docUrl = newFile.getUrl();
-  SpreadsheetApp.getUi().alert(`✅ 보고서 생성 완료!\n\n${docTitle}\n\n${docUrl}`);
+  SpreadsheetApp.getUi().alert(
+    `✅ 보고서 생성 완료!\n\n${docTitle}\n\n하천유출: ${outflowText}\n\n${newFile.getUrl()}`
+  );
+}
+
+/*********************************************************
+ * 강수량 보정 (제주가시리 기준)
+ *********************************************************/
+
+// ── 날짜 파싱: Date / 시리얼 / "2026. 10. 12 00:00" / "9/1/26 0:00" ──
+function parseDateTime(v) {
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
+  if (typeof v === "number") {
+    const d = new Date(1899, 11, 30);
+    d.setTime(d.getTime() + Math.round(v * 86400000));
+    return d;
+  }
+  const s = String(v).trim();
+  if (!s) return null;
+
+  let m = s.match(/^(\d{4})[.\-\/]\s*(\d{1,2})[.\-\/]\s*(\d{1,2})\.?\s*(?:(\d{1,2}):(\d{2}))?/);
+  if (m) return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0));
+
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s*(?:(\d{1,2}):(\d{2}))?/);
+  if (m) {
+    let y = +m[3];
+    if (y < 100) y += 2000;
+    return new Date(y, +m[1] - 1, +m[2], +(m[4] || 0), +(m[5] || 0));
+  }
+
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function hourKey(d) {
+  return Utilities.formatDate(d, Session.getScriptTimeZone(), "yyyy-MM-dd HH");
+}
+
+function toNumOrNull(v) {
+  if (v === "" || v === null || v === undefined) return null;
+  if (typeof v === "number") return isNaN(v) ? null : v;
+  const n = parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
+  return isNaN(n) ? null : n;
+}
+
+// ── 가시리 시트 → { "yyyy-MM-dd HH": {val, minute} } 맵 ──
+function loadGasiriRainMap() {
+  const sheet = SpreadsheetApp.openById(GASIRI_SS_ID).getSheetByName(GASIRI_SHEET_NAME);
+  if (!sheet) throw new Error(`가시리 스프레드시트에 '${GASIRI_SHEET_NAME}' 시트가 없습니다.`);
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 1) throw new Error("가시리 기상데이터 시트가 비어 있습니다.");
+
+  const maxCol = Math.max(GASIRI_DATE_COL, GASIRI_RAIN_COL);
+  const values = sheet.getRange(1, 1, lastRow, maxCol).getValues();
+
+  const map = {};
+  for (let i = 0; i < values.length; i++) {
+    const d = parseDateTime(values[i][GASIRI_DATE_COL - 1]);
+    if (!d) continue;
+    const key = hourKey(d);
+    const minute = d.getMinutes();
+    const val = values[i][GASIRI_RAIN_COL - 1];
+    // 같은 시각이 여러 행이면 정시(00분) 행을 우선
+    if (!map[key] || (minute === 0 && map[key].minute !== 0)) {
+      map[key] = { val, minute };
+    }
+  }
+  return map;
+}
+
+// ── 메인: 강수량 보정 ──
+function correctRainfallFromGasiri() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const dataSheet = ss.getSheetByName(DATA_SHEET_NAME);
+  if (!dataSheet) { ui.alert(`'${DATA_SHEET_NAME}' 시트를 찾을 수 없습니다.`); return; }
+
+  const lastRow = dataSheet.getLastRow();
+  if (lastRow < DATA_START_ROW) { ui.alert("기상관측 데이터가 없습니다."); return; }
+  const n = lastRow - DATA_START_ROW + 1;
+
+  const dateVals = dataSheet.getRange(DATA_START_ROW, DATA_DATE_COL, n, 1).getValues();
+  const rainVals = dataSheet.getRange(DATA_START_ROW, DATA_RAIN_COL, n, 1).getValues();
+
+  let gasiri;
+  try {
+    gasiri = loadGasiriRainMap();
+  } catch (e) {
+    ui.alert("가시리 데이터를 읽지 못했습니다.\n" + e.message);
+    return;
+  }
+
+  const tz = Session.getScriptTimeZone();
+  const newRain = [];
+  const logRows = [];
+  let cntChanged = 0, cntSame = 0, cntMissing = 0, cntNoDate = 0, cntNoVal = 0;
+  let sumBefore = 0, sumAfter = 0;
+
+  for (let i = 0; i < n; i++) {
+    const rowNo = DATA_START_ROW + i;
+    const oldRaw = rainVals[i][0];
+    const oldNum = toNumOrNull(oldRaw);
+    const d = parseDateTime(dateVals[i][0]);
+
+    let newRaw = oldRaw;
+    let status = "";
+
+    if (!d) {
+      status = "날짜없음";
+      cntNoDate++;
+    } else {
+      const hit = gasiri[hourKey(d)];
+      if (!hit) {
+        status = "가시리 없음";
+        cntMissing++;
+      } else {
+        let g = toNumOrNull(hit.val);
+        if (g === null && TREAT_BLANK_AS_ZERO) g = 0;
+        if (g === null) {
+          status = "값없음";
+          cntNoVal++;
+        } else {
+          newRaw = g;
+          if (oldNum === null || Math.abs(oldNum - g) > 1e-9) { status = "변경"; cntChanged++; }
+          else { status = "동일"; cntSame++; }
+        }
+      }
+    }
+
+    newRain.push([newRaw]);
+    const newNum = toNumOrNull(newRaw);
+    sumBefore += oldNum === null ? 0 : oldNum;
+    sumAfter += newNum === null ? 0 : newNum;
+
+    const diff = (newNum !== null && oldNum !== null) ? Math.round((newNum - oldNum) * 10) / 10 : "";
+
+    logRows.push([
+      rowNo,
+      d ? Utilities.formatDate(d, tz, "yyyy-MM-dd HH:mm") : String(dateVals[i][0]),
+      oldRaw,
+      newRaw,
+      diff,
+      status
+    ]);
+  }
+
+  const summary =
+    `대상 행: ${n}행 (${DATA_SHEET_NAME} ${DATA_START_ROW}행~${lastRow}행)\n` +
+    `변경: ${cntChanged} / 동일: ${cntSame} / 가시리 없음: ${cntMissing} / 값없음: ${cntNoVal} / 날짜없음: ${cntNoDate}\n` +
+    `강수량 합계: ${sumBefore.toFixed(1)} mm → ${sumAfter.toFixed(1)} mm`;
+
+  const res = ui.alert(
+    "강수량 보정 확인",
+    summary + "\n\nM열을 가시리 데이터로 덮어쓸까요?\n(원래 값은 '" + RAIN_LOG_SHEET_NAME + "' 시트에 보관됩니다)",
+    ui.ButtonSet.YES_NO
+  );
+  if (res !== ui.Button.YES) return;
+
+  // M열 쓰기
+  dataSheet.getRange(DATA_START_ROW, DATA_RAIN_COL, n, 1).setValues(newRain);
+
+  // 로그 시트 기록
+  const meta = {
+    when: Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm:ss"),
+    range: `${DATA_SHEET_NAME} M${DATA_START_ROW}:M${lastRow}`,
+    cntChanged, cntSame, cntMissing, cntNoVal, cntNoDate, sumBefore, sumAfter, total: n
+  };
+  writeRainLogSheet(ss, meta, logRows);
+
+  // 팝업 화면
+  showRainCorrectionDialog(meta, logRows);
+}
+
+// ── 로그 시트 작성 (최근 실행 1회분만 보관) ──
+function writeRainLogSheet(ss, meta, logRows) {
+  let sheet = ss.getSheetByName(RAIN_LOG_SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(RAIN_LOG_SHEET_NAME);
+  sheet.clear();
+  sheet.clearFormats();
+
+  const head = [
+    ["강수량 보정 로그", "", "", "", "", ""],
+    ["보정 일시", meta.when, "", "", "", ""],
+    ["기준 데이터", "제주가시리 기상정보 데이터 / 기상데이터 시트 G열(1시간강수량)", "", "", "", ""],
+    ["보정 범위", meta.range, "", "", "", ""],
+    ["결과", `변경 ${meta.cntChanged} / 동일 ${meta.cntSame} / 가시리 없음 ${meta.cntMissing} / 값없음 ${meta.cntNoVal} / 날짜없음 ${meta.cntNoDate}`, "", "", "", ""],
+    ["합계(mm)", `${meta.sumBefore.toFixed(1)} → ${meta.sumAfter.toFixed(1)}`, "", "", "", ""],
+    ["", "", "", "", "", ""],
+    ["행", "일시", "보정 전(mm)", "보정 후(mm)", "차이(mm)", "상태"]
+  ];
+  sheet.getRange(1, 1, head.length, 6).setValues(head);
+  sheet.getRange(1, 1).setFontWeight("bold").setFontSize(13);
+  sheet.getRange(8, 1, 1, 6).setFontWeight("bold").setBackground("#d9d9d9");
+
+  if (logRows.length) {
+    const start = head.length + 1;
+    sheet.getRange(start, 1, logRows.length, 6).setValues(logRows);
+
+    const bg = logRows.map(r => {
+      const s = r[5];
+      const c = s === "변경" ? "#fff2cc"
+        : (s === "가시리 없음" || s === "날짜없음" || s === "값없음") ? "#f4cccc"
+        : null;
+      return [c, c, c, c, c, c];
+    });
+    sheet.getRange(start, 1, logRows.length, 6).setBackgrounds(bg);
+  }
+  sheet.setFrozenRows(8);
+  sheet.autoResizeColumns(1, 6);
+}
+
+// ── 팝업 화면 ──
+function showRainCorrectionDialog(meta, logRows) {
+  const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const changed = logRows.filter(r => r[5] === "변경");
+  const problems = logRows.filter(r => r[5] === "가시리 없음" || r[5] === "날짜없음" || r[5] === "값없음");
+  const LIMIT = 400;
+
+  const cells = r => `<td>${r[0]}</td><td>${esc(r[1])}</td><td>${esc(r[2])}</td><td><b>${esc(r[3])}</b></td><td>${esc(r[4])}</td><td>${esc(r[5])}</td>`;
+  const tableHead = `<tr><th>행</th><th>일시</th><th>보정 전</th><th>보정 후</th><th>차이</th><th>상태</th></tr>`;
+
+  let html = `
+<style>
+  body{font-family:'Malgun Gothic',sans-serif;font-size:12px;margin:12px}
+  h2{font-size:15px;margin:0 0 8px}
+  .sum{background:#f3f3f3;padding:8px;border-radius:6px;margin-bottom:10px;line-height:1.6}
+  table{border-collapse:collapse;width:100%}
+  th,td{border:1px solid #ccc;padding:3px 6px;text-align:center}
+  th{background:#e6e6e6;position:sticky;top:0}
+  .chg td{background:#fff2cc}
+  .bad td{background:#f4cccc}
+  .box{max-height:300px;overflow:auto;border:1px solid #ddd;margin-bottom:10px}
+</style>
+<h2>강수량 보정 결과 (가시리 기준)</h2>
+<div class="sum">
+  보정 일시: <b>${esc(meta.when)}</b><br>
+  보정 범위: ${esc(meta.range)} (총 ${meta.total}행)<br>
+  변경 <b>${meta.cntChanged}</b> / 동일 ${meta.cntSame} / 가시리 없음 ${meta.cntMissing} / 값없음 ${meta.cntNoVal} / 날짜없음 ${meta.cntNoDate}<br>
+  강수량 합계: ${Number(meta.sumBefore).toFixed(1)} mm → <b>${Number(meta.sumAfter).toFixed(1)} mm</b><br>
+  <span style="color:#666">상세 내역은 '${RAIN_LOG_SHEET_NAME}' 시트에 저장됨</span>
+</div>`;
+
+  html += `<b>변경된 행 (${changed.length}건${changed.length > LIMIT ? `, 앞 ${LIMIT}건만 표시` : ""})</b>
+<div class="box"><table>${tableHead}`;
+  html += changed.length
+    ? changed.slice(0, LIMIT).map(r => `<tr class="chg">${cells(r)}</tr>`).join("")
+    : `<tr><td colspan="6">변경된 행 없음</td></tr>`;
+  html += `</table></div>`;
+
+  if (problems.length) {
+    html += `<b>확인 필요 (${problems.length}건)</b>
+<div class="box"><table>${tableHead}`;
+    html += problems.slice(0, LIMIT).map(r => `<tr class="bad">${cells(r)}</tr>`).join("");
+    html += `</table></div>`;
+  }
+
+  SpreadsheetApp.getUi().showModalDialog(
+    HtmlService.createHtmlOutput(html).setWidth(760).setHeight(560),
+    "강수량 보정 결과"
+  );
+}
+
+// ── 로그 시트 기준으로 팝업 다시 보기 ──
+function showLastRainCorrection() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(RAIN_LOG_SHEET_NAME);
+  if (!sheet || sheet.getLastRow() < 9) { SpreadsheetApp.getUi().alert("보정 로그가 없습니다."); return; }
+
+  const info = sheet.getRange(2, 2, 5, 1).getDisplayValues().map(r => String(r[0]));
+  const logRows = sheet.getRange(9, 1, sheet.getLastRow() - 8, 6).getValues();
+  const cnt = (name) => { const m = info[3].match(new RegExp(name + "\\s*(\\d+)")); return m ? +m[1] : 0; };
+  const sums = info[4].match(/([\d.]+)\s*→\s*([\d.]+)/);
+
+  showRainCorrectionDialog({
+    when: info[0], range: info[2], total: logRows.length,
+    cntChanged: cnt("변경"), cntSame: cnt("동일"), cntMissing: cnt("가시리 없음"),
+    cntNoVal: cnt("값없음"), cntNoDate: cnt("날짜없음"),
+    sumBefore: sums ? +sums[1] : 0, sumAfter: sums ? +sums[2] : 0
+  }, logRows);
+}
+
+// ── 되돌리기: 로그의 '보정 전' 값을 M열에 복원 ──
+function revertRainfallCorrection() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const dataSheet = ss.getSheetByName(DATA_SHEET_NAME);
+  const logSheet = ss.getSheetByName(RAIN_LOG_SHEET_NAME);
+  if (!dataSheet || !logSheet || logSheet.getLastRow() < 9) { ui.alert("되돌릴 보정 로그가 없습니다."); return; }
+
+  const when = logSheet.getRange(2, 2).getDisplayValue();
+  const res = ui.alert("보정 되돌리기", `${when} 보정 내용을 취소하고 M열을 원래 값으로 되돌릴까요?`, ui.ButtonSet.YES_NO);
+  if (res !== ui.Button.YES) return;
+
+  const rows = logSheet.getRange(9, 1, logSheet.getLastRow() - 8, 4).getValues();
+  let restored = 0;
+  for (const r of rows) {
+    const rowNo = Number(r[0]);
+    if (!rowNo) continue;
+    dataSheet.getRange(rowNo, DATA_RAIN_COL).setValue(r[2]);
+    restored++;
+  }
+  logSheet.getRange(1, 1).setValue(`강수량 보정 로그 (${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm")} 되돌림)`);
+  ui.alert(`되돌리기 완료: ${restored}행 복원`);
+}
+
+/*********************************************************
+ * 디버그
+ *********************************************************/
+
+// 하천관측 시트가 어떻게 읽히는지 확인용
+function debugRiverSheet() {
+  const river = readRiverReport();
+  let log = `읽어온 행 수: ${river.rows.length}\n발생일: ${river.days.join(", ") || "(없음)"}\n\n`;
+  river.rows.forEach((r, i) => {
+    log += `[${i}] ${r.map((v, c) => `col${c}:"${v}"`).join(" | ")}\n`;
+  });
+  Logger.log(log);
+  SpreadsheetApp.getUi().alert("디버그 완료!\nApps Script 편집기 → 실행 로그를 확인하세요.");
 }
 
 function debugDocTable() {
-  const TEMPLATE_ID = "10SAwz1skAVXBGJdr14I6OtSHsdoysNNhRkQ7ws5RxB8";
-
   const templateFile = DriveApp.getFileById(TEMPLATE_ID);
   const folder = templateFile.getParents().next();
   const testFile = templateFile.makeCopy("DEBUG_TEST_삭제해주세요", folder);
@@ -355,13 +775,12 @@ function debugDocTable() {
   let log = `총 표 개수: ${tables.length}\n\n`;
 
   tables.forEach((table, tIdx) => {
-    log += `=== 표 ${tIdx} (총 ${table.getNumRows()}행) ===\n`;
+    log += `=== 표 ${tIdx} (총 ${table.getNumRows()}행, ${table.getRow(0).getNumCells()}열) ===\n`;
     for (let r = 0; r < table.getNumRows(); r++) {
       const row = table.getRow(r);
       let rowText = ` [행 ${r}] `;
       for (let c = 0; c < row.getNumCells(); c++) {
-        const cellText = row.getCell(c).getText().replace(/\n/g, "↵").substring(0, 30);
-        rowText += `col${c}:"${cellText}" | `;
+        rowText += `col${c}:"${row.getCell(c).getText().replace(/\n/g, "↵").substring(0, 30)}" | `;
       }
       log += rowText + "\n";
     }
