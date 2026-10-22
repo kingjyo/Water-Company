@@ -1,0 +1,417 @@
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('🔧 연장근로 자동입력')
+    .addItem('연장근로 계획 산정 근거 입력', 'fillOvertimePlan')
+    .addSeparator()
+    .addSubMenu(
+      ui.createMenu('🧪 테스트 (월 직접 지정)')
+        .addItem('1월 기준으로 테스트', 'testMonth1')
+        .addItem('2월 기준으로 테스트', 'testMonth2')
+        .addItem('3월 기준으로 테스트', 'testMonth3')
+        .addItem('월 직접 입력해서 테스트', 'testMonthCustom')
+    )
+    .addToUi();
+}
+
+// ── 테스트 진입점들 ──────────────────────────────────────────────
+function testMonth1()      { fillOvertimePlanWithMonth(1); }
+function testMonth2()      { fillOvertimePlanWithMonth(2); }
+function testMonth3()      { fillOvertimePlanWithMonth(3); }
+
+function testMonthCustom() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt(
+    '🧪 테스트 월 직접 입력',
+    '테스트할 월을 숫자로 입력하세요 (예: 4)',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  const month = Number(response.getResponseText().trim());
+  if (isNaN(month) || month < 1 || month > 12) {
+    ui.alert('❌ 올바른 월(1~12)을 입력해주세요.');
+    return;
+  }
+  fillOvertimePlanWithMonth(month);
+}
+
+// ── 디버깅 1: 원본 데이터 확인 ──────────────────────────────────
+function debugProdData() {
+  const prodSS = SpreadsheetApp.openById('1ibZaOX0NKni6vRTVE0i2Wb5AXNHn9D72F5CFWSxH3qQ');
+
+  const sheetNames = prodSS.getSheets().map(s => s.getName()).join('\n');
+  Logger.log('=== 시트 목록 ===\n' + sheetNames);
+
+  const sheet = prodSS.getSheets()[0];
+  Logger.log('=== 선택된 시트: ' + sheet.getName() + ' ===');
+
+  const header = sheet.getRange('A2:P2').getValues()[0];
+  Logger.log('=== 헤더(2행) ===');
+  header.forEach((v, i) => Logger.log(`index ${i} (${String.fromCharCode(65+i)}열): ${v}`));
+
+  const sample = sheet.getRange('A3:P33').getValues();
+  Logger.log('=== 데이터 전체(3~33행) ===');
+  sample.forEach((row, ri) => {
+    Logger.log(
+      `${ri+3}행: ` +
+      `A(일자)=${row[0]}, ` +
+      `C(18.9L)=${row[2]}, ` +
+      `D(1.5L)=${row[3]}, ` +
+      `E(0.5L)=${row[4]}, ` +
+      `F(0.33L)=${row[5]}, ` +
+      `I(1.5BTL)=${row[8]}, ` +
+      `J(0.5BTL)=${row[9]}, ` +
+      `K(0.33BTL)=${row[10]}, ` +
+      `P(병생산)=${row[15]}`
+    );
+  });
+}
+
+function debugWorkData() {
+  const keunTaeSS = SpreadsheetApp.openById('1UjHzUCH3w4eUQuxIZrzOtgeCi4itVUOTXDq7sm8PcvE');
+  let targetSheet = null;
+  for (let s of keunTaeSS.getSheets()) {
+    if (s.getName().includes('근무현황표')) { targetSheet = s; break; }
+  }
+  if (!targetSheet) { Logger.log('근무현황표 시트 없음'); return; }
+
+  const M = Number(targetSheet.getRange('Z3').getValue());
+  const month = M + 1;
+  Logger.log('=== Z3 값: ' + M + ' → 참조 월: ' + month + '월 ===');
+
+  const workSS = SpreadsheetApp.openById('12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY');
+  const sheetNames = workSS.getSheets().map(s => s.getName()).join('\n');
+  Logger.log('=== 근무계획 시트 목록 ===\n' + sheetNames);
+
+  let workSheet = null;
+  for (let s of workSS.getSheets()) {
+    if (s.getName().includes(month + '월')) { workSheet = s; break; }
+  }
+  if (!workSheet) { Logger.log(month + '월 시트 없음'); return; }
+  Logger.log('=== 선택된 근무계획 시트: ' + workSheet.getName() + ' ===');
+
+  const workData = workSheet.getRange('G3:AK20').getValues();
+  Logger.log('=== 일자행(G3:AK3) ===');
+  Logger.log(workData[0].join(', '));
+
+  Logger.log('=== 근무정보 전체(5~20행) ===');
+  workData.slice(2).forEach((row, i) => {
+    Logger.log(`${i+5}행: ${row.join(', ')}`);
+  });
+}
+
+// ── 디버깅 2: 계산 로직 검증 ─────────────────────────────────────
+function debugCalcResult() {
+  const keunTaeSS = SpreadsheetApp.openById('1UjHzUCH3w4eUQuxIZrzOtgeCi4itVUOTXDq7sm8PcvE');
+  let targetSheet = null;
+  for (let s of keunTaeSS.getSheets()) {
+    if (s.getName().includes('근무현황표')) { targetSheet = s; break; }
+  }
+  const M = Number(targetSheet.getRange('Z3').getValue());
+  const month = M + 1;
+  Logger.log(`Z3=${M} → 참조 월: ${month}월 (제품생산 + 근무계획 동일)`);
+
+  const prodSS = SpreadsheetApp.openById('1M2ExGG9jwjs_A32yr8JJBH_qbKxpefGS3lkTKUX8e0Y');
+  let prodSheet = null;
+  for (let s of prodSS.getSheets()) {
+    const name = s.getName();
+    if (name.includes(month + '월') && name.includes('제품생산 계획')) {
+      prodSheet = s; break;
+    }
+  }
+  Logger.log('제품생산 시트: ' + (prodSheet ? prodSheet.getName() : '못 찾음'));
+
+  const prodData = prodSheet.getRange('A3:P33').getValues();
+
+  const Q_days = [], W_days = [], E_days = [];
+  const A_days = [], B_days = [], C_days = [];
+
+  for (let row of prodData) {
+    const day   = row[0];
+    const c189  = row[2];
+    const d15   = row[3];
+    const e05   = row[4];
+    const f033  = row[5];
+    const i15b  = row[8];
+    const j05b  = row[9];
+    const k033b = row[10];
+    const p     = row[15];
+
+    if (day === '' || day === null) continue;
+
+    const has189 = (c189 !== '' && c189 !== null && c189 !== 0);
+
+    if (has189) {
+      if (Number(d15)  >= 6000) { Q_days.push(day); Logger.log(`Q해당: ${day}일 (18.9L동반, 1.5L=${d15})`); }
+      if (Number(e05)  >= 2700) { W_days.push(day); Logger.log(`W해당: ${day}일 (18.9L동반, 0.5L=${e05})`); }
+      if (Number(f033) >= 4000) { E_days.push(day); Logger.log(`E해당: ${day}일 (18.9L동반, 0.33L=${f033})`); }
+    } else {
+      if (Number(d15)  >= 8500) { Q_days.push(day); Logger.log(`Q해당: ${day}일 (단독, 1.5L=${d15})`); }
+      if (Number(e05)  >= 4000) { W_days.push(day); Logger.log(`W해당: ${day}일 (단독, 0.5L=${e05})`); }
+      if (Number(f033) >= 5000) { E_days.push(day); Logger.log(`E해당: ${day}일 (단독, 0.33L=${f033})`); }
+    }
+
+    const hasP = (p !== '' && p !== null && p !== 0);
+    if (Number(i15b)  > 0 && hasP) { A_days.push(day); Logger.log(`A해당: ${day}일 (1.5BTL=${i15b}, P=${p})`); }
+    if (Number(j05b)  > 0 && hasP) { B_days.push(day); Logger.log(`B해당: ${day}일 (0.5BTL=${j05b}, P=${p})`); }
+    if (Number(k033b) > 0 && hasP) { C_days.push(day); Logger.log(`C해당: ${day}일 (0.33BTL=${k033b}, P=${p})`); }
+  }
+
+  Logger.log('=== 연장일 목록 ===');
+  Logger.log(`Q(1.5L 제품): [${Q_days.join(', ')}] → ${Q_days.length}일`);
+  Logger.log(`W(0.5L 제품): [${W_days.join(', ')}] → ${W_days.length}일`);
+  Logger.log(`E(0.33L 제품): [${E_days.join(', ')}] → ${E_days.length}일`);
+  Logger.log(`A(1.5L BTL): [${A_days.join(', ')}] → ${A_days.length}일`);
+  Logger.log(`B(0.5L BTL): [${B_days.join(', ')}] → ${B_days.length}일`);
+  Logger.log(`C(0.33L BTL): [${C_days.join(', ')}] → ${C_days.length}일`);
+
+  const workSS = SpreadsheetApp.openById('12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY');
+  let workSheet = null;
+  for (let s of workSS.getSheets()) {
+    if (s.getName().includes(month + '월')) { workSheet = s; break; }
+  }
+  Logger.log('근무계획 시트: ' + (workSheet ? workSheet.getName() : '못 찾음'));
+
+  const workData  = workSheet.getRange('G3:AK20').getValues();
+  const dateRow   = workData[0];
+  const staffRows = workData.slice(2);
+
+  function hasNight(day) {
+    const colIdx = dateRow.findIndex(v => Number(v) === Number(day));
+    if (colIdx === -1) {
+      Logger.log(`⚠️ ${day}일 → 근무계획에서 일자 못 찾음`);
+      return false;
+    }
+    for (let sr of staffRows) {
+      if (sr[colIdx] === '야') return true;
+    }
+    return false;
+  }
+
+  Logger.log('=== 인원 계산 ===');
+  const allDaysSets = [
+    { label: 'Q(1.5L)', days: Q_days },
+    { label: 'W(0.5L)', days: W_days },
+    { label: 'E(0.33L)', days: E_days },
+    { label: 'A(1.5BTL)', days: A_days },
+    { label: 'B(0.5BTL)', days: B_days },
+    { label: 'C(0.33BTL)', days: C_days },
+  ];
+
+  for (let { label, days } of allDaysSets) {
+    let total = 0;
+    for (let d of days) {
+      const night = hasNight(d);
+      const people = night ? 1 : 2;
+      total += people;
+      Logger.log(`  ${label} ${d}일 → 야간=${night} → ${people}명`);
+    }
+    Logger.log(`  ${label} 합계: ${days.length}일, ${total}명`);
+  }
+}
+
+// ── 핵심 계산 로직 (월을 인자로 받음) ───────────────────────────
+function fillOvertimePlanWithMonth(month) {
+  try {
+    const isTest = true; // 테스트 모드 플래그 (알림 문구 구분용)
+
+    // ── 제품생산 계획 읽기 ─────────────────────────────────────────
+    const prodSS = SpreadsheetApp.openById('1ibZaOX0NKni6vRTVE0i2Wb5AXNHn9D72F5CFWSxH3qQ');
+    let prodSheet = null;
+    for (let s of prodSS.getSheets()) {
+      const name = s.getName();
+      if (name.includes(month + '월') && name.includes('제품생산 계획')) {
+        prodSheet = s; break;
+      }
+    }
+    if (!prodSheet) throw new Error(
+      `${month}월 제품생산 계획 시트를 찾을 수 없습니다.\n` +
+      `시트 목록: ${prodSS.getSheets().map(s => s.getName()).join(', ')}`
+    );
+
+    const prodData = prodSheet.getRange('A3:P33').getValues();
+
+    const Q_days = [], W_days = [], E_days = [];
+    const A_days = [], B_days = [], C_days = [];
+
+    for (let row of prodData) {
+      const day   = row[0];
+      const c189  = row[2];
+      const d15   = row[3];
+      const e05   = row[4];
+      const f033  = row[5];
+      const i15b  = row[8];
+      const j05b  = row[9];
+      const k033b = row[10];
+      const p     = row[15];
+
+      if (day === '' || day === null) continue;
+
+      const has189 = (c189 !== '' && c189 !== null && c189 !== 0);
+
+      if (has189) {
+        if (Number(d15)  >= 6000) Q_days.push(day);
+        if (Number(e05)  >= 2700) W_days.push(day);
+        if (Number(f033) >= 4000) E_days.push(day);
+      } else {
+        if (Number(d15)  >= 8500) Q_days.push(day);
+        if (Number(e05)  >= 4000) W_days.push(day);
+        if (Number(f033) >= 5000) E_days.push(day);
+      }
+
+      const hasP = (p !== '' && p !== null && p !== 0);
+      if (Number(i15b)  > 0 && hasP) A_days.push(day);
+      if (Number(j05b)  > 0 && hasP) B_days.push(day);
+      if (Number(k033b) > 0 && hasP) C_days.push(day);
+    }
+
+    // ── 근무계획 시트 읽기 ─────────────────────────────────────────
+    const workSS = SpreadsheetApp.openById('12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY');
+    let workSheet = null;
+    for (let s of workSS.getSheets()) {
+      if (s.getName().includes(month + '월')) { workSheet = s; break; }
+    }
+    if (!workSheet) throw new Error(
+      `${month}월 근무계획 시트를 찾을 수 없습니다.\n` +
+      `시트 목록: ${workSS.getSheets().map(s => s.getName()).join(', ')}`
+    );
+
+    const workData  = workSheet.getRange('G3:AK20').getValues();
+    const dateRow   = workData[0];
+    const staffRows = workData.slice(2);
+
+    function hasNight(day) {
+      const colIdx = dateRow.findIndex(v => Number(v) === Number(day));
+      if (colIdx === -1) return false;
+      for (let sr of staffRows) {
+        if (sr[colIdx] === '야') return true;
+      }
+      return false;
+    }
+
+    function calcPeople(days) {
+      let total = 0;
+      for (let d of days) {
+        total += hasNight(d) ? 1 : 2;
+      }
+      return total;
+    }
+
+    function splitByNight(days) {
+      const withNight = [], noNight = [];
+      for (let d of days) {
+        hasNight(d) ? withNight.push(d) : noNight.push(d);
+      }
+      return { withNight, noNight };
+    }
+
+    const toDateStr = (days) => days.map(d => Number(d)).sort((a,b) => a-b).join(', ');
+
+    const Q = Q_days.length, W = W_days.length, Ev = E_days.length;
+    const Av = A_days.length, Bv = B_days.length, Cv = C_days.length;
+    const X = calcPeople(Q_days), Y = calcPeople(W_days), Z = calcPeople(E_days);
+    const D = calcPeople(A_days), Ep = calcPeople(B_days), F = calcPeople(C_days);
+
+    const totalProdDays   = Q + W + Ev;
+    const totalProdPeople = X + Y + Z;
+    const totalBTLDays    = Av + Bv + Cv;
+    const totalBTLPeople  = D + Ep + F;
+
+    const Q_split  = splitByNight(Q_days);
+    const W_split  = splitByNight(W_days);
+    const E_split  = splitByNight(E_days);
+    const A_split  = splitByNight(A_days);
+    const B_split  = splitByNight(B_days);
+    const C_split  = splitByNight(C_days);
+
+    // ── 출력 대상 시트 ─────────────────────────────────────────────
+    const outSS = SpreadsheetApp.openById('1uqWQ3XnPwoOXR5SlqJy7ZO-bxyyC-1XL6v362S4QmGs');
+    let outTarget = null;
+    for (let s of outSS.getSheets()) {
+      if (s.getSheetId() === 209613212) { outTarget = s; break; }
+    }
+    if (!outTarget) throw new Error('출력 대상 시트를 찾을 수 없습니다.');
+
+    // ── A9: 연장근로 계획 산정 근거 텍스트 ───────────────────────
+    const text =
+`● 연장근로 계획 산정 근거
+ 
+      - 제품 생산 : ${totalProdDays}일, ${totalProdPeople}명
+      ᆞ1.5L (${Q}일, ${X}명), 0.5L (${W}일, ${Y}명), 0.33L (${Ev}일, ${Z}명)
+      - 병 생산 : ${totalBTLDays}일, ${totalBTLPeople}명
+      ᆞ1.5L (${Av}일, ${D}명), 0.5L (${Bv}일, ${Ep}명), 0.33L (${Cv}일, ${F}명)`;
+
+    outTarget.getRange('A9').setValue(text);
+
+    // ── 연장 일자 전체 목록 ────────────────────────────────────────
+    outTarget.getRange('R4').setValue(toDateStr(Q_days));
+    outTarget.getRange('R5').setValue(toDateStr(W_days));
+    outTarget.getRange('R6').setValue(toDateStr(E_days));
+    outTarget.getRange('X4').setValue(toDateStr(A_days));
+    outTarget.getRange('X5').setValue(toDateStr(B_days));
+    outTarget.getRange('X6').setValue(toDateStr(C_days));
+
+    // ── 야간 있는 날 ──────────────────────────────────────────────
+    outTarget.getRange('R11').setValue(toDateStr(Q_split.withNight));
+    outTarget.getRange('R12').setValue(toDateStr(W_split.withNight));
+    outTarget.getRange('R13').setValue(toDateStr(E_split.withNight));
+    outTarget.getRange('W11').setValue(toDateStr(A_split.withNight));
+    outTarget.getRange('W12').setValue(toDateStr(B_split.withNight));
+    outTarget.getRange('W13').setValue(toDateStr(C_split.withNight));
+
+    // ── 야간 없는 날 ──────────────────────────────────────────────
+    outTarget.getRange('S11').setValue(toDateStr(Q_split.noNight));
+    outTarget.getRange('S12').setValue(toDateStr(W_split.noNight));
+    outTarget.getRange('S13').setValue(toDateStr(E_split.noNight));
+    outTarget.getRange('X11').setValue(toDateStr(A_split.noNight));
+    outTarget.getRange('X12').setValue(toDateStr(B_split.noNight));
+    outTarget.getRange('X13').setValue(toDateStr(C_split.noNight));
+
+    // ── D7: 생수공장 근태 정산내역 > 연장근무 발생 보고 D17+D18+D19 ──
+    const keunTaeSS2 = SpreadsheetApp.openById('1UjHzUCH3w4eUQuxIZrzOtgeCi4itVUOTXDq7sm8PcvE');
+    let reportSheet = null;
+    for (let s of keunTaeSS2.getSheets()) {
+      if (s.getName().includes('연장근무 발생 보고')) { reportSheet = s; break; }
+    }
+    if (!reportSheet) throw new Error('연장근무 발생 보고 시트를 찾을 수 없습니다.');
+
+    const d17 = Number(reportSheet.getRange('D17').getValue()) || 0;
+    const d18 = Number(reportSheet.getRange('D18').getValue()) || 0;
+    const d19 = Number(reportSheet.getRange('D19').getValue()) || 0;
+    outTarget.getRange('D7').setValue(d17 + d18 + d19);
+
+    // ── E7, F7 ────────────────────────────────────────────────────
+    const j35 = prodSheet.getRange('J35').getValue();
+    outTarget.getRange('E7').setValue(j35);
+
+    const totalPeople = X + Y + Z + D + Ep + F;
+    outTarget.getRange('F7').setValue(totalPeople * 2.5);
+
+    const modeLabel = isTest ? `🧪 [테스트 - ${month}월 기준]\n\n` : '';
+    SpreadsheetApp.getUi().alert(`✅ 완료!\n\n${modeLabel}연장근로 계획 산정 근거가 입력되었습니다.`);
+
+  } catch (e) {
+    SpreadsheetApp.getUi().alert('❌ 오류 발생:\n' + e.message);
+  }
+}
+
+// ── 메인 함수 (Z3 기준, 기존 동작 유지) ─────────────────────────
+function fillOvertimePlan() {
+  try {
+    const keunTaeSS = SpreadsheetApp.openById('1UjHzUCH3w4eUQuxIZrzOtgeCi4itVUOTXDq7sm8PcvE');
+    let targetSheet = null;
+    for (let s of keunTaeSS.getSheets()) {
+      if (s.getName().includes('근무현황표')) { targetSheet = s; break; }
+    }
+    if (!targetSheet) throw new Error('근무현황표 시트를 찾을 수 없습니다.');
+
+    const M = Number(targetSheet.getRange('Z3').getValue());
+    if (!M || isNaN(M)) throw new Error('Z3 셀에서 월 값을 읽을 수 없습니다.');
+    const month = M + 1;
+
+    fillOvertimePlanWithMonth(month);
+
+  } catch (e) {
+    SpreadsheetApp.getUi().alert('❌ 오류 발생:\n' + e.message);
+  }
+}

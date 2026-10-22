@@ -1,142 +1,1866 @@
+/**
+ * 지정휴무(미사용연차) 정리·검증·변경추적·사전경고 GAS  — v3 (2026-10)
+ *
+ * [기존] 월 블록 자동 인식, 요일/공휴일 색상, "년" 노란색, 근무계획 연차·반차 검증
+ *
+ * [v3 추가]
+ *  ① 시트 3종 체계
+ *     - '지정휴무 원본'      : 7월 연차계획 신청 그대로 (수정 금지, 경고 보호)
+ *     - '현재 미사용연차'    : 변경이 반영된 최신 지정휴무 (기존 메커니즘)
+ *     - '지정휴무 변경 정보' : 변경 이력 (B이름 C직급 D통보시기 E변경전 F변경후 G비고 H소진유무 I자동점검)
+ *  ② ✏️ 연차 변경 등록 창 — 한 번 입력하면 '변경 정보'에 행 추가 + '현재 미사용연차' 칸 이동(메모·색상)까지 자동
+ *  ③ 🔄 추적 현황 갱신 — 원본에 변경 이력을 순서대로 적용한 결과 ↔ 현재 시트를 대조
+ *     → '지정휴무 추적 현황' 시트: 인원별 개수 / 불일치·이력 오류 / 연차별 변경 경로(9/11 → 10/8 → 10/26 → 12/1)
+ *     → '변경 정보' H열(소진유무)·I열(자동 점검) 자동 기입
+ *  ④ ⏰ 5일 전 경고 — 지정휴무엔 연차인데 근무계획에 '년'/'반'이 없으면 매일 아침 메일 + '연차 경고 로그' 기록
+ */
+
+// ─── 설정 ────────────────────────────────────────────────────────────────
+const LEAVE_CHECK_CONFIG = {
+  year: 2026,                                  // ← 해마다 갱신 (공휴일 표와 함께)
+  sourceSheetName: '현재 미사용연차',           // 최신 지정휴무 (기존 '미사용연차')
+  originalSheetName: '지정휴무 원본',           // 7월 신청 원본
+  changeSheetName: '지정휴무 변경 정보',        // 변경 이력
+  trackingSheetName: '지정휴무 추적 현황',      // 자동 생성 보고 시트
+  alertLogSheetName: '연차 경고 로그',          // 자동 생성 로그 시트
+  planSpreadsheetId: '12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY',
+  dateHeaderRowFallback: 10,                   // 자동 탐색 실패 시 사용할 날짜 머리글 행
+  dayColStart: 'C',                            // 1일 열
+  dayColEnd: 'AG'                              // 31일 열
+};
+
+// '지정휴무 변경 정보' 시트 구조
+const CHANGE_LOG_CONFIG = {
+  headerRow: 3,
+  firstDataRow: 4,
+  col: { name: 2, position: 3, requested: 4, from: 5, to: 6, note: 7, used: 8, check: 9 },  // B~I
+  autoFillUsed: true,       // H열(소진유무) 자동 기입: 예 / 아니오 / 재변경 / 취소
+  autoCheckColumn: true     // I열에 행별 자동 점검 결과 기록
+};
+
+// 5일 전 경고 설정
+const LEAVE_ALERT_CONFIG = {
+  daysBefore: 5,            // 오늘 ~ 5일 뒤까지 확인
+  triggerHour: 8,           // 매일 오전 8시경 실행
+  skipWeekends: true,       // 토·일에는 메일 안 보냄
+  adminEmails: ['youngjoonkim@kas.co.kr'],   // 전체 요약 수신자
+  // 본인에게도 보내려면 이메일 입력 (비워 두면 관리자 요약에만 포함)
+  teamEmails: {
+    '김재방': '',
+    '이정묵': '',
+    '김영준': '',
+    '박수형': '',
+    '고혁진': '',
+    '진성령': ''
+  },
+  reportPlanOnly: true      // 근무계획엔 년/반이 있는데 지정휴무엔 없는 경우도 관리자에게 '참고'로 알림
+};
+
+const LT_CHANGED_COLOR = '#ffd966';   // 변경으로 새로 들어온 연차 칸 색
+const LT_TZ = 'Asia/Seoul';
+
+// ─── 공휴일 설정 ─────────────────────────────────────────────────────────
+// ① 날짜가 매년 같은 공휴일 (연도 무관) — 회사 기준으로 쉬는 날이면 여기 추가
+const FIXED_HOLIDAYS = {
+  '1-1': '신정',
+  '3-1': '삼일절',
+  '5-5': '어린이날',
+  '6-6': '현충일',
+  '7-17': '제헌절',
+  '8-15': '광복절',
+  '10-3': '개천절',
+  '10-9': '한글날',
+  '12-25': '성탄절'
+};
+
+// ② 매년 바뀌는 공휴일(설날·추석·부처님오신날·대체공휴일·임시공휴일)은
+//    Google "대한민국의 휴일" 캘린더에서 해당 연도 것을 자동으로 읽어옴
+const HOLIDAY_CALENDAR_ID = 'ko.south_korea#holiday@group.v.calendar.google.com';
+// 캘린더 일정 중 이 단어가 제목에 있는 것만 공휴일로 채택 (어버이날 같은 기념일 제외)
+const HOLIDAY_CALENDAR_KEYWORDS = ['설날', '추석', '부처님', '석가', '대체', '임시공휴일', '선거'];
+
+// ③ 수동 보정 (캘린더를 못 읽을 때의 대비 또는 예외 처리)
+//    'YYYY-M-D': '이름'  → 그 날을 공휴일로 추가
+//    'YYYY-M-D': null    → 그 날을 공휴일에서 제외
+const HOLIDAY_OVERRIDES = {
+  // 예) '2026-9-24': '추석', '2026-9-25': '추석', '2026-9-26': '추석',
+  //     '2026-8-17': '광복절 대체공휴일', '2026-10-5': '개천절 대체공휴일'
+};
+
+// B열에 이 값이 있으면 이름이 아니라 머리글로 간주
+const NAME_HEADER_LABELS = ['성명', '이름', '구분', '직원', '사원', '요일'];
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// 메뉴
+// ═════════════════════════════════════════════════════════════════════════
 function onOpen() {
   const email = Session.getActiveUser().getEmail();
   if (email !== 'youngjoonkim@kas.co.kr') return;
-  
-  SpreadsheetApp.getUi()
-    .createMenu('휴무 정리')
-    .addItem('년/메모 셀 초기화', 'clearYeonAndNoteCells')
-    .addItem('요일 및 주말/공휴일 색상 설정', 'fillWeekdaysAndColors')
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('휴무 정리')
+    .addItem('✏️ 연차 변경 등록', 'openLeaveChangeForm')
+    .addItem('🔄 추적 현황 갱신 (원본+이력 ↔ 현재 대조)', 'refreshLeaveTracking')
+    .addSeparator()
+    .addItem('👀 5일 이내 근무계획 미반영 확인 (메일 X)', 'previewLeaveAlerts')
+    .addItem('📧 경고 메일 지금 보내기', 'sendLeaveAlertsNow')
+    .addSubMenu(ui.createMenu('⏰ 매일 자동 경고')
+      .addItem('켜기 (매일 오전 ' + LEAVE_ALERT_CONFIG.triggerHour + '시경)', 'enableDailyLeaveAlert')
+      .addItem('끄기', 'disableDailyLeaveAlert'))
+    .addSeparator()
+    .addItem('선택 월 연차·반차 검증', 'validateSelectedLeaveMonths')
+    .addSeparator()
+    .addSubMenu(ui.createMenu('표 정리 (현재 미사용연차)')
+      .addItem('년/메모 셀 초기화', 'clearYeonAndNoteCells')
+      .addItem('요일 및 주말/공휴일 색상 설정', 'fillWeekdaysAndColors')
+      .addItem('"년" 셀 노란색 표시', 'highlightYeonCellsYellow'))
+    .addSubMenu(ui.createMenu('점검·설정')
+      .addItem('🔒 원본 시트 보호(수정 시 경고)', 'protectOriginalSheet')
+      .addItem('🔎 월 블록 인식 확인', 'debugMonthBlocks')
+      .addItem('📅 올해 공휴일 확인', 'debugHolidays'))
     .addToUi();
 }
 
-function clearYeonAndNoteCells() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName('미사용연차');
-  const range = sheet.getRange('C12:AG52');
-  
-  const values = range.getValues();
-  const notes = range.getNotes();
-  const numRows = values.length;
-  const numCols = values[0].length;
-  
-  for (let r = 0; r < numRows; r++) {
-    for (let c = 0; c < numCols; c++) {
-      const cellValue = values[r][c];
-      const cellNote = notes[r][c];
-      
-      const hasYeon = (typeof cellValue === 'string') && cellValue.indexOf('년') !== -1;
-      const hasNote = cellNote && cellNote.length > 0;
-      
-      if (hasYeon || hasNote) {
-        const cell = range.getCell(r + 1, c + 1);
-        if (hasYeon) {
-          cell.setValue('');
+
+// ═════════════════════════════════════════════════════════════════════════
+// 공휴일 표 생성 (고정 공휴일 + Google 휴일 캘린더 + 수동 보정)
+// ═════════════════════════════════════════════════════════════════════════
+
+/**
+ * 반환: { map: { 'M-D': { name, substitute } }, source: 문자열, calendarOk: bool }
+ *  - substitute: true 면 "대체공휴일" 일정
+ */
+function getHolidayMap_(year) {
+  const map = {};
+  Object.keys(FIXED_HOLIDAYS).forEach(k => { map[k] = { name: FIXED_HOLIDAYS[k], substitute: false }; });
+
+  let calendarOk = false;
+  let calendarCount = 0;
+  try {
+    const cal = CalendarApp.getCalendarById(HOLIDAY_CALENDAR_ID);
+    if (cal) {
+      const events = cal.getEvents(new Date(year, 0, 1), new Date(year + 1, 0, 1));
+      events.forEach(ev => {
+        const title = String(ev.getTitle() || '').trim();
+        if (!HOLIDAY_CALENDAR_KEYWORDS.some(k => title.indexOf(k) !== -1)) return;
+        const isSub = title.indexOf('대체') !== -1;
+        const allDay = ev.isAllDayEvent();
+        const start = allDay ? ev.getAllDayStartDate() : ev.getStartTime();
+        const end = allDay ? ev.getAllDayEndDate() : ev.getEndTime();   // 종료일은 미포함
+        for (let cur = new Date(start.getFullYear(), start.getMonth(), start.getDate()); cur < end; cur.setDate(cur.getDate() + 1)) {
+          if (cur.getFullYear() !== year) continue;
+          const key = (cur.getMonth() + 1) + '-' + cur.getDate();
+          if (!map[key] || isSub) map[key] = { name: title, substitute: isSub };
+          calendarCount++;
         }
-        if (hasNote) {
-          cell.clearNote();
-        }
-        cell.setBackground('#ffffff');
-      }
+      });
+      calendarOk = true;
     }
+  } catch (e) {
+    Logger.log('휴일 캘린더 읽기 실패: ' + e.message);
   }
-  
-  SpreadsheetApp.getUi().alert('완료되었습니다.');
+
+  // 수동 보정
+  Object.keys(HOLIDAY_OVERRIDES).forEach(k => {
+    const m = k.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (!m || Number(m[1]) !== year) return;
+    const key = Number(m[2]) + '-' + Number(m[3]);
+    const v = HOLIDAY_OVERRIDES[k];
+    if (v === null) delete map[key];
+    else map[key] = { name: String(v), substitute: String(v).indexOf('대체') !== -1 };
+  });
+
+  const source = calendarOk
+    ? '고정 공휴일 표 + Google 휴일 캘린더(' + calendarCount + '일) + 수동 보정'
+    : '고정 공휴일 표 + 수동 보정 (⚠️ 휴일 캘린더를 읽지 못함 — 설날·추석·대체공휴일 누락 가능)';
+  return { map: map, source: source, calendarOk: calendarOk };
 }
 
-function fillWeekdaysAndColors() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName('미사용연차');
-  const year = 2026;
-  
+/**
+ * 주말에 걸린 공휴일인데 바로 뒤(1~3일 내)에 대체공휴일이 있으면 true
+ * → 그 날은 빨강 처리하지 않고 주말색만 (대체일이 빨강)
+ */
+function hasSubstituteAfter_(holidayMap, year, month, day) {
+  for (let i = 1; i <= 3; i++) {
+    const d = new Date(year, month - 1, day + i);
+    const info = holidayMap[(d.getMonth() + 1) + '-' + d.getDate()];
+    if (info && info.substitute) return true;
+  }
+  return false;
+}
+
+/** 해당 날짜를 빨강(공휴일)으로 칠할지 + 표시 이름 */
+function resolveHoliday_(holidayMap, year, month, day) {
+  const info = holidayMap[month + '-' + day];
+  if (!info) return null;
+  const dow = new Date(year, month - 1, day).getDay();
+  const isWeekend = (dow === 0 || dow === 6);
+  if (isWeekend && !info.substitute && hasSubstituteAfter_(holidayMap, year, month, day)) return null;
+  return info;
+}
+
+function debugHolidays() {
+  const ui = SpreadsheetApp.getUi();
+  const year = LEAVE_CHECK_CONFIG.year;
+  const h = getHolidayMap_(year);
   const weekdayNames = ['일', '월', '화', '수', '목', '금', '토'];
-  const SAT_COLOR = '#c6d9f0';
-  const SUN_COLOR = '#e5b8b7';
-  const NA_COLOR = '#7f7f7f';
-  const WHITE = '#ffffff';
-  
-  // 2026년 7~12월 공휴일 정보
-  // hasSubstitute: true 인 날짜는 대체공휴일이 따로 있으므로 본래 요일색만 칠하고 병합/표기 생략
-  const holidayInfo = {
-    '7-17': { name: '제헌절', hasSubstitute: false },
-    '8-15': { name: '광복절', hasSubstitute: true },
-    '8-17': { name: '광복절 대체공휴일', hasSubstitute: false },
-    '9-24': { name: '추석', hasSubstitute: false },
-    '9-25': { name: '추석', hasSubstitute: false },
-    '9-26': { name: '추석', hasSubstitute: false },
-    '10-3': { name: '개천절', hasSubstitute: true },
-    '10-5': { name: '개천절 대체공휴일', hasSubstitute: false },
-    '10-9': { name: '한글날', hasSubstitute: false },
-    '12-25': { name: '성탄절', hasSubstitute: false }
-  };
-  
-  const monthConfigs = [
-    { headerRow: 11, month: 7, has31: true },
-    { headerRow: 18, month: 8, has31: true },
-    { headerRow: 25, month: 9, has31: false },
-    { headerRow: 32, month: 10, has31: true },
-    { headerRow: 39, month: 11, has31: false },
-    { headerRow: 46, month: 12, has31: true }
+  const keys = Object.keys(h.map).sort((a, b) => {
+    const [am, ad] = a.split('-').map(Number), [bm, bd] = b.split('-').map(Number);
+    return (am - bm) || (ad - bd);
+  });
+  const lines = keys.map(k => {
+    const [m, d] = k.split('-').map(Number);
+    const dow = weekdayNames[new Date(year, m - 1, d).getDay()];
+    const red = resolveHoliday_(h.map, year, m, d);
+    return (m < 10 ? ' ' : '') + m + '/' + (d < 10 ? ' ' : '') + d + ' (' + dow + ') ' + h.map[k].name +
+      (red ? '' : '  → 대체일 있음, 주말색 유지');
+  });
+  let msg = '📅 ' + year + '년 공휴일 (' + keys.length + '일)\n출처: ' + h.source + '\n\n' + lines.join('\n');
+  if (!h.calendarOk) {
+    msg += '\n\n⚠️ Google 캘린더에서 "대한민국의 휴일"을 구독(다른 캘린더 추가 → 관심분야 → 대한민국의 휴일)하면 설날·추석이 자동 반영됩니다. ' +
+      '그 전에는 HOLIDAY_OVERRIDES에 직접 넣어 주세요.';
+  }
+  ui.alert(msg);
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// 월 블록 자동 인식 (핵심)
+// ═════════════════════════════════════════════════════════════════════════
+
+/**
+ * A열에서 "N월" 라벨을 찾아 블록 목록을 반환.
+ * 각 블록: { month, labelRow, headerRow, dataStartRow, dataEndRow, dataCount, names, rows }
+ *  - 블록 범위: 라벨 행 ~ (병합 범위 끝 또는 다음 라벨 직전)
+ *  - 인원 행: 그 범위 안에서 B열에 이름이 있는 행 (머리글 라벨 제외)
+ *  - 요일 헤더 행: 첫 인원 행 - 1
+ */
+function getMonthBlocks_(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) throw new Error('"' + sheet.getName() + '" 시트에 데이터가 없습니다.');
+
+  const colA = sheet.getRange(1, 1, lastRow, 1).getDisplayValues();
+  const colB = sheet.getRange(1, 2, lastRow, 1).getDisplayValues();
+
+  // A열 병합 범위: 라벨 행 → 병합 끝 행
+  const mergeEnd = {};
+  sheet.getRange(1, 1, lastRow, 1).getMergedRanges().forEach(r => {
+    mergeEnd[r.getRow()] = r.getLastRow();
+  });
+
+  // 라벨 행 수집
+  const labels = [];
+  for (let i = 0; i < lastRow; i++) {
+    const m = leaveName_(colA[i][0]).match(/^(\d{1,2})월$/);
+    if (m) {
+      const month = Number(m[1]);
+      if (month >= 1 && month <= 12) labels.push({ month: month, row: i + 1 });
+    }
+  }
+  if (labels.length === 0) throw new Error('"' + sheet.getName() + '" A열에서 "N월" 라벨을 찾지 못했습니다.');
+
+  const blocks = [];
+  for (let k = 0; k < labels.length; k++) {
+    const top = labels[k].row;
+    const nextTop = (k + 1 < labels.length) ? labels[k + 1].row : lastRow + 1;
+    // 병합 범위가 있으면 그 끝, 없으면 다음 라벨 직전까지
+    const end = Math.min(mergeEnd[top] || (nextTop - 1), nextTop - 1);
+
+    const dataRows = [];
+    const names = [];
+    for (let r = top; r <= end; r++) {
+      const b = leaveName_(colB[r - 1][0]);
+      if (!b) continue;
+      if (NAME_HEADER_LABELS.indexOf(b) !== -1) continue;
+      dataRows.push(r);
+      names.push(String(colB[r - 1][0]).trim());
+    }
+    if (dataRows.length === 0) {
+      throw new Error(labels[k].month + '월 블록(' + top + '~' + end + '행)에서 B열 이름을 찾지 못했습니다.');
+    }
+
+    blocks.push({
+      month: labels[k].month,
+      labelRow: top,
+      headerRow: dataRows[0] - 1,
+      dataStartRow: dataRows[0],
+      dataEndRow: dataRows[dataRows.length - 1],
+      dataCount: dataRows[dataRows.length - 1] - dataRows[0] + 1,
+      names: names,
+      rows: dataRows
+    });
+  }
+  return blocks;
+}
+
+/** month → 블록 (없으면 null) */
+function getMonthBlock_(blocks, month) {
+  return blocks.find(b => b.month === month) || null;
+}
+
+/**
+ * 날짜 머리글 행(1~31) 탐색: 첫 블록 요일 헤더 위쪽에서 C열="1", D열="2" 인 행.
+ * 못 찾으면 설정값(fallback) 사용.
+ */
+function findDateHeaderRow_(sheet, blocks) {
+  const limit = blocks[0].headerRow - 1;
+  const c = columnLetterToIndex(LEAVE_CHECK_CONFIG.dayColStart);
+  if (limit >= 1) {
+    const vals = sheet.getRange(1, c, limit, 2).getDisplayValues();
+    for (let i = limit - 1; i >= 0; i--) {   // 블록에 가까운 쪽부터
+      if (String(vals[i][0]).trim() === '1' && String(vals[i][1]).trim() === '2') return i + 1;
+    }
+  }
+  return LEAVE_CHECK_CONFIG.dateHeaderRowFallback;
+}
+
+function getSourceSheet_() {
+  const sheet = ltBook_().getSheetByName(LEAVE_CHECK_CONFIG.sourceSheetName);
+  if (!sheet) throw new Error('지정휴무 탭을 찾을 수 없습니다: ' + LEAVE_CHECK_CONFIG.sourceSheetName);
+  return sheet;
+}
+
+function dayColCount_() {
+  return columnLetterToIndex(LEAVE_CHECK_CONFIG.dayColEnd) - columnLetterToIndex(LEAVE_CHECK_CONFIG.dayColStart) + 1;
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// 년/메모 셀 초기화 (블록별 인원 행만)
+// ═════════════════════════════════════════════════════════════════════════
+function clearYeonAndNoteCells() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const sheet = getSourceSheet_();
+    const blocks = getMonthBlocks_(sheet);
+    const startCol = columnLetterToIndex(LEAVE_CHECK_CONFIG.dayColStart);
+    const numCols = dayColCount_();
+    let cleared = 0;
+
+    blocks.forEach(b => {
+      const range = sheet.getRange(b.dataStartRow, startCol, b.dataCount, numCols);
+      const values = range.getValues();
+      const notes = range.getNotes();
+      for (let r = 0; r < values.length; r++) {
+        for (let c = 0; c < values[r].length; c++) {
+          const cellValue = values[r][c];
+          const cellNote = notes[r][c];
+          const hasYeon = (typeof cellValue === 'string') && cellValue.indexOf('년') !== -1;
+          const hasNote = cellNote && cellNote.length > 0;
+          if (hasYeon || hasNote) {
+            const cell = range.getCell(r + 1, c + 1);
+            if (hasYeon) cell.setValue('');
+            if (hasNote) cell.clearNote();
+            cell.setBackground('#ffffff');
+            cleared++;
+          }
+        }
+      }
+    });
+
+    ui.alert('완료되었습니다.\n\n' +
+      blocks.map(b => b.month + '월: ' + b.dataStartRow + '~' + b.dataEndRow + '행 (' + b.dataCount + '명)').join('\n') +
+      '\n\n초기화한 셀: ' + cleared + '개');
+  } catch (e) {
+    ui.alert('❌ 오류\n\n' + e.message);
+  }
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// 요일 및 주말/공휴일 색상 설정 (블록별, 인원 수 자동)
+// ═════════════════════════════════════════════════════════════════════════
+function fillWeekdaysAndColors() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const sheet = getSourceSheet_();
+    const blocks = getMonthBlocks_(sheet);
+    const year = LEAVE_CHECK_CONFIG.year;
+    const weekdayNames = ['일', '월', '화', '수', '목', '금', '토'];
+    const SAT_COLOR = '#c6d9f0';
+    const SUN_COLOR = '#e5b8b7';
+    const NA_COLOR = '#7f7f7f';
+    const WHITE = '#ffffff';
+
+    const startColIndex = columnLetterToIndex(LEAVE_CHECK_CONFIG.dayColStart);
+    const endColIndex = columnLetterToIndex(LEAVE_CHECK_CONFIG.dayColEnd);
+
+    const holidays = getHolidayMap_(year);
+    const usedHolidays = [];
+
+    blocks.forEach(b => {
+      const headerRow = b.headerRow;
+      const nRows = b.dataCount;                    // 인원 행 수 (6, 7, …)
+      const daysInMonth = new Date(year, b.month, 0).getDate();
+
+      // 헤더 + 인원 행 전체 병합 해제 (이전 공휴일 병합 제거)
+      sheet.getRange(headerRow, startColIndex, nRows + 1, endColIndex - startColIndex + 1).breakApart();
+
+      for (let colIndex = startColIndex; colIndex <= endColIndex; colIndex++) {
+        const day = colIndex - startColIndex + 1;
+        const headerCell = sheet.getRange(headerRow, colIndex);
+        const belowRange = sheet.getRange(headerRow + 1, colIndex, nRows, 1);
+
+        // 그 달에 없는 날짜(29·30·31) → 회색
+        if (day > daysInMonth) {
+          headerCell.setBackground(NA_COLOR).setValue('');
+          belowRange.setBackground(NA_COLOR);
+          continue;
+        }
+
+        const date = new Date(year, b.month - 1, day);
+        const dayOfWeek = date.getDay();
+        const info = resolveHoliday_(holidays.map, year, b.month, day);
+        const isRedHoliday = !!info;
+
+        let color;
+        if (isRedHoliday || dayOfWeek === 0) color = SUN_COLOR;
+        else if (dayOfWeek === 6) color = SAT_COLOR;
+        else color = WHITE;
+
+        headerCell.setValue(weekdayNames[dayOfWeek]).setBackground(color);
+        belowRange.setBackground(color);
+
+        if (isRedHoliday) {
+          belowRange.merge();
+          belowRange.setValue(info.name)
+            .setHorizontalAlignment('center')
+            .setVerticalAlignment('middle');
+          usedHolidays.push(b.month + '/' + day + ' ' + info.name);
+        }
+      }
+    });
+
+    let msg = '요일, 주말, 공휴일 색상 설정이 완료되었습니다.\n\n' +
+      blocks.map(b => b.month + '월: 헤더 ' + b.headerRow + '행 / 인원 ' + b.dataStartRow + '~' + b.dataEndRow + '행 (' + b.dataCount + '명)').join('\n') +
+      '\n\n공휴일 출처: ' + holidays.source +
+      '\n반영된 공휴일: ' + (usedHolidays.length ? usedHolidays.join(', ') : '없음');
+    if (!holidays.calendarOk) {
+      msg += '\n\n⚠️ Google 캘린더에서 "대한민국의 휴일"을 구독하면 설날·추석·대체공휴일이 자동 반영됩니다. ' +
+        '"📅 올해 공휴일 확인" 메뉴로 먼저 점검하세요.';
+    }
+    ui.alert(msg);
+  } catch (e) {
+    ui.alert('❌ 오류\n\n' + e.message);
+  }
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// "년" 셀 노란색 표시 (블록별 인원 행만)
+// ═════════════════════════════════════════════════════════════════════════
+function highlightYeonCellsYellow() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const sheet = getSourceSheet_();
+    const blocks = getMonthBlocks_(sheet);
+    const startCol = columnLetterToIndex(LEAVE_CHECK_CONFIG.dayColStart);
+    const numCols = dayColCount_();
+    let count = 0;
+
+    blocks.forEach(b => {
+      const range = sheet.getRange(b.dataStartRow, startCol, b.dataCount, numCols);
+      const values = range.getValues();
+      for (let r = 0; r < values.length; r++) {
+        for (let c = 0; c < values[r].length; c++) {
+          const v = values[r][c];
+          if ((typeof v === 'string') && v.indexOf('년') !== -1) {
+            range.getCell(r + 1, c + 1).setBackground('#ffff00');
+            count++;
+          }
+        }
+      }
+    });
+
+    ui.alert('"년" 셀 노란색 표시가 완료되었습니다. (' + count + '개)');
+  } catch (e) {
+    ui.alert('❌ 오류\n\n' + e.message);
+  }
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// 🔎 월 블록 인식 확인 (디버그) — 현재 / 원본 둘 다
+// ═════════════════════════════════════════════════════════════════════════
+function debugMonthBlocks() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = ltBook_();
+  const lines = [];
+  [LEAVE_CHECK_CONFIG.sourceSheetName, LEAVE_CHECK_CONFIG.originalSheetName].forEach(name => {
+    lines.push('■ ' + name);
+    try {
+      const sheet = ss.getSheetByName(name);
+      if (!sheet) throw new Error('시트 없음');
+      const blocks = getMonthBlocks_(sheet);
+      const dateRow = findDateHeaderRow_(sheet, blocks);
+      lines.push('날짜 머리글 행: ' + dateRow + '행 (' + LEAVE_CHECK_CONFIG.dayColStart + '~' + LEAVE_CHECK_CONFIG.dayColEnd + ')');
+      blocks.forEach(b => {
+        lines.push(b.month + '월 — 라벨 ' + b.labelRow + '행 / 요일헤더 ' + b.headerRow + '행 / 인원 ' +
+          b.dataStartRow + '~' + b.dataEndRow + '행 (' + b.dataCount + '명)');
+        lines.push('   ' + b.names.join(', '));
+      });
+    } catch (e) {
+      lines.push('❌ ' + e.message);
+    }
+    lines.push('');
+  });
+  ui.alert('🔎 월 블록 인식 결과\n\n' + lines.join('\n'));
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// 선택 월 연차·반차 검증 (읽기 전용)
+// ═════════════════════════════════════════════════════════════════════════
+function validateSelectedLeaveMonths() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const source = getSourceSheet_();
+    const blocks = getMonthBlocks_(source);
+    const available = blocks.map(b => b.month);
+
+    const answer = ui.prompt('선택 월 연차·반차 검증',
+      '검증할 월을 입력하세요. 예: 7 또는 7,8,9 또는 전체\n' +
+      '지정휴무 탭에 있는 월: ' + available.join(', ') + '월\n초기화하기 전에 검증하세요.',
+      ui.ButtonSet.OK_CANCEL);
+    if (answer.getSelectedButton() !== ui.Button.OK) return;
+
+    const months = leaveParseMonths_(answer.getResponseText(), available);
+
+    const dateHeaderRow = findDateHeaderRow_(source, blocks);
+    const startCol = columnLetterToIndex(LEAVE_CHECK_CONFIG.dayColStart);
+    const numDayCols = dayColCount_();
+    const sourceHeaders = source.getRange(dateHeaderRow, startCol, 1, numDayCols).getDisplayValues()[0];
+    const sourceDays = leaveDayMap_(sourceHeaders, 31);
+
+    const planBook = SpreadsheetApp.openById(LEAVE_CHECK_CONFIG.planSpreadsheetId);
+
+    const results = months.map(month => {
+      const block = getMonthBlock_(blocks, month);
+      if (!block) return { month, checked: 0, matched: 0, entries: [],
+        blocked: '검증 불가: 지정휴무 탭에 ' + month + '월 블록이 없습니다.' };
+
+      // B열(이름) + 날짜 열 전체 (B ~ AG)
+      const sourceRows = source.getRange(block.dataStartRow, 2, block.dataCount, numDayCols + 1).getDisplayValues();
+
+      const plan = planBook.getSheetByName(month + '월');
+      if (!plan) return { month, checked: 0, matched: 0, entries: [],
+        blocked: '검증 불가: 근무계획의 ' + month + '월 시트가 아직 없습니다.' };
+      try {
+        const lastRow = plan.getLastRow();
+        if (lastRow < 5) throw new Error('근무계획에 직원 표와 A열의 계 행이 없습니다.');
+        const labels = plan.getRange(5, 1, lastRow - 4, 1).getDisplayValues();
+        const count = labels.findIndex(row => leaveName_(row[0]) === '계');
+        if (count < 0) throw new Error('A열에서 계 행을 찾지 못해 인원 범위를 확정할 수 없습니다.');
+        const planRows = count ? plan.getRange(5, 1, count, 37).getDisplayValues() : [];
+        const planHeaders = plan.getRange('G3:AK3').getDisplayValues()[0];
+        return leaveCompareMonth_(month, block.dataStartRow, sourceRows, sourceDays, planHeaders, planRows);
+      } catch (error) {
+        return { month, checked: 0, matched: 0, entries: [], blocked: '검증 불가: ' + error.message };
+      }
+    });
+    leaveShowResults_(results);
+  } catch (error) {
+    ui.alert('검증을 완료하지 못했습니다', String(error.message || error) +
+      '\n\n근무계획 파일 접근 권한과 시트 이름·표 구조를 확인하세요.', ui.ButtonSet.OK);
+  }
+}
+
+function leaveParseMonths_(input, available) {
+  const text = String(input).trim();
+  if (text === '전체') return available.slice();
+  const parts = text.split(',').map(part => part.trim());
+  if (!parts.length || parts.some(part => !/^(?:[1-9]|1[0-2])\s*월?$/.test(part))) {
+    throw new Error('월은 1~12 사이 숫자로 입력하세요. 여러 월은 쉼표로 구분하세요. 예: 7,8,9');
+  }
+  const months = Array.from(new Set(parts.map(part => Number(part.replace(/\s*월$/, ''))))).sort((a, b) => a - b);
+  const missing = months.filter(m => available.indexOf(m) === -1);
+  if (missing.length) throw new Error('지정휴무 탭에 없는 월입니다: ' + missing.join(', ') + '월 (있는 월: ' + available.join(', ') + '월)');
+  return months;
+}
+
+function leaveName_(value) {
+  return String(value == null ? '' : value).normalize('NFC').replace(/\s+/g, '');
+}
+
+function leaveMarkers_(value) {
+  const text = String(value == null ? '' : value);
+  return ['년', '반'].filter(marker => text.indexOf(marker) >= 0).join('');
+}
+
+function leaveDayMap_(headers, days) {
+  const result = Object.create(null);
+  headers.forEach((header, index) => {
+    const text = String(header).trim();
+    if (!text) return;
+    if (!/^\d+$/.test(text)) throw new Error('날짜 머리글은 숫자여야 합니다: ' + text);
+    const day = Number(text);
+    if (day < 1 || day > 31) throw new Error('날짜 머리글 범위 오류: ' + text);
+    if (result[day] !== undefined) throw new Error('날짜 머리글 중복: ' + day + '일');
+    result[day] = index;
+  });
+  for (let day = 1; day <= days; day++) {
+    if (result[day] === undefined) throw new Error('날짜 머리글 누락: ' + day + '일');
+  }
+  return result;
+}
+
+// GAS 서비스에 의존하지 않는 비교 함수: 입력은 getDisplayValues() 형식입니다.
+function leaveCompareMonth_(month, startRow, sourceRows, sourceDays, planHeaders, planRows) {
+  const days = new Date(LEAVE_CHECK_CONFIG.year, month, 0).getDate();
+  const planDays = leaveDayMap_(planHeaders, days);
+  const people = Object.create(null);
+  const sourceCounts = Object.create(null);
+  planRows.forEach((row, index) => {
+    const name = leaveName_(row[2]);
+    if (name) (people[name] || (people[name] = [])).push({ row, sheetRow: index + 5 });
+  });
+  sourceRows.forEach(row => {
+    const name = leaveName_(row[0]);
+    if (name) sourceCounts[name] = (sourceCounts[name] || 0) + 1;
+  });
+  const result = { month, checked: 0, matched: 0, entries: [], blocked: '' };
+  sourceRows.forEach((row, index) => {
+    const name = leaveName_(row[0]);
+    for (let day = 1; day <= 31; day++) {
+      const sourceIndex = sourceDays[day];
+      const value = row[sourceIndex + 1];
+      const expected = leaveMarkers_(value);
+      if (!expected) continue;
+      result.checked++;
+      const entry = { name: row[0] || '(이름 없음)', day, sourceValue: value,
+        sourceCell: leaveColumn_(sourceIndex + 3) + (startRow + index),
+        planValue: '', planCell: '', status: '', ok: false };
+      const matches = people[name] || [];
+      if (day > days) entry.status = '해당 월에 없는 날짜';
+      else if (!name) entry.status = '지정휴무 이름 누락';
+      else if (sourceCounts[name] > 1) entry.status = '지정휴무 이름 중복: 이름만으로 구분 불가';
+      else if (!matches.length) entry.status = '근무계획에 이름 없음';
+      else if (matches.length > 1) entry.status = '근무계획 이름 중복: 이름만으로 구분 불가';
+      else {
+        const matched = matches[0];
+        const planIndex = planDays[day] + 6;
+        entry.planValue = matched.row[planIndex];
+        entry.planCell = leaveColumn_(planIndex + 1) + matched.sheetRow;
+        const actual = leaveMarkers_(entry.planValue);
+        if (expected.length > 1 || actual.length > 1) entry.status = '년·반 동시 포함: 휴가 종류 확인 필요';
+        else if (actual === expected) {
+          entry.ok = true;
+          entry.status = '일치';
+          result.matched++;
+        } else entry.status = actual ? '휴가 종류 불일치' : '근무계획에 ' + expected + ' 없음';
+      }
+      result.entries.push(entry);
+    }
+  });
+  return result;
+}
+
+function leaveColumn_(column) {
+  let text = '';
+  while (column > 0) {
+    column--;
+    text = String.fromCharCode(65 + column % 26) + text;
+    column = Math.floor(column / 26);
+  }
+  return text;
+}
+
+function leaveEscape_(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, char =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+}
+
+function leaveShowResults_(results) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetName = '연차·반차 검증결과';
+  const marker = 'LEAVE_VALIDATION_REPORT_V1';
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(10000)) throw new Error('다른 검증 결과를 저장 중입니다. 잠시 후 다시 실행하세요.');
+  try {
+    let sheet = ss.getSheetByName(sheetName);
+    if (sheet && sheet.getLastRow() > 0 && sheet.getRange('A1').getNote() !== marker) {
+      throw new Error(sheetName + ' 이름의 기존 시트에 다른 데이터가 있습니다. 해당 시트 이름을 변경한 뒤 다시 실행하세요.');
+    }
+    const report = leaveBuildReport_(results);
+    const timestamp = Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+    report.values[1][0] = '검증 시각: ' + timestamp + ' | 선택 월: ' + results.map(r => r.month + '월').join(', ');
+    if (!sheet) sheet = ss.insertSheet(sheetName);
+    if (sheet.getMaxRows() < report.values.length) {
+      sheet.insertRowsAfter(sheet.getMaxRows(), report.values.length - sheet.getMaxRows());
+    }
+    if (sheet.getMaxColumns() < 9) sheet.insertColumnsAfter(sheet.getMaxColumns(), 9 - sheet.getMaxColumns());
+    const filter = sheet.getFilter();
+    if (filter) filter.remove();
+    sheet.getDataRange().breakApart();
+    sheet.clear();
+    sheet.getRange('A1').setNote(marker);
+    // 원본의 = 시작 문자열을 수식으로 실행하지 않고 표시합니다.
+    const safeValues = report.values.map(row => row.map(value =>
+      typeof value === 'string' && value.startsWith('=') ? "'" + value : value));
+    sheet.getRange(1, 1, safeValues.length, 9).setValues(safeValues)
+      .setFontFamily('Arial').setFontSize(10).setVerticalAlignment('middle').setWrap(true);
+    [1, 2, 3].forEach(row => sheet.getRange(row, 1, 1, 9).merge());
+    sheet.getRange('A1:I1').setBackground('#17365d').setFontColor('#ffffff').setFontSize(16).setFontWeight('bold');
+    sheet.setRowHeight(1, 38);
+    sheet.setRowHeight(2, 30);
+    sheet.setRowHeight(3, 42);
+    const summaryHeader = sheet.getRange(5, 1, 1, 9);
+    const detailHeader = sheet.getRange(report.detailHeaderRow, 1, 1, 9);
+    [summaryHeader, detailHeader].forEach(range => range.setBackground('#d9e5f3').setFontWeight('bold'));
+    results.forEach((result, index) => {
+      const color = result.blocked || !result.checked ? '#fff2cc' :
+        result.checked > result.matched ? '#fce4d6' : '#e2f0d9';
+      sheet.getRange(6 + index, 1, 1, 9).setBackground(color);
+    });
+    if (report.details.length) {
+      const colors = report.details.map(row => Array(9).fill(
+        row[0] === '일치' ? '#e2f0d9' : row[0] === '확인 필요' ? '#fce4d6' : '#fff2cc'));
+      sheet.getRange(report.detailHeaderRow + 1, 1, report.details.length, 9).setBackgrounds(colors);
+      sheet.getRange(report.detailHeaderRow, 1, report.details.length + 1, 9).createFilter();
+    }
+    [100, 65, 100, 100, 150, 125, 150, 150, 330].forEach((width, index) => sheet.setColumnWidth(index + 1, width));
+    sheet.setFrozenRows(report.detailHeaderRow);
+    sheet.setFrozenColumns(0);
+    sheet.setHiddenGridlines(true);
+    ss.setActiveSheet(sheet);
+    sheet.getRange('A1').activate();
+    ss.toast('선택한 월의 결과를 갱신했습니다.', '연차·반차 검증', 5);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function leaveBuildReport_(results) {
+  const pad = row => row.concat(Array(9 - row.length).fill(''));
+  const values = [
+    pad([LEAVE_CHECK_CONFIG.year + '년 연차·반차 검증결과']),
+    pad(['검증 시각']),
+    pad(['지정휴무의 년·반 셀 기준 | 재실행 시 선택한 월의 결과로 교체됩니다. | 초기화 전에 검증하세요.']),
+    pad([]),
+    ['월', '대상', '일치', '확인 필요', '검증 상태', '', '', '', '안내']
   ];
-  
-  const startColIndex = columnLetterToIndex('C'); // 3
-  const agColIndex = columnLetterToIndex('AG'); // 31일 열
-  
-  monthConfigs.forEach(config => {
-    const { headerRow, month, has31 } = config;
-    
-    // 기존 병합 해제 (재실행 대비)
-    const fullBlock = sheet.getRange(headerRow, startColIndex, 7, agColIndex - startColIndex + 1);
-    fullBlock.breakApart();
-    
-    for (let colIndex = startColIndex; colIndex <= agColIndex; colIndex++) {
-      const day = colIndex - startColIndex + 1;
-      
-      // 31일이 없는 달의 AG열 처리
-      if (!has31 && colIndex === agColIndex) {
-        sheet.getRange(headerRow, colIndex).setBackground(NA_COLOR).setValue('');
-        sheet.getRange(headerRow + 1, colIndex, 6, 1).setBackground(NA_COLOR);
-        continue;
+  const details = [];
+  results.forEach(result => {
+    const status = result.blocked ? '검증 불가' : !result.checked ? '대상 없음' :
+      result.checked > result.matched ? '확인 필요' : '일치';
+    const message = result.blocked || (!result.checked ? '비교할 년·반 셀이 없습니다. 초기화 후 실행했는지 확인하세요.' : '');
+    values.push([result.month + '월', result.blocked ? '—' : result.checked,
+      result.blocked ? '—' : result.matched, result.blocked ? '—' : result.checked - result.matched,
+      status, '', '', '', message]);
+    if (result.blocked || !result.entries.length) {
+      details.push([status, result.month, '', '', '', '', '', '', message]);
+    } else {
+      result.entries.forEach(entry => details.push([
+        entry.ok ? '일치' : '확인 필요', result.month, entry.name, result.month + '/' + entry.day,
+        entry.sourceValue, LEAVE_CHECK_CONFIG.sourceSheetName + '!' + entry.sourceCell,
+        entry.planValue || '(빈칸)', entry.planCell ? result.month + '월!' + entry.planCell : '—', entry.status
+      ]));
+    }
+  });
+  const rank = { '확인 필요': 0, '검증 불가': 1, '대상 없음': 2, '일치': 3 };
+  details.sort((a, b) => rank[a[0]] - rank[b[0]] || a[1] - b[1]);
+  values.push(pad([]));
+  const detailHeaderRow = values.length + 1;
+  values.push(['결과', '월', '성명', '일자', '지정휴무 값', '지정휴무 위치', '근무계획 값', '근무계획 위치', '상세 사유']);
+  values.push(...details);
+  return { values, details, detailHeaderRow };
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [v3] 공통 도우미 — 날짜·연차량
+// ═════════════════════════════════════════════════════════════════════════
+
+/** 스프레드시트 (트리거 실행 시에도 동작) */
+function ltBook_() {
+  let ss = null;
+  try { ss = SpreadsheetApp.getActiveSpreadsheet(); } catch (e) { ss = null; }
+  if (ss) return ss;
+  const id = PropertiesService.getScriptProperties().getProperty('LEAVE_BOOK_ID');
+  if (!id) throw new Error('스프레드시트를 찾을 수 없습니다. 메뉴에서 "매일 자동 경고 켜기"를 한 번 실행하세요.');
+  return SpreadsheetApp.openById(id);
+}
+
+/** '년' → 1, '반' → 0.5, 빈칸/기타 → 0, 둘 다 → null */
+function ltAmount_(value) {
+  const mk = leaveMarkers_(value);
+  if (!mk) return 0;
+  if (mk === '년') return 1;
+  if (mk === '반') return 0.5;
+  return null;
+}
+function ltValueOf_(amount) {
+  if (amount >= 1 - 1e-9) return '년';
+  if (amount > 1e-9) return '반';
+  return '';
+}
+function ltLabel_(amount) {
+  if (!amount) return '없음';
+  if (Math.abs(amount - 1) < 1e-9) return '년(1)';
+  if (Math.abs(amount - 0.5) < 1e-9) return '반(0.5)';
+  return amount + '일';
+}
+
+/** 날짜 객체 { y, m, d, key:'M-D', serial } */
+function ltMake_(y, m, d) {
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) {
+    return { error: '없는 날짜: ' + y + '-' + m + '-' + d };
+  }
+  return { y: y, m: m, d: d, key: m + '-' + d, serial: Date.UTC(y, m - 1, d) / 86400000 };
+}
+function ltFromKey_(key, year) {
+  const p = String(key).split('-').map(Number);
+  return ltMake_(year || LEAVE_CHECK_CONFIG.year, p[0], p[1]);
+}
+function ltSerialOfKey_(key) { return ltFromKey_(key).serial; }
+
+/** 시트 값(Date / 'yyyy-mm-dd' / '9/11' / '9월 11일' / 엑셀 일련번호) → 날짜 객체, 빈칸 → null */
+function ltParseDate_(raw, disp, year) {
+  if (raw === '' || raw == null) {
+    if (String(disp == null ? '' : disp).trim() === '') return null;
+    raw = disp;
+  }
+  if (Object.prototype.toString.call(raw) === '[object Date]') {
+    if (isNaN(raw.getTime())) return { error: '날짜 형식 오류' };
+    return ltMake_(raw.getFullYear(), raw.getMonth() + 1, raw.getDate());
+  }
+  if (typeof raw === 'number') {
+    const dt = new Date(Date.UTC(1899, 11, 30) + Math.round(raw) * 86400000);
+    return ltMake_(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
+  }
+  const t = String(raw).trim();
+  let m = t.match(/^(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})/);
+  if (m) return ltMake_(Number(m[1]), Number(m[2]), Number(m[3]));
+  m = t.match(/^(\d{1,2})\s*[-/.월]\s*(\d{1,2})/);
+  if (m) return ltMake_(year, Number(m[1]), Number(m[2]));
+  return { error: '날짜를 읽을 수 없음: ' + t };
+}
+
+/** 'M-D' → '9/11(금)' */
+function ltFmt_(key) {
+  if (!key) return '';
+  const p = String(key).split('-').map(Number);
+  const dow = ['일', '월', '화', '수', '목', '금', '토'][new Date(Date.UTC(LEAVE_CHECK_CONFIG.year, p[0] - 1, p[1])).getUTCDay()];
+  return p[0] + '/' + p[1] + '(' + dow + ')';
+}
+
+/** 한국시간 오늘 */
+function ltToday_() {
+  const s = Utilities.formatDate(new Date(), LT_TZ, 'yyyy-M-d').split('-').map(Number);
+  return ltMake_(s[0], s[1], s[2]);
+}
+function ltAddDays_(dt, n) {
+  const x = new Date(Date.UTC(dt.y, dt.m - 1, dt.d + n));
+  return ltMake_(x.getUTCFullYear(), x.getUTCMonth() + 1, x.getUTCDate());
+}
+
+/** 주말·공휴일 이름 (평일이면 '') */
+function ltOffDayName_(key, holidayMap) {
+  const dt = ltFromKey_(key);
+  if (holidayMap) {
+    const info = resolveHoliday_(holidayMap, dt.y, dt.m, dt.d);
+    if (info) return info.name;
+  }
+  const dow = new Date(Date.UTC(dt.y, dt.m - 1, dt.d)).getUTCDay();
+  if (dow === 0) return '일요일';
+  if (dow === 6) return '토요일';
+  return '';
+}
+
+function ltSortKeys_(keys) {
+  return keys.slice().sort((a, b) => ltSerialOfKey_(a) - ltSerialOfKey_(b));
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [v3] 시트 읽기 — 지정휴무 표 / 요약표 / 변경 이력
+// ═════════════════════════════════════════════════════════════════════════
+
+/**
+ * 지정휴무 표(원본·현재 공용) 읽기
+ * 반환: { sheetName, people: { 정규화이름: { name, cells: { 'M-D': { amount, value, a1 } }, rows:{월:행} } },
+ *        issues: [ ... ] }
+ */
+function ltReadGrid_(sheet) {
+  const cfg = LEAVE_CHECK_CONFIG;
+  const sheetName = sheet.getName();
+  const blocks = getMonthBlocks_(sheet);
+  const dateRow = findDateHeaderRow_(sheet, blocks);
+  const startCol = columnLetterToIndex(cfg.dayColStart);
+  const nDays = dayColCount_();
+  const dayMap = leaveDayMap_(sheet.getRange(dateRow, startCol, 1, nDays).getDisplayValues()[0], 31);
+  const ahCol = startCol + nDays;          // AH 년차, AI 반차, AJ 합계
+  const people = {};
+  const issues = [];
+
+  blocks.forEach(b => {
+    const days = new Date(cfg.year, b.month, 0).getDate();
+    const blockVals = sheet.getRange(b.dataStartRow, 2, b.dataCount, nDays + 4).getDisplayValues();   // B ~ AJ
+    const blockFx = sheet.getRange(b.dataStartRow, ahCol, b.dataCount, 3).getFormulas();
+    b.rows.forEach(row => {
+      const vals = blockVals[row - b.dataStartRow];
+      const formulas = blockFx[row - b.dataStartRow];
+      const key = leaveName_(vals[0]);
+      if (!key) return;
+      const p = people[key] || (people[key] = { name: String(vals[0]).trim(), cells: {}, rows: {} });
+      if (p.rows[b.month]) {
+        issues.push({ type: '표 점검', name: p.name, msg: sheetName + ' ' + b.month + '월에 같은 이름이 두 번 있습니다 (' + p.rows[b.month] + '행, ' + row + '행)' });
       }
-      
-      const date = new Date(year, month - 1, day);
-      const dayOfWeek = date.getDay();
-      const weekdayLabel = weekdayNames[dayOfWeek];
-      const dateKey = month + '-' + day;
-      const info = holidayInfo[dateKey];
-      
-      const headerCell = sheet.getRange(headerRow, colIndex);
-      headerCell.setValue(weekdayLabel);
-      
-      // 실제로 "빨간 날"로 표시할지 여부 (대체공휴일이 있는 원래 공휴일은 제외)
-      const isRedHoliday = info && !info.hasSubstitute;
-      
-      let color;
-      if (isRedHoliday || dayOfWeek === 0) {
-        color = SUN_COLOR;
-      } else if (dayOfWeek === 6) {
-        color = SAT_COLOR;
-      } else {
-        color = WHITE;
+      p.rows[b.month] = row;
+      let sum = 0;
+      for (let day = 1; day <= 31; day++) {
+        const col = startCol + dayMap[day];
+        const v = vals[col - 2];
+        const amt = ltAmount_(v);
+        const a1 = leaveColumn_(col) + row;
+        if (amt === null) {
+          issues.push({ type: '표 점검', name: p.name, date: b.month + '-' + day, where: sheetName + '!' + a1,
+            msg: '한 칸에 년·반이 같이 있습니다: "' + v + '"' });
+          continue;
+        }
+        if (!amt) continue;
+        if (day > days) {
+          issues.push({ type: '표 점검', name: p.name, where: sheetName + '!' + a1, msg: b.month + '월에 없는 날짜(' + day + '일)에 연차가 있습니다' });
+          continue;
+        }
+        p.cells[b.month + '-' + day] = { amount: amt, value: v, a1: a1 };
+        sum += amt;
       }
-      
-      headerCell.setBackground(color);
-      
-      const belowRange = sheet.getRange(headerRow + 1, colIndex, 6, 1);
-      belowRange.setBackground(color);
-      
-      if (isRedHoliday) {
-        // 6개 행 병합 + 공휴일명 입력 + 가운데 정렬
-        belowRange.merge();
-        belowRange.setValue(info.name);
-        belowRange.setHorizontalAlignment('center');
-        belowRange.setVerticalAlignment('middle');
+      // 합계 수식 점검 (AH/AI/AJ)
+      const S = cfg.dayColStart, E = cfg.dayColEnd;
+      const ah = leaveColumn_(ahCol), ai = leaveColumn_(ahCol + 1), aj = leaveColumn_(ahCol + 2);
+      const expect = [
+        '=COUNTIF(' + S + row + ':' + E + row + ',"년")',
+        '=COUNTIF(' + S + row + ':' + E + row + ',"반")',
+        '=' + ah + row + '+' + ai + row + '/2'
+      ];
+      const norm = f => String(f || '').replace(/\s+/g, '').replace(/\$/g, '').toUpperCase().replace(/^=\+/, '=');
+      [ah, ai, aj].forEach((colName, j) => {
+        if (formulas[j] && norm(formulas[j]) !== norm(expect[j])) {
+          issues.push({ type: '수식', name: p.name, where: sheetName + '!' + colName + row,
+            msg: '합계 수식이 다른 칸을 가리킵니다: ' + formulas[j] + '  → 올바른 수식: ' + expect[j] });
+        }
+      });
+      const ajShown = vals[nDays + 3];
+      if (String(ajShown).trim() !== '' && !isNaN(Number(ajShown)) && Math.abs(Number(ajShown) - sum) > 1e-9) {
+        issues.push({ type: '수식', name: p.name, where: sheetName + '!' + aj + row,
+          msg: '합계 칸 표시값(' + ajShown + ')과 실제 년·반 개수(' + sum + ')가 다릅니다' });
+      }
+    });
+  });
+  const dayCols = {};
+  for (let day = 1; day <= 31; day++) dayCols[day] = startCol + dayMap[day];
+  return { sheetName: sheetName, people: people, issues: issues, blocks: blocks, dayCols: dayCols };
+}
+
+/** 상단 요약표에서 '미사용연차' 값 읽기 → { 정규화이름: 숫자 } */
+function ltReadSummary_(sheet, blocks) {
+  const limit = (blocks && blocks.length ? blocks[0].labelRow : sheet.getLastRow()) - 1;
+  if (limit < 2) return {};
+  const lastCol = Math.min(sheet.getLastColumn(), 40);
+  const vals = sheet.getRange(1, 1, limit, lastCol).getDisplayValues();
+  const hr = vals.findIndex(r => leaveName_(r[0]) === '성명');
+  if (hr < 0) return {};
+  const col = vals[hr].findIndex(v => leaveName_(v) === '미사용연차');
+  if (col < 0) return {};
+  const out = {};
+  for (let r = hr + 1; r < vals.length; r++) {
+    const k = leaveName_(vals[r][0]);
+    if (!k) break;
+    const n = Number(String(vals[r][col]).replace(/,/g, ''));
+    if (!isNaN(n)) out[k] = n;
+  }
+  return out;
+}
+
+/** 변경 이력 시트 읽기 (병합된 '변경 전' 칸은 아래 행에도 같은 값으로 간주) */
+function ltReadLedger_(sheet) {
+  const C = CHANGE_LOG_CONFIG;
+  const last = sheet.getLastRow();
+  if (last < C.firstDataRow) return [];
+  const n = last - C.firstDataRow + 1;
+  const width = C.col.used;    // A ~ H
+  const rng = sheet.getRange(C.firstDataRow, 1, n, width);
+  const values = rng.getValues();
+  const disp = rng.getDisplayValues();
+  sheet.getRange(C.firstDataRow, C.col.name, n, width - C.col.name + 1).getMergedRanges().forEach(m => {
+    const r0 = m.getRow() - C.firstDataRow, c0 = m.getColumn() - 1;
+    for (let r = Math.max(r0, 0); r <= Math.min(m.getLastRow() - C.firstDataRow, n - 1); r++) {
+      for (let c = c0; c <= Math.min(m.getLastColumn() - 1, width - 1); c++) {
+        if (r === r0 && c === c0) continue;
+        values[r][c] = values[r0][c0];
+        disp[r][c] = disp[r0][c0];
       }
     }
   });
-  
-  SpreadsheetApp.getUi().alert('요일, 주말, 공휴일 색상 설정이 완료되었습니다.');
+  return ltParseLedgerRows_(values, disp, C.firstDataRow, LEAVE_CHECK_CONFIG.year);
 }
 
+/** (GAS 비의존) 이력 행 → 항목 */
+function ltParseLedgerRows_(values, disp, firstRow, year) {
+  const c = CHANGE_LOG_CONFIG.col;
+  const out = [];
+  values.forEach((row, i) => {
+    const name = String(disp[i][c.name - 1] || '').trim();
+    const fromRaw = row[c.from - 1], toRaw = row[c.to - 1];
+    const fromDisp = disp[i][c.from - 1], toDisp = disp[i][c.to - 1];
+    if (!name && String(fromDisp).trim() === '' && String(toDisp).trim() === '') return;
+    const e = {
+      sheetRow: firstRow + i,
+      name: name,
+      key: leaveName_(name),
+      position: String(disp[i][c.position - 1] || '').trim(),
+      requested: String(disp[i][c.requested - 1] || '').trim(),
+      note: String(disp[i][c.note - 1] || '').trim(),
+      usedShown: String(disp[i][c.used - 1] || '').trim(),
+      from: null, to: null, half: false, cancel: false, errors: [], warnings: []
+    };
+    if (!name) e.errors.push('이름이 비어 있음');
+    e.from = ltParseDate_(fromRaw, fromDisp, year);
+    e.to = ltParseDate_(toRaw, toDisp, year);
+    [['변경 전', 'from'], ['변경 후', 'to']].forEach(pair => {
+      const d = e[pair[1]];
+      if (d && d.error) { e.errors.push(pair[0] + ' 날짜: ' + d.error); e[pair[1]] = null; }
+      else if (d && d.y !== year) { e.errors.push(pair[0] + ' 날짜가 ' + year + '년이 아님 (' + d.y + ')'); e[pair[1]] = null; }
+    });
+    e.half = /반/.test(e.note);
+    e.cancel = /취소/.test(e.note) || (!!e.from && !e.to && !e.errors.length);
+    if (!e.from && !e.to && !e.errors.length) e.errors.push('변경 전·후 날짜가 모두 비어 있음');
+    e.sameDay = !!(e.from && e.to && e.from.key === e.to.key);
+    // 같은 날짜 = 연차 1을 반차로 쪼개고 반쪽은 원래 날짜에 남기는 경우 (반차일 때만 의미 있음)
+    if (e.sameDay && !e.half) e.errors.push('변경 전·후 날짜가 같은데 반차 표시가 없음 (비고에 오전반차/오후반차 기입)');
+    out.push(e);
+  });
+  return out;
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [v3] 핵심 계산 (GAS 비의존) — 원본 + 이력 재생, 현재와 대조
+// ═════════════════════════════════════════════════════════════════════════
+
+/**
+ * 원본에 이력을 순서대로 적용
+ * 반환: { state: { 키: { name, amounts:{'M-D':량}, chains:[...] } }, issues: [...] }
+ *  chain = { name, origin:'원본'|'추가'|'이력', start, path:[{key,row,requested}], amount, end, cancelled }
+ */
+function ltReplay_(origPeople, entries, offDayFn) {
+  const state = {};
+  const issues = [];
+  const ensure = (key, name) => state[key] || (state[key] = { name: name, amounts: {}, chains: [] });
+
+  Object.keys(origPeople).forEach(k => {
+    const p = origPeople[k];
+    const s = ensure(k, p.name);
+    ltSortKeys_(Object.keys(p.cells)).forEach(dk => {
+      const a = p.cells[dk].amount;
+      s.amounts[dk] = a;
+      s.chains.push({ name: p.name, origin: '원본', start: dk, path: [{ key: dk }], amount: a, end: dk, cancelled: false });
+    });
+  });
+
+  entries.forEach(e => {
+    const push = (type, msg, dateKey) => {
+      const it = { type: type, name: e.name, date: dateKey || '', row: e.sheetRow, msg: msg };
+      issues.push(it);
+      (type === '주의' ? e.warnings : e.errors).push(msg);
+    };
+    if (e.errors.length) {
+      e.errors.slice().forEach(m => issues.push({ type: '이력 점검', name: e.name, row: e.sheetRow, msg: m }));
+      return;
+    }
+    if (!state[e.key]) push('이력 점검', '원본 시트에 없는 이름입니다');
+    const s = ensure(e.key, e.name);
+    const fromKey = e.from ? e.from.key : '';
+    const toKey = (e.to && !(/취소/.test(e.note))) ? e.to.key : '';
+
+    let amount;
+    let chain = null;
+    if (fromKey) {
+      const have = s.amounts[fromKey] || 0;
+      amount = e.half ? 0.5 : (have > 0 ? have : 1);
+      if (have <= 1e-9) push('이력 점검', '변경 전 날짜 ' + ltFmt_(fromKey) + '에 원본·앞선 이력 기준 연차가 없습니다', fromKey);
+      else if (have + 1e-9 < amount) push('이력 점검', '변경 전 날짜 ' + ltFmt_(fromKey) + '에 남은 양(' + ltLabel_(have) + ')보다 많이 옮깁니다', fromKey);
+      s.amounts[fromKey] = Math.max(0, have - amount);
+      if (s.amounts[fromKey] < 1e-9) delete s.amounts[fromKey];
+
+      // 이어지는 연차 흐름 찾기 (먼저 생긴 것부터)
+      const idx = s.chains.findIndex(c => !c.cancelled && c.end === fromKey && c.amount > 1e-9);
+      if (idx >= 0) {
+        const c = s.chains[idx];
+        if (c.amount > amount + 1e-9) {       // 연차 1 → 반차로 쪼갬
+          c.amount -= amount;
+          chain = { name: c.name, origin: c.origin, start: c.start, path: c.path.slice(), amount: amount, end: c.end, cancelled: false, split: true };
+          s.chains.push(chain);
+        } else {
+          chain = c;
+        }
+      } else {
+        chain = { name: e.name, origin: '이력', start: fromKey, path: [{ key: fromKey }], amount: amount, end: fromKey, cancelled: false };
+        s.chains.push(chain);
+      }
+    } else {
+      amount = e.half ? 0.5 : 1;
+      chain = { name: e.name, origin: '추가', start: '', path: [], amount: amount, end: '', cancelled: false };
+      s.chains.push(chain);
+    }
+
+    if (toKey) {
+      const before = s.amounts[toKey] || 0;
+      s.amounts[toKey] = before + amount;
+      if (before + amount > 1 + 1e-9) push('이력 점검', '변경 후 날짜 ' + ltFmt_(toKey) + '에 이미 ' + ltLabel_(before) + '이 있어 하루 1일을 넘습니다', toKey);
+      const off = (offDayFn && toKey !== fromKey) ? offDayFn(toKey) : '';
+      if (off) push('주의', '변경 후 날짜 ' + ltFmt_(toKey) + '이(가) ' + off + '입니다', toKey);
+      chain.path.push({ key: toKey, row: e.sheetRow, requested: e.requested, keep: toKey === fromKey });
+      chain.end = toKey;
+    } else {
+      chain.path.push({ key: '', row: e.sheetRow, requested: e.requested, cancel: true });
+      chain.cancelled = true;
+      chain.end = '';
+      push('주의', '연차 취소(' + (fromKey ? ltFmt_(fromKey) : '') + ') — 총 개수가 ' + amount + '일 줄어듭니다', fromKey);
+    }
+    e.amount = amount;
+  });
+  return { state: state, issues: issues };
+}
+
+/** 원본+이력 결과 ↔ 현재 시트 대조 → 불일치 목록 (+ 미등록 변경 추정) */
+function ltCompare_(state, currentPeople, currentSheetName, dayCols) {
+  const diffs = [];
+  const keys = {};
+  Object.keys(state).forEach(k => keys[k] = true);
+  Object.keys(currentPeople).forEach(k => keys[k] = true);
+  Object.keys(keys).forEach(k => {
+    const exp = (state[k] && state[k].amounts) || {};
+    const curP = currentPeople[k];
+    const cur = (curP && curP.cells) || {};
+    const name = (curP && curP.name) || (state[k] && state[k].name) || k;
+    const dates = {};
+    Object.keys(exp).forEach(d => dates[d] = true);
+    Object.keys(cur).forEach(d => dates[d] = true);
+    const missing = [], extra = [];
+    ltSortKeys_(Object.keys(dates)).forEach(d => {
+      const e = exp[d] || 0, c = cur[d] ? cur[d].amount : 0;
+      if (Math.abs(e - c) < 1e-9) return;
+      const dm = d.split('-').map(Number);
+      const row = curP && curP.rows ? curP.rows[dm[0]] : 0;
+      const where = cur[d] ? currentSheetName + '!' + cur[d].a1
+        : (row && dayCols ? currentSheetName + '!' + leaveColumn_(dayCols[dm[1]]) + row : '');
+      const it = { type: '불일치', name: name, date: d, exp: e, cur: c, where: where,
+        msg: e > c
+          ? '원본+변경이력으로는 ' + ltLabel_(e) + '인데 현재 시트는 ' + ltLabel_(c) + ' → 이력에 없는 변경이 있었거나, 현재 시트 반영이 빠졌습니다'
+          : '현재 시트에만 ' + ltLabel_(c) + (e ? ' (예상 ' + ltLabel_(e) + ')' : '') + ' → 변경 정보 시트에 등록 안 된 변경일 수 있습니다' };
+      diffs.push(it);
+      (e > c ? missing : extra).push({ d: d, amt: Math.abs(e - c) });
+    });
+    // 미등록 변경 추정: 빠진 날 ↔ 생긴 날을 같은 양끼리 순서대로 짝지음
+    const ex = extra.slice();
+    missing.forEach(mi => {
+      const j = ex.findIndex(x => Math.abs(x.amt - mi.amt) < 1e-9);
+      if (j < 0) return;
+      const x = ex.splice(j, 1)[0];
+      diffs.push({ type: '추정', name: name, date: mi.d, exp: '', cur: '', where: '',
+        msg: '미등록 변경 추정: ' + ltFmt_(mi.d) + ' → ' + ltFmt_(x.d) + ' (' + ltLabel_(mi.amt) + ') — 맞다면 변경 정보 시트에 한 줄 추가하세요' });
+    });
+  });
+  return diffs;
+}
+
+/** 이력 행별 H열(소진유무) 값 */
+function ltLedgerUsedStatus_(entries, todaySerial) {
+  return entries.map((e, i) => {
+    if (e.errors.length && !e.to && !e.from) return '';
+    if (!e.to || /취소/.test(e.note)) return '취소';
+    const sibling = x => e.half && x.half && x.from && e.from && x.from.key === e.from.key && x.requested === e.requested;
+    const later = entries.slice(i + 1).some(x => x.key === e.key && x.from && x.from.key === e.to.key && !sibling(x));
+    if (later) return '재변경';
+    return e.to.serial < todaySerial ? '예' : '아니오';
+  });
+}
+
+/** 연차 흐름 상태 */
+function ltChainStatus_(chain, todaySerial) {
+  if (chain.cancelled) return '취소';
+  if (!chain.end) return '';
+  const diff = ltSerialOfKey_(chain.end) - todaySerial;
+  if (diff < 0) return '소진';
+  if (diff === 0) return '오늘';
+  if (diff <= LEAVE_ALERT_CONFIG.daysBefore) return 'D-' + diff;
+  return '예정';
+}
+
+/**
+ * 전체 분석 (시트 읽기 + 계산)
+ * 반환: { today, people:[요약], issues:[...], chains:[...], entries, usedStatus }
+ */
+function ltAnalyze_(ss, today, holidayMap) {
+  const cfg = LEAVE_CHECK_CONFIG;
+  const sh = n => { const s = ss.getSheetByName(n); if (!s) throw new Error('"' + n + '" 시트를 찾을 수 없습니다.'); return s; };
+  const origSheet = sh(cfg.originalSheetName);
+  const curSheet = sh(cfg.sourceSheetName);
+  const logSheet = sh(cfg.changeSheetName);
+
+  const orig = ltReadGrid_(origSheet);
+  const cur = ltReadGrid_(curSheet);
+  const summary = ltReadSummary_(curSheet, cur.blocks);
+  const origSummary = ltReadSummary_(origSheet, orig.blocks);
+  const entries = ltReadLedger_(logSheet);
+  const offFn = key => ltOffDayName_(key, holidayMap);
+  const rep = ltReplay_(orig.people, entries, offFn);
+  const diffs = ltCompare_(rep.state, cur.people, cfg.sourceSheetName, cur.dayCols);
+  const todaySerial = today.serial;
+
+  // 인원별 요약
+  const order = [];
+  const seen = {};
+  const add = k => { if (!seen[k]) { seen[k] = true; order.push(k); } };
+  Object.keys(cur.people).forEach(add);
+  Object.keys(orig.people).forEach(add);
+  Object.keys(rep.state).forEach(add);
+  const sum = obj => Object.keys(obj || {}).reduce((a, k) => a + (typeof obj[k] === 'number' ? obj[k] : obj[k].amount), 0);
+  const positions = {};
+  entries.forEach(e => { if (e.position) positions[e.key] = e.position; });
+
+  const allIssues = [].concat(orig.issues, cur.issues, rep.issues, diffs);
+  const people = order.map(k => {
+    const name = (cur.people[k] && cur.people[k].name) || (orig.people[k] && orig.people[k].name) || rep.state[k].name;
+    const origTotal = sum(orig.people[k] && orig.people[k].cells);
+    const curCells = (cur.people[k] && cur.people[k].cells) || {};
+    const curTotal = sum(curCells);
+    const expTotal = sum(rep.state[k] && rep.state[k].amounts);
+    let used = 0;
+    Object.keys(curCells).forEach(d => { if (ltSerialOfKey_(d) < todaySerial) used += curCells[d].amount; });
+    const unused = summary[k] !== undefined ? summary[k] : origSummary[k];
+    const changes = entries.filter(e => e.key === k).length;
+    const probs = [];
+    if (unused !== undefined && Math.abs(origTotal - unused) > 1e-9) probs.push('원본 합계(' + origTotal + ') ≠ 미사용(' + unused + ')');
+    if (unused !== undefined && Math.abs(curTotal - unused) > 1e-9) probs.push('현재 합계(' + curTotal + ') ≠ 미사용(' + unused + ')');
+    const nDiff = diffs.filter(d => d.type === '불일치' && leaveName_(d.name) === k).length;
+    if (nDiff) probs.push('원본+이력 ↔ 현재 불일치 ' + nDiff + '칸');
+    const nLog = rep.issues.filter(d => d.type === '이력 점검' && leaveName_(d.name) === k).length;
+    if (nLog) probs.push('이력 점검 ' + nLog + '건');
+    const nFx = allIssues.filter(d => (d.type === '수식' || d.type === '표 점검') && leaveName_(d.name) === k).length;
+    if (nFx) probs.push('수식·표 ' + nFx + '건');
+    return {
+      key: k, name: name, position: positions[k] || '',
+      unused: unused === undefined ? '' : unused,
+      origTotal: origTotal, curTotal: curTotal, expTotal: expTotal,
+      used: used, remain: curTotal - used, changes: changes,
+      status: probs.length ? '⚠️ ' + probs.join(' / ') : '✅ 정상', ok: !probs.length
+    };
+  });
+
+  // 연차 흐름
+  const chains = [];
+  order.forEach(k => (rep.state[k] ? rep.state[k].chains : []).forEach(c => {
+    if (c.amount < 1e-9 && !c.cancelled) return;
+    chains.push(c);
+  }));
+
+  return {
+    today: today, people: people, issues: allIssues, chains: chains, entries: entries,
+    usedStatus: ltLedgerUsedStatus_(entries, todaySerial),
+    counts: {
+      diff: diffs.filter(d => d.type === '불일치').length,
+      guess: diffs.filter(d => d.type === '추정').length,
+      log: rep.issues.filter(d => d.type === '이력 점검').length,
+      warn: rep.issues.filter(d => d.type === '주의').length,
+      formula: allIssues.filter(d => d.type === '수식' || d.type === '표 점검').length
+    }
+  };
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [v3] 🔄 추적 현황 갱신
+// ═════════════════════════════════════════════════════════════════════════
+function refreshLeaveTracking() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const ss = ltBook_();
+    const res = ltRefreshTracking_(ss);
+    const c = res.counts;
+    ss.setActiveSheet(ss.getSheetByName(LEAVE_CHECK_CONFIG.trackingSheetName));
+    ui.alert('🔄 추적 현황 갱신 완료\n\n' +
+      '변경 이력: ' + res.entries.length + '건\n' +
+      '원본+이력 ↔ 현재 불일치: ' + c.diff + '칸' + (c.guess ? ' (미등록 변경 추정 ' + c.guess + '건)' : '') + '\n' +
+      '이력 자체 점검: ' + c.log + '건\n' +
+      '수식·표 점검: ' + c.formula + '건\n' +
+      '주의(주말·공휴일·취소): ' + c.warn + '건\n\n' +
+      res.people.map(p => p.name + ' — ' + p.status).join('\n'));
+  } catch (e) {
+    ui.alert('❌ 오류\n\n' + e.message);
+  }
+}
+
+/** 분석 + 보고 시트 작성 + 이력 H/I열 갱신 (UI 없음, 트리거에서도 사용) */
+function ltRefreshTracking_(ss) {
+  const holidays = getHolidayMap_(LEAVE_CHECK_CONFIG.year);
+  const res = ltAnalyze_(ss, ltToday_(), holidays.map);
+  ltWriteTrackingSheet_(ss, res);
+  ltWriteLedgerStatus_(ss, res);
+  return res;
+}
+
+function ltWriteLedgerStatus_(ss, res) {
+  const C = CHANGE_LOG_CONFIG;
+  const sh = ss.getSheetByName(LEAVE_CHECK_CONFIG.changeSheetName);
+  if (!sh || !res.entries.length) return;
+  if (C.autoCheckColumn) {
+    const head = sh.getRange(C.headerRow, C.col.check);
+    if (!head.getDisplayValue()) {
+      sh.getRange(C.headerRow, C.col.used).copyTo(head, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+      head.setValue('자동 점검');
+      sh.setColumnWidth(C.col.check, 360);
+    }
+  }
+  res.entries.forEach((e, i) => {
+    if (C.autoFillUsed) {
+      const st = res.usedStatus[i];
+      if (st) sh.getRange(e.sheetRow, C.col.used).setValue(st)
+        .setFontColor(st === '예' ? '#7f7f7f' : st === '재변경' ? '#2f5597' : st === '취소' ? '#c00000' : '#000000');
+    }
+    if (C.autoCheckColumn) {
+      const msgs = e.errors.map(m => '❌ ' + m).concat(e.warnings.map(m => '⚠️ ' + m));
+      const cell = sh.getRange(e.sheetRow, C.col.check);
+      cell.setValue(msgs.length ? msgs.join('\n') : '✓')
+        .setBackground(e.errors.length ? '#fce4d6' : e.warnings.length ? '#fff2cc' : '#e2f0d9')
+        .setWrap(true).setHorizontalAlignment('left').setVerticalAlignment('middle').setFontSize(9)
+        .setBorder(true, true, true, true, false, false);
+    }
+  });
+}
+
+function ltWriteTrackingSheet_(ss, res) {
+  const cfg = LEAVE_CHECK_CONFIG;
+  const W = 10;
+  const marker = 'LEAVE_TRACKING_REPORT_V1';
+  let sheet = ss.getSheetByName(cfg.trackingSheetName);
+  if (sheet && sheet.getLastRow() > 0 && sheet.getRange('A1').getNote() !== marker) {
+    throw new Error('"' + cfg.trackingSheetName + '" 이름의 기존 시트에 다른 데이터가 있습니다. 시트 이름을 바꾼 뒤 다시 실행하세요.');
+  }
+  if (!sheet) sheet = ss.insertSheet(cfg.trackingSheetName);
+
+  const values = [], bgs = [], bolds = [], colors = [], merges = [];
+  const push = (row, bg, bold, color, merge) => {
+    const r = row.concat(Array(W - row.length).fill('')).slice(0, W);
+    values.push(r);
+    bgs.push(Array(W).fill(bg || '#ffffff'));
+    bolds.push(Array(W).fill(bold ? 'bold' : 'normal'));
+    colors.push(Array(W).fill(color || '#000000'));
+    if (merge) merges.push(values.length);
+  };
+  const tz = LT_TZ;
+  const t = res.today;
+  push([cfg.year + '년 지정휴무 추적 현황'], '#17365d', true, '#ffffff', true);
+  push(['갱신: ' + Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm') + '  |  기준일 ' + ltFmt_(t.key) +
+    '  |  \'' + cfg.originalSheetName + '\' + 변경 이력 ' + res.entries.length + '건  ↔  \'' + cfg.sourceSheetName + '\''], '#ffffff', false, '#595959', true);
+  push(['원본(7월 신청)에 변경 이력을 위에서부터 순서대로 적용한 결과가 현재 시트와 같은지 비교합니다. 다르면 이력 누락 또는 시트 반영 누락입니다.'], '#ffffff', false, '#595959', true);
+  push([]);
+
+  // ① 인원별
+  push(['① 인원별 연차 개수'], '#ffffff', true, '#17365d', true);
+  push(['성명', '직급', '미사용연차', '원본 계획', '현재 계획', '원본+이력', '소진(~어제)', '남은 지정', '변경 건수', '상태'], '#d9e5f3', true);
+  res.people.forEach(p => push([p.name, p.position, p.unused, p.origTotal, p.curTotal, p.expTotal, p.used, p.remain, p.changes, p.status],
+    p.ok ? '#e2f0d9' : '#fce4d6'));
+  push([]);
+
+  // ② 확인 필요
+  const rank = { '불일치': 0, '추정': 1, '이력 점검': 2, '수식': 3, '표 점검': 4, '주의': 5 };
+  const iss = res.issues.slice().sort((a, b) =>
+    (rank[a.type] - rank[b.type]) || String(a.name).localeCompare(String(b.name)) ||
+    ((a.date ? ltSerialOfKey_(a.date) : 0) - (b.date ? ltSerialOfKey_(b.date) : 0)));
+  push(['② 확인 필요 항목 (' + iss.length + '건)'], '#ffffff', true, '#17365d', true);
+  push(['구분', '성명', '일자', '원본+이력', '현재 시트', '위치', '이력 행', '', '', '내용'], '#d9e5f3', true);
+  if (!iss.length) push(['✅ 없음', '', '', '', '', '', '', '', '', '원본+이력과 현재 시트가 모두 일치합니다.'], '#e2f0d9');
+  iss.forEach(it => push([
+    it.type, it.name, it.date ? ltFmt_(it.date) : '',
+    it.exp === undefined || it.exp === '' ? '' : ltValueOf_(it.exp) || '빈칸',
+    it.cur === undefined || it.cur === '' ? '' : ltValueOf_(it.cur) || '빈칸',
+    it.where || '', it.row ? it.row + '행' : '', '', '', it.msg
+  ], it.type === '주의' ? '#fff2cc' : it.type === '추정' ? '#ddebf7' : '#fce4d6'));
+  push([]);
+
+  // ③ 연차별 흐름
+  const chains = res.chains.slice().sort((a, b) =>
+    String(a.name).localeCompare(String(b.name)) ||
+    ((a.end ? ltSerialOfKey_(a.end) : 99999) - (b.end ? ltSerialOfKey_(b.end) : 99999)));
+  push(['③ 연차별 변경 흐름 (' + chains.length + '건, 변경된 것 ' + chains.filter(c => c.path.length > 1 || c.origin !== '원본').length + '건)'], '#ffffff', true, '#17365d', true);
+  const flowHeader = values.length + 1;
+  push(['성명', '구분', '최초 계획일', '최종 일자', '상태', '변경 횟수', '최근 통보', '출처', '', '변경 경로'], '#d9e5f3', true);
+  chains.forEach(c => {
+    const st = ltChainStatus_(c, t.serial);
+    const steps = c.path.filter(p => p.row);
+    const route = (c.origin === '추가' ? '(추가) → ' : '') +
+      c.path.filter(p => p.key || p.cancel).map(p => p.cancel ? '취소' : ltFmt_(p.key) + (p.keep ? ' 반차 유지' : '')).join(' → ');
+    const last = steps.length ? steps[steps.length - 1] : null;
+    const changed = steps.length > 0;
+    const bg = st === '취소' ? '#f2f2f2' : /^D-|오늘/.test(st) ? '#fbe5d6' : changed ? '#fff2cc' : '#ffffff';
+    const color = st === '소진' ? '#7f7f7f' : '#000000';
+    push([c.name, ltValueOf_(c.amount) || c.amount, c.start ? ltFmt_(c.start) : '(추가)', c.end ? ltFmt_(c.end) : '—', st,
+      steps.length, last ? (last.requested || '') + ' (' + last.row + '행)' : '',
+      c.origin === '원본' ? '원본' : c.origin === '추가' ? '이력: 추가' : '이력: 원본에 없음', '', route + (c.split ? '  (반차로 나눔)' : '')], bg, false, color);
+  });
+
+  // 쓰기
+  const filter = sheet.getFilter();
+  if (filter) filter.remove();
+  sheet.getDataRange().breakApart();
+  sheet.clear();
+  if (sheet.getMaxRows() < values.length + 5) sheet.insertRowsAfter(sheet.getMaxRows(), values.length + 5 - sheet.getMaxRows());
+  if (sheet.getMaxColumns() < W) sheet.insertColumnsAfter(sheet.getMaxColumns(), W - sheet.getMaxColumns());
+  const rng = sheet.getRange(1, 1, values.length, W);
+  rng.setValues(values.map(r => r.map(v => typeof v === 'string' && v.startsWith('=') ? "'" + v : v)))
+    .setBackgrounds(bgs).setFontWeights(bolds).setFontColors(colors)
+    .setFontFamily('Arial').setFontSize(10).setVerticalAlignment('middle').setWrap(true);
+  sheet.getRange(1, 1, values.length, 9).setHorizontalAlignment('center');
+  sheet.getRange(1, 10, values.length, 1).setHorizontalAlignment('left');
+  merges.forEach(r => sheet.getRange(r, 1, 1, W).merge().setHorizontalAlignment('left'));
+  sheet.getRange('A1').setNote(marker).setFontSize(15);
+  sheet.setRowHeight(1, 36);
+  [80, 70, 100, 100, 90, 80, 120, 110, 30, 520].forEach((w, i) => sheet.setColumnWidth(i + 1, w));
+  if (chains.length) sheet.getRange(flowHeader, 1, chains.length + 1, W).createFilter();
+  sheet.setHiddenGridlines(true);
+  sheet.setFrozenRows(0);
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [v3] ✏️ 연차 변경 등록 창
+// ═════════════════════════════════════════════════════════════════════════
+function openLeaveChangeForm() {
+  const html = HtmlService.createHtmlOutput(LT_FORM_HTML).setWidth(460).setHeight(600);
+  SpreadsheetApp.getUi().showModalDialog(html, '✏️ 연차 변경 등록');
+}
+
+/** 등록 창 초기 데이터 (google.script.run 에서 호출) */
+function ltChangeFormData() {
+  const ss = ltBook_();
+  const cur = getSourceSheet_();
+  const blocks = getMonthBlocks_(cur);
+  const names = [];
+  blocks.forEach(b => b.names.forEach(n => { if (names.indexOf(n) < 0) names.push(n); }));
+  const positions = {};
+  const log = ss.getSheetByName(LEAVE_CHECK_CONFIG.changeSheetName);
+  if (log) {
+    try { ltReadLedger_(log).forEach(e => { if (e.position) positions[e.name] = e.position; }); } catch (e) { /* 무시 */ }
+  }
+  return {
+    names: names.map(n => ({ name: n, position: positions[n] || '' })),
+    today: Utilities.formatDate(new Date(), LT_TZ, 'yyyy-MM-dd'),
+    year: LEAVE_CHECK_CONFIG.year
+  };
+}
+
+/** 등록 처리 (google.script.run 에서 호출) */
+function ltSubmitChange(form) {
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(15000)) throw new Error('다른 작업이 진행 중입니다. 잠시 후 다시 시도하세요.');
+  try {
+    const ss = ltBook_();
+    const year = LEAVE_CHECK_CONFIG.year;
+    const name = String(form.name || '').trim();
+    if (!name) throw new Error('성명을 선택하세요.');
+    const parse = (v, label) => {
+      if (!v) return null;
+      const d = ltParseDate_(v, '', year);
+      if (d.error) throw new Error(label + ': ' + d.error);
+      if (d.y !== year) throw new Error(label + ' 날짜는 ' + year + '년이어야 합니다.');
+      return d;
+    };
+    const from = parse(form.from, '변경 전');
+    const to = parse(form.to, '변경 후');
+    const req = parse(form.requested, '통보일') || ltToday_();
+    if (!from && !to) throw new Error('변경 전·후 날짜 중 하나는 입력하세요.');
+    const kind = String(form.kind || '연차');
+    const half = /반/.test(kind);
+    if (from && to && from.key === to.key && !half) {
+      throw new Error('변경 전·후 날짜가 같으면 반차(오전/오후)로 선택하세요. (연차 1을 반차로 쪼개 반쪽을 그 날짜에 남기는 경우)');
+    }
+    const reqLabel = req.m + '/' + req.d;
+
+    // 1) 현재 시트 반영 (검증 먼저, 실패 시 아무것도 안 씀)
+    let applied = '';
+    if (form.apply) applied = ltApplyToCurrent_(name, from, to, half, reqLabel);
+
+    // 2) 변경 정보 시트에 한 줄 추가
+    const row = ltAppendLedgerRow_(ss, {
+      name: name, position: String(form.position || '').trim(), requested: req,
+      from: from, to: to, note: [half ? kind : '', String(form.note || '').trim()].filter(Boolean).join(' / ')
+    });
+
+    // 3) 추적 현황 갱신
+    let refresh = '';
+    try {
+      const res = ltRefreshTracking_(ss);
+      refresh = '\n추적 현황: 불일치 ' + res.counts.diff + '칸, 이력 점검 ' + res.counts.log + '건';
+    } catch (e) {
+      refresh = '\n(추적 현황 갱신 실패: ' + e.message + ')';
+    }
+    return '✅ 등록 완료 — 변경 정보 ' + row + '행\n' +
+      name + ' ' + (from ? ltFmt_(from.key) : '(추가)') + ' → ' + (to ? ltFmt_(to.key) : '취소') + ' [' + kind + ']' +
+      (applied ? '\n' + applied : '\n(현재 미사용연차 시트는 바꾸지 않음)') + refresh;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** '현재 미사용연차'에서 연차 칸 이동 (검증 후 기록) */
+function ltApplyToCurrent_(name, from, to, half, reqLabel) {
+  const cfg = LEAVE_CHECK_CONFIG;
+  const sheet = getSourceSheet_();
+  const blocks = getMonthBlocks_(sheet);
+  const dateRow = findDateHeaderRow_(sheet, blocks);
+  const startCol = columnLetterToIndex(cfg.dayColStart);
+  const dayMap = leaveDayMap_(sheet.getRange(dateRow, startCol, 1, dayColCount_()).getDisplayValues()[0], 31);
+  const key = leaveName_(name);
+
+  const locate = dt => {
+    const b = getMonthBlock_(blocks, dt.m);
+    if (!b) throw new Error(cfg.sourceSheetName + '에 ' + dt.m + '월 블록이 없습니다.');
+    if (dt.d > new Date(cfg.year, dt.m, 0).getDate()) throw new Error(ltFmt_(dt.key) + ' 날짜가 잘못되었습니다.');
+    const idx = b.names.map((n, i) => leaveName_(n) === key ? i : -1).filter(i => i >= 0);
+    if (!idx.length) throw new Error(dt.m + '월 블록에 ' + name + ' 행이 없습니다.');
+    if (idx.length > 1) throw new Error(dt.m + '월 블록에 ' + name + ' 행이 2개 이상입니다.');
+    const row = b.rows[idx[0]];
+    const col = startCol + dayMap[dt.d];
+    const cell = sheet.getRange(row, col);
+    if (cell.isPartOfMerge()) throw new Error(ltFmt_(dt.key) + '은(는) 공휴일 칸(병합 셀)이라 연차를 넣거나 뺄 수 없습니다.');
+    const value = cell.getDisplayValue();
+    const amount = ltAmount_(value);
+    if (amount === null) throw new Error(cell.getA1Notation() + ' 칸에 년·반이 같이 있습니다. 먼저 정리하세요.');
+    return { cell: cell, value: value, amount: amount, a1: cell.getA1Notation(),
+      headerBg: sheet.getRange(b.headerRow, col).getBackground() };
+  };
+
+  if (from && to && from.key === to.key) {
+    const same = locate(from);
+    if (same.amount < 0.5 - 1e-9) throw new Error(ltFmt_(from.key) + '(' + same.a1 + ')에 연차가 없어 반차로 남길 수 없습니다.');
+    ltAddNote_(same.cell, '◐ 반차로 나눔 — 이 날짜에 반차 유지 (' + reqLabel + ' 통보)');
+    return '현재 미사용연차 반영: ' + same.a1 + ' "' + same.value + '" 그대로 (반차 유지 메모만 추가 — 나머지 반쪽은 다른 날짜로 옮기는 행을 등록하면 "반"이 됩니다)';
+  }
+  const src = from ? locate(from) : null;
+  const dst = to ? locate(to) : null;
+  const amount = half ? 0.5 : (src && src.amount > 0 ? src.amount : 1);
+  if (src && src.amount + 1e-9 < amount) {
+    throw new Error('변경 전 날짜 ' + ltFmt_(from.key) + '(' + src.a1 + ')에 옮길 연차가 없습니다. 현재 값: ' + (src.value || '빈칸') +
+      '\n→ 이미 옮겼거나 날짜가 틀렸는지 확인하세요. 시트는 그대로 두고 이력만 남기려면 "현재 시트에도 반영" 체크를 끄세요.');
+  }
+  if (dst && dst.amount + amount > 1 + 1e-9) {
+    throw new Error('변경 후 날짜 ' + ltFmt_(to.key) + '(' + dst.a1 + ')에 이미 "' + dst.value + '"가 있어 넣을 수 없습니다.');
+  }
+  const msgs = [];
+  if (src) {
+    const left = src.amount - amount;
+    src.cell.setValue(ltValueOf_(left));
+    if (left < 1e-9) src.cell.setBackground(src.headerBg);
+    ltAddNote_(src.cell, '↪ ' + (to ? ltFmt_(to.key) + '(으)로 변경' : '연차 취소') + ' (' + reqLabel + ' 통보)');
+    msgs.push(src.a1 + ': "' + (src.value || '') + '" → "' + ltValueOf_(left) + '"');
+  }
+  if (dst) {
+    const nv = ltValueOf_(dst.amount + amount);
+    dst.cell.setValue(nv).setBackground(LT_CHANGED_COLOR);
+    ltAddNote_(dst.cell, '↩ ' + (from ? ltFmt_(from.key) + '에서 변경' : '연차 추가') + ' (' + reqLabel + ' 통보)');
+    msgs.push(dst.a1 + ': "' + (dst.value || '') + '" → "' + nv + '"');
+  }
+  return '현재 미사용연차 반영: ' + msgs.join(', ');
+}
+
+function ltAddNote_(cell, line) {
+  const old = cell.getNote();
+  cell.setNote(old ? old + '\n' + line : line);
+}
+
+function ltAppendLedgerRow_(ss, rec) {
+  const C = CHANGE_LOG_CONFIG;
+  const sh = ss.getSheetByName(LEAVE_CHECK_CONFIG.changeSheetName);
+  if (!sh) throw new Error('"' + LEAVE_CHECK_CONFIG.changeSheetName + '" 시트가 없습니다.');
+  const last = Math.max(sh.getLastRow(), C.headerRow);
+  const names = sh.getRange(1, C.col.name, last, 1).getDisplayValues();
+  let lastData = C.headerRow;
+  for (let r = names.length - 1; r >= C.firstDataRow - 1; r--) {
+    if (String(names[r][0]).trim()) { lastData = r + 1; break; }
+  }
+  const row = lastData + 1;
+  if (row > sh.getMaxRows()) sh.insertRowsAfter(sh.getMaxRows(), 10);
+  const D = dt => dt ? new Date(dt.y, dt.m - 1, dt.d) : '';
+  const rng = sh.getRange(row, C.col.name, 1, C.col.used - C.col.name + 1);
+  rng.setValues([[rec.name, rec.position, D(rec.requested), D(rec.from), D(rec.to), rec.note, '']]);
+  rng.setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBorder(true, true, true, true, true, true);
+  sh.getRange(row, C.col.requested).setNumberFormat('m"월" d"일"');
+  sh.getRange(row, C.col.from, 1, 2).setNumberFormat('yyyy-mm-dd');
+  return row;
+}
+
+const LT_FORM_HTML = [
+  '<!doctype html><html><head><base target="_top"><style>',
+  'body{font-family:Arial,"Malgun Gothic",sans-serif;font-size:13px;margin:14px;color:#222}',
+  'label{display:block;margin-top:10px;font-weight:bold}',
+  'input,select{width:100%;box-sizing:border-box;padding:6px;font-size:13px;border:1px solid #bbb;border-radius:4px}',
+  '.row{display:flex;gap:10px}.row>div{flex:1}',
+  '.hint{color:#777;font-size:11px;font-weight:normal}',
+  '.box{background:#f3f6fa;border-radius:6px;padding:8px 10px;margin-top:10px;font-size:11.5px;color:#444;line-height:1.5}',
+  'button{margin-top:14px;padding:9px 16px;background:#17365d;color:#fff;border:0;border-radius:4px;cursor:pointer;font-size:13px}',
+  'button.sub{background:#888}button:disabled{opacity:.5}',
+  '#msg{margin-top:12px;white-space:pre-wrap;line-height:1.5}.ok{color:#1e7b34}.err{color:#c00000}',
+  '</style></head><body>',
+  '<label>성명</label><select id="name"></select>',
+  '<div class="row"><div><label>직급</label><input id="position"></div>',
+  '<div><label>통보일 <span class="hint">(노사협력팀 통보)</span></label><input type="date" id="requested"></div></div>',
+  '<div class="row"><div><label>변경 전 날짜 <span class="hint">새로 추가면 비움</span></label><input type="date" id="from"></div>',
+  '<div><label>변경 후 날짜 <span class="hint">취소면 비움</span></label><input type="date" id="to"></div></div>',
+  '<label>구분</label><select id="kind"><option>연차</option><option>오전반차</option><option>오후반차</option></select>',
+  '<label>비고 <span class="hint">(선택)</span></label><input id="note" placeholder="예: 업무 일정으로 변경">',
+  '<label style="font-weight:normal;margin-top:12px"><input type="checkbox" id="apply" checked style="width:auto;vertical-align:middle"> \'현재 미사용연차\' 시트 칸도 같이 옮기기</label>',
+  '<div class="box">• 연차 1개를 반차 2개로 나눌 때: <b>같은 변경 전 날짜</b>로 오전반차 1번, 오후반차 1번 등록<br>',
+  '• 반쪽을 원래 날짜에 남길 땐 변경 후 날짜도 <b>같은 날짜</b>로 (예: 10/13 → 10/8 오전반차, 10/13 → 10/13 오후반차)<br>',
+  '• 등록하면 변경 정보 시트에 한 줄 추가 → 현재 시트 칸 이동(메모 남김) → 추적 현황 갱신까지 자동</div>',
+  '<button id="btn" onclick="send()">등록</button> <button class="sub" onclick="google.script.host.close()">닫기</button>',
+  '<div id="msg"></div>',
+  '<script>',
+  'var P={};',
+  'google.script.run.withSuccessHandler(function(d){',
+  '  var s=document.getElementById("name");',
+  '  d.names.forEach(function(x){var o=document.createElement("option");o.textContent=x.name;s.appendChild(o);P[x.name]=x.position;});',
+  '  s.onchange=function(){document.getElementById("position").value=P[s.value]||"";};s.onchange();',
+  '  document.getElementById("requested").value=d.today;',
+  '}).withFailureHandler(function(e){show(e.message,true);}).ltChangeFormData();',
+  'function v(id){var el=document.getElementById(id);return el.type==="checkbox"?el.checked:el.value;}',
+  'function show(t,err){var m=document.getElementById("msg");m.className=err?"err":"ok";m.textContent=t;}',
+  'function send(){',
+  '  var b=document.getElementById("btn");b.disabled=true;show("처리 중…");',
+  '  var f={name:v("name"),position:v("position"),requested:v("requested"),from:v("from"),to:v("to"),kind:v("kind"),note:v("note"),apply:v("apply")};',
+  '  google.script.run.withSuccessHandler(function(t){b.disabled=false;show(t,false);',
+  '    document.getElementById("from").value="";document.getElementById("to").value="";document.getElementById("note").value="";})',
+  '  .withFailureHandler(function(e){b.disabled=false;show("❌ "+e.message,true);}).ltSubmitChange(f);',
+  '}',
+  '</script></body></html>'
+].join('\n');
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [v3] 🔒 원본 시트 보호 (수정하려 하면 경고 창)
+// ═════════════════════════════════════════════════════════════════════════
+function protectOriginalSheet() {
+  const ui = SpreadsheetApp.getUi();
+  const sh = ltBook_().getSheetByName(LEAVE_CHECK_CONFIG.originalSheetName);
+  if (!sh) { ui.alert('"' + LEAVE_CHECK_CONFIG.originalSheetName + '" 시트가 없습니다.'); return; }
+  const exist = sh.getProtections(SpreadsheetApp.ProtectionType.SHEET);
+  const p = exist.length ? exist[0] : sh.protect();
+  p.setDescription('지정휴무 원본 — 7월 연차계획 신청 기준. 변경은 "연차 변경 등록"으로만.').setWarningOnly(true);
+  ui.alert('🔒 원본 시트를 보호했습니다.\n수정하려고 하면 경고 창이 뜹니다. (해제: 데이터 → 시트 및 범위 보호)');
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// [v3] ⏰ 5일 전 경고 — 지정휴무 연차 ↔ 근무계획 '년'/'반'
+// ═════════════════════════════════════════════════════════════════════════
+
+/** 근무계획 월 시트 읽기 (캐시) → { error, people:{키:{row, sheetRow}}, dayMap } */
+function ltPlanMonth_(planBook, month, cache) {
+  if (cache[month]) return cache[month];
+  const out = { error: '', people: {}, dayMap: null };
+  cache[month] = out;
+  try {
+    const plan = planBook.getSheetByName(month + '월');
+    if (!plan) throw new Error('근무계획에 ' + month + '월 시트가 아직 없습니다');
+    const lastRow = plan.getLastRow();
+    if (lastRow < 5) throw new Error('근무계획 ' + month + '월에 직원 표가 없습니다');
+    const labels = plan.getRange(5, 1, lastRow - 4, 1).getDisplayValues();
+    const count = labels.findIndex(r => leaveName_(r[0]) === '계');
+    if (count < 0) throw new Error('근무계획 ' + month + '월 A열에서 "계" 행을 찾지 못했습니다');
+    const rows = count ? plan.getRange(5, 1, count, 37).getDisplayValues() : [];
+    out.dayMap = leaveDayMap_(plan.getRange('G3:AK3').getDisplayValues()[0], new Date(LEAVE_CHECK_CONFIG.year, month, 0).getDate());
+    rows.forEach((r, i) => {
+      const k = leaveName_(r[2]);
+      if (!k) return;
+      if (out.people[k]) out.people[k].dup = true;
+      else out.people[k] = { row: r, sheetRow: i + 5 };
+    });
+  } catch (e) {
+    out.error = e.message;
+  }
+  return out;
+}
+
+/** 경고 대상 수집 → { today, items:[경고], infos:[참고] } */
+function ltCollectAlerts_(today) {
+  const cfg = LEAVE_CHECK_CONFIG, A = LEAVE_ALERT_CONFIG;
+  const cur = ltReadGrid_(getSourceSheet_());
+  const planBook = SpreadsheetApp.openById(cfg.planSpreadsheetId);
+  const cache = {};
+  const items = [], infos = [];
+  for (let off = 0; off <= A.daysBefore; off++) {
+    const dt = ltAddDays_(today, off);
+    if (dt.y !== cfg.year) continue;
+    const pm = ltPlanMonth_(planBook, dt.m, cache);
+    Object.keys(cur.people).forEach(k => {
+      const person = cur.people[k];
+      const cell = person.cells[dt.key];
+      const pp = pm.people[k];
+      let planVal = '', planCell = '';
+      if (pp && pm.dayMap && pm.dayMap[dt.d] !== undefined) {
+        const idx = pm.dayMap[dt.d] + 6;
+        planVal = pp.row[idx];
+        planCell = dt.m + '월!' + leaveColumn_(idx + 1) + pp.sheetRow;
+      }
+      const base = { name: person.name, key: dt.key, off: off, value: cell ? cell.value : '', planValue: planVal, planCell: planCell,
+        where: cell ? cfg.sourceSheetName + '!' + cell.a1 : '' };
+      if (cell) {
+        const exp = leaveMarkers_(cell.value);
+        let status = '';
+        if (pm.error) status = '근무계획 확인 불가: ' + pm.error;
+        else if (!pp) status = '근무계획 ' + dt.m + '월에 이름이 없습니다';
+        else if (pp.dup) status = '근무계획 ' + dt.m + '월에 같은 이름이 2명 이상';
+        else {
+          const act = leaveMarkers_(planVal);
+          if (act === exp) return;
+          status = act ? '휴가 종류 불일치 (지정휴무 ' + exp + ' / 근무계획 ' + act + ')' : '근무계획에 "' + exp + '" 없음';
+        }
+        items.push(Object.assign(base, { status: status }));
+      } else if (A.reportPlanOnly && pp && !pp.dup && pm.dayMap) {
+        const act = leaveMarkers_(planVal);
+        if (act) infos.push(Object.assign(base, { status: '근무계획엔 "' + act + '"인데 지정휴무엔 없음 → 변경 통보·등록 누락?' }));
+      }
+    });
+  }
+  return { today: today, items: items, infos: infos };
+}
+
+function ltDday_(off) { return off === 0 ? '오늘' : 'D-' + off; }
+
+function previewLeaveAlerts() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const r = ltCollectAlerts_(ltToday_());
+    const line = x => '• ' + ltDday_(x.off) + ' ' + ltFmt_(x.key) + ' ' + x.name + ' — ' + x.status +
+      (x.planCell ? ' [' + x.planCell + ': ' + (x.planValue || '빈칸') + ']' : '');
+    let msg = '👀 오늘(' + ltFmt_(r.today.key) + ') ~ ' + LEAVE_ALERT_CONFIG.daysBefore + '일 뒤까지\n\n';
+    msg += r.items.length ? '⚠️ 경고 ' + r.items.length + '건\n' + r.items.map(line).join('\n') : '✅ 근무계획 미반영 연차 없음';
+    if (r.infos.length) msg += '\n\nℹ️ 참고 ' + r.infos.length + '건\n' + r.infos.map(line).join('\n');
+    msg += '\n\n(메일은 보내지 않았습니다)';
+    ui.alert(msg);
+  } catch (e) {
+    ui.alert('❌ 오류\n\n' + e.message);
+  }
+}
+
+function sendLeaveAlertsNow() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const out = ltRunAlerts_(true);
+    ui.alert(out);
+  } catch (e) {
+    ui.alert('❌ 오류\n\n' + e.message);
+  }
+}
+
+/** 트리거 진입점 */
+function dailyLeaveAlert() {
+  const today = ltToday_();
+  const dow = new Date(Date.UTC(today.y, today.m - 1, today.d)).getUTCDay();
+  if (LEAVE_ALERT_CONFIG.skipWeekends && (dow === 0 || dow === 6)) return;
+  try { ltRefreshTracking_(ltBook_()); } catch (e) { Logger.log('추적 현황 갱신 실패: ' + e.message); }
+  ltRunAlerts_(false);
+}
+
+function ltRunAlerts_(manual) {
+  const A = LEAVE_ALERT_CONFIG;
+  const r = ltCollectAlerts_(ltToday_());
+  const sent = [];
+  if (r.items.length || r.infos.length) {
+    // 개인 메일
+    const byName = {};
+    r.items.forEach(x => (byName[x.name] || (byName[x.name] = [])).push(x));
+    Object.keys(byName).forEach(n => {
+      const to = A.teamEmails[n];
+      if (!to) return;
+      MailApp.sendEmail({
+        to: to,
+        subject: '[지정휴무] ' + n + '님 연차 ' + byName[n].map(x => ltFmt_(x.key)).join(', ') + ' — 근무계획 미반영',
+        htmlBody: ltMailHtml_(n + '님, 아래 날짜는 지정휴무상 연차인데 근무계획에 아직 반영되지 않았습니다.',
+          '근무계획 담당자에게 반영을 요청하시거나, 일정을 바꾸셨다면 노사협력팀 통보 후 관리자에게 알려 주세요.', byName[n], [])
+      });
+      sent.push(n + '(' + to + ')');
+    });
+    // 관리자 요약
+    if (A.adminEmails.length) {
+      MailApp.sendEmail({
+        to: A.adminEmails.join(','),
+        subject: '[지정휴무] ' + ltFmt_(r.today.key) + ' 근무계획 미반영 경고 ' + r.items.length + '건' + (r.infos.length ? ' · 참고 ' + r.infos.length + '건' : ''),
+        htmlBody: ltMailHtml_('오늘부터 ' + A.daysBefore + '일 뒤까지 지정휴무 연차 ↔ 근무계획 대조 결과입니다.',
+          '개인 메일 발송: ' + (sent.length ? sent.join(', ') : '없음 (teamEmails 미설정)'), r.items, r.infos)
+      });
+      sent.push('관리자(' + A.adminEmails.join(',') + ')');
+    }
+  }
+  ltLogAlerts_(r, sent);
+  return (manual ? '📧 ' : '') + '경고 ' + r.items.length + '건, 참고 ' + r.infos.length + '건\n' +
+    (sent.length ? '메일 발송: ' + sent.join(', ') : '보낼 내용이 없어 메일을 보내지 않았습니다.');
+}
+
+function ltMailHtml_(intro, outro, items, infos) {
+  const esc = leaveEscape_;
+  const table = (rows, color) => '<table style="border-collapse:collapse;font-size:13px;margin:8px 0">' +
+    '<tr style="background:#d9e5f3"><th style="padding:6px 10px;border:1px solid #bbb">일자</th><th style="padding:6px 10px;border:1px solid #bbb">남은 날</th>' +
+    '<th style="padding:6px 10px;border:1px solid #bbb">성명</th><th style="padding:6px 10px;border:1px solid #bbb">지정휴무</th>' +
+    '<th style="padding:6px 10px;border:1px solid #bbb">근무계획</th><th style="padding:6px 10px;border:1px solid #bbb">내용</th></tr>' +
+    rows.map(x => '<tr style="background:' + color + '">' +
+      [ltFmt_(x.key), ltDday_(x.off), x.name, x.value || '—', (x.planValue || '빈칸') + (x.planCell ? ' (' + x.planCell + ')' : ''), x.status]
+        .map(v => '<td style="padding:6px 10px;border:1px solid #bbb">' + esc(v) + '</td>').join('') + '</tr>').join('') + '</table>';
+  return '<div style="font-family:Arial,\'Malgun Gothic\',sans-serif;font-size:13px;color:#222">' +
+    '<p>' + esc(intro) + '</p>' +
+    (items.length ? '<p style="color:#c00000;font-weight:bold">⚠️ 경고 ' + items.length + '건</p>' + table(items, '#fce4d6') : '') +
+    (infos.length ? '<p style="color:#2f5597;font-weight:bold">ℹ️ 참고 ' + infos.length + '건</p>' + table(infos, '#ddebf7') : '') +
+    '<p style="color:#555">' + esc(outro) + '</p>' +
+    '<p style="color:#999;font-size:11px">지정휴무 스프레드시트 자동 알림 (' + LEAVE_CHECK_CONFIG.sourceSheetName + ' ↔ 근무계획)</p></div>';
+}
+
+function ltLogAlerts_(r, sent) {
+  const ss = ltBook_();
+  const name = LEAVE_CHECK_CONFIG.alertLogSheetName;
+  let sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    sh.getRange(1, 1, 1, 9).setValues([['실행 시각', '구분', '성명', '일자', '남은 날', '지정휴무', '근무계획', '내용', '메일 수신']])
+      .setBackground('#17365d').setFontColor('#ffffff').setFontWeight('bold');
+    sh.setFrozenRows(1);
+    [130, 60, 70, 80, 60, 70, 150, 360, 260].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  }
+  const ts = Utilities.formatDate(new Date(), LT_TZ, 'yyyy-MM-dd HH:mm');
+  const rows = [];
+  r.items.forEach(x => rows.push([ts, '경고', x.name, ltFmt_(x.key), ltDday_(x.off), x.value, (x.planValue || '빈칸') + (x.planCell ? ' (' + x.planCell + ')' : ''), x.status, sent.join(', ')]));
+  r.infos.forEach(x => rows.push([ts, '참고', x.name, ltFmt_(x.key), ltDday_(x.off), '', (x.planValue || '') + (x.planCell ? ' (' + x.planCell + ')' : ''), x.status, sent.join(', ')]));
+  if (!rows.length) rows.push([ts, '이상 없음', '', '', '', '', '', '근무계획 미반영 연차 없음', '']);
+  sh.getRange(sh.getLastRow() + 1, 1, rows.length, 9).setValues(rows);
+}
+
+function enableDailyLeaveAlert() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  PropertiesService.getScriptProperties().setProperty('LEAVE_BOOK_ID', ss.getId());
+  ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'dailyLeaveAlert').forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('dailyLeaveAlert').timeBased().everyDays(1).atHour(LEAVE_ALERT_CONFIG.triggerHour).inTimezone(LT_TZ).create();
+  ui.alert('⏰ 매일 오전 ' + LEAVE_ALERT_CONFIG.triggerHour + '시경 자동 경고를 켰습니다.\n\n' +
+    '• 오늘~' + LEAVE_ALERT_CONFIG.daysBefore + '일 뒤 지정휴무 연차가 근무계획에 없으면 메일 발송\n' +
+    '• 관리자: ' + LEAVE_ALERT_CONFIG.adminEmails.join(', ') + '\n' +
+    '• 개인 메일: ' + (Object.keys(LEAVE_ALERT_CONFIG.teamEmails).filter(n => LEAVE_ALERT_CONFIG.teamEmails[n]).join(', ') || '미설정 (코드 teamEmails에 입력)') + '\n' +
+    '• 주말 발송: ' + (LEAVE_ALERT_CONFIG.skipWeekends ? '안 함' : '함') + '\n' +
+    '• 실행 때마다 추적 현황도 같이 갱신, 결과는 "' + LEAVE_CHECK_CONFIG.alertLogSheetName + '" 시트에 기록');
+}
+
+function disableDailyLeaveAlert() {
+  const n = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'dailyLeaveAlert');
+  n.forEach(t => ScriptApp.deleteTrigger(t));
+  SpreadsheetApp.getUi().alert('⛔ 자동 경고를 껐습니다. (삭제한 트리거 ' + n.length + '개)');
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// 유틸
+// ═════════════════════════════════════════════════════════════════════════
 function columnLetterToIndex(letter) {
   let column = 0;
   for (let i = 0; i < letter.length; i++) {

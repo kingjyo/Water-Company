@@ -1,0 +1,1178 @@
+/**
+ * 생산일지 스프레드시트별 배분
+ * ①    각 생산일지(최신 날짜) → '생산일지 모음' 불러오기
+ * ①-2  날짜 지정 불러오기 → '불러오기 테스트 결과' 시트 + 실제 입력(확인 후)
+ * ②    분배 테스트 (생산일지 모음 기준) → '테스트 결과' 시트
+ * ③    분배 테스트 (날짜 지정)          → '테스트 결과' 시트
+ * ④    원부재료 분배 실행
+ */
+
+/* ═════════════ ① 불러오기 설정 ═════════════ */
+const CONFIG = {
+  TARGET_SHEET: '생산일지 모음',
+  GRID: 'A1:R30',        // 생산일지 모음에서 읽고 쓰는 영역 (반드시 A1부터)
+  INCLUDE_TODAY: true,   // true: 오늘 날짜 시트까지 포함 / false: 어제 이전 시트만 대상
+  CLEAR_MISSING: true,   // 날짜 지정 시 해당 날짜 시트가 없는 원본의 모음 영역을 비움
+  IMPORT_RESULT_SHEET: '불러오기 테스트 결과',
+
+  SOURCES: [
+    {
+      key: 'product', short: '제품', name: '제품 생산일지',
+      id: '1WymbNXGMa8EqZmOmm6l2BPbcQeXlvK_pIfzveYNbyg0',
+      maps: [
+        { src: 'C24:H24', dst: 'D6:I6' },
+        { src: 'C29:H29', dst: 'D7:I7' },
+        { src: 'C32:H44', dst: 'D8:I20' },
+      ],
+    },
+    {
+      key: 'semi', short: '반제품', name: '반제품 생산일지',
+      id: '1VCLbzaVfMGuu5WPAuaSumpLWZKPmnfkygpyPqzAKoV4',
+      maps: [
+        { src: 'D16:I18', dst: 'D24:I26' },
+      ],
+    },
+    {
+      key: 'soda', short: '탄산', name: '190ml 탄산음료 생산일지',
+      id: '1V2CNYoRY8AaQAcTtiSfHLZKNNI2_Ud9no2qpE5ptYHs',
+      maps: [
+        { src: 'C17:H20', dst: 'M6:R9' },
+      ],
+    },
+  ],
+};
+
+/* ═════════════ ②③④ 분배 설정 ═════════════ */
+// 생산일지 모음 열 → 원부재료 시트 열 (입고 B, 사용 D, 손실 E)
+const COLS_STD  = { E: 'B', F: 'D', G: 'E' }; // 제품·반제품 원부재료
+const COLS_SODA = { N: 'B', O: 'D', P: 'E' }; // 탄산 원부재료 (공캔, 엔드, 식이섬유, 하프트레이)
+const SUM_LABELS = { E: '입고량', F: '사용량', G: '손실량', N: '입고량', O: '사용량', P: '손실량' };
+
+const DIST = {
+  DATE_KEY: 'IMPORT_DATES',
+  DONE_KEY: 'DISTRIBUTED_DATES',
+  RESULT_SHEET: '테스트 결과',
+  WRITE_BLANK: false,      // false: 모음 값이 빈칸이면 건너뜀(기존 값 유지)
+  SKIP_ZERO: true,         // true: 모음 값이 0이면 빈칸과 똑같이 건너뜀
+  SKIP_DISTRIBUTED: true,  // true: 이미 배분한 날짜의 원본은 건너뜀
+
+  // 양식별 '일자(1~31)' 행 범위 → A열에서 일자를 찾아 행 결정
+  FORMS: {
+    STD:  'A8:H38', // 헤더 5~6행, A7=월, A8부터 1일
+    SODA: 'A6:H36', // 헤더 3~4행, A5=월, A6부터 1일
+  },
+
+  // src: 날짜 기준 생산일지 (product / semi / soda), row: 생산일지 모음의 행
+  ITEMS: [
+    { name: '18.9L CAP',      src: 'product', form: 'STD', row: 6,  cols: COLS_STD, id: '1KDIJHwo-C-QQLRQHH5YrT2jk47OwDMZhjVsTK2mEXT4' },
+    { name: '18.9L 루땡',     src: 'product', form: 'STD', row: 7,  cols: COLS_STD, id: '1_bhibYyNMbXzPiOjMk4Pc7ZBL9kMyiMsrklpyeijyWc' },
+    { name: '1.5L BOX (황)',  src: 'product', form: 'STD', row: 8,  cols: COLS_STD, id: '1xTzDxTsYpbeLraMWw72R6q7btBbIFfdtfQ_WJJvhqD8' },
+    { name: '1.5L BOX (백)',  src: 'product', form: 'STD', row: 9,  cols: COLS_STD, id: '1cUNqavUSm4u3XHvVN3uvZ9ags5rmei0pm9kwFkm7EKw' },
+    { name: '0.5L BOX (황)',  src: 'product', form: 'STD', row: 10, cols: COLS_STD, id: '1jEg4iUtNZtAZ2Sb7Tz_y6tAnM-EaVMsgAdnTnR4B-nQ' },
+    { name: '0.5L BOX (백)',  src: 'product', form: 'STD', row: 11, cols: COLS_STD, id: '1m7V-LNDKVOWG1yKskXRI7YzcF5dhHiHYExTK7C_v8E4' },
+    { name: '0.33L BOX (황)', src: 'product', form: 'STD', row: 12, cols: COLS_STD, id: '1DE-BvO_uUlXaVvLgMY8KbrCwpCXdUZ_NrkzAgj0gmmg' },
+    { name: '0.33L BOX (백)', src: 'product', form: 'STD', row: 13, cols: COLS_STD, id: '1CTvG9VGvYUGDe5MImm_W6zYeXvOTO_XohU-jRfa9874' },
+    { name: '0.12L BOX',      src: 'product', form: 'STD', row: 14, cols: COLS_STD, id: '1shVvW-EkjN-J7g1QMtgM7ZFh5lS9vh6NVKcPi2zcuFY' },
+    { name: 'PET SHEET',      src: 'product', form: 'STD', row: 17, cols: COLS_STD, id: '1E_K-sWWleeqWPGPILq-vmLx-e79A0seL29kSiA4OOTQ' },
+    { name: '0.12L LID 국제', src: 'product', form: 'STD', row: 18, cols: COLS_STD, id: '1YJ5gQX7mK8AywQTnHFkE0wzesSitrcc7WLeUDpfgenk' },
+    { name: '0.12L LID 국내', src: 'product', form: 'STD', row: 19, cols: COLS_STD, id: '1qw0T6KJqqocZu63nCGMUryPjqLAJbgj1KznIcyNKrNg' },
+    { name: '0.12L LID OAL',  src: 'product', form: 'STD', row: 20, cols: COLS_STD, id: '1CeZBXD-FFeKXRiv6bpRhLGOxTkF07SuU96ylINgx5Q8' },
+
+    { name: 'PET RESIN',      src: 'semi',    form: 'STD', row: 24, cols: COLS_STD, id: '1ZlieWQUMqiFJRn7M9bnHzlr011SEiSNHJ6Fx8YUHF5g' },
+    { name: 'HDPE',           src: 'semi',    form: 'STD', row: 25, cols: COLS_STD, id: '1OPiFdAnfH4j32HptEXXsMo4YJDfOGA4MKZPsWTY3zOo' },
+    { name: 'AA소거제',       src: 'semi',    form: 'STD', row: 26, cols: COLS_STD, id: '17VEiGIZO7PSkmHWg1Uxr3i_6kgeHQNTbCGoCoDGoZM0' },
+
+    { name: '공캔',           src: 'soda',    form: 'SODA', row: 6, cols: COLS_SODA, id: '1w2XPcLsTqfFyGmDgWdocEvArqDTLQHNRHbLr5pNLuNE' },
+    { name: '엔드',           src: 'soda',    form: 'SODA', row: 7, cols: COLS_SODA, id: '1LKYYTwylyS2fii4ltOxOLA8EKdwvnthhL-_XEVMMKLc' },
+    { name: '식이섬유',       src: 'soda',    form: 'SODA', row: 8, cols: COLS_SODA, id: '1lieNfEgN_aeTx-c9M5JH_dI3FbGJczswIeHPTt1QflE' },
+    { name: '하프트레이',     src: 'soda',    form: 'SODA', row: 9, cols: COLS_SODA, id: '1HPO08BJIFyiGuZ2v0BGuSOY4TRvV1dVL-mBVQCxwBV8' },
+  ],
+
+  GLUE: {
+    name: 'GLUE', src: 'product', form: 'STD',
+    id: '17KRbH7ZPjxXULH57Oq69oMW4ytlAeecbRb3G4-pBySM',
+    inCell: 'E15',  // 입고 (E15:E16 병합) → B열
+    petCell: 'F15', // PET 제품 GLUE 사용량 → 생산 제품 열
+    cupCell: 'F16', // 0.12L GLUE 사용량 → H열
+    cupCol: 'H',
+    products: [
+      { label: '1.5L',  checks: ['F8', 'F9'],   col: 'D' },
+      { label: '0.5L',  checks: ['F10', 'F11'], col: 'E' },
+      { label: '0.33L', checks: ['F12', 'F13'], col: 'F' },
+    ],
+  },
+};
+
+/* ═════════════ 메뉴 ═════════════ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('생산일지 자동화')
+    .addItem('① 생산일지 모음 불러오기 (최신 날짜)', 'importProductionLogs')
+    .addItem('①-2 생산일지 모음 불러오기 (날짜 지정)', 'importByDate')
+    .addSeparator()
+    .addItem('② 분배 테스트 (생산일지 모음 기준)', 'distributeTest')
+    .addItem('③ 분배 테스트 (날짜 지정)', 'distributeTestByDate')
+    .addSeparator()
+    .addItem('④ 원부재료 분배 실행', 'distributeRun')
+    .addSeparator()
+    .addItem('배분 기록 보기 / 지우기', 'resetDistributionRecord')
+    .addItem('❓ 도움말 — 각 기능 설명', 'showHelp')
+    .addToUi();
+}
+
+/* ═════════════ ① 생산일지 모음 불러오기 (최신 날짜) ═════════════ */
+function importProductionLogs() {
+  const ui = SpreadsheetApp.getUi();
+  const target = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.TARGET_SHEET);
+  if (!target) {
+    ui.alert(`'${CONFIG.TARGET_SHEET}' 시트를 찾을 수 없습니다.`);
+    return;
+  }
+
+  const res = readSources(ss => findLatestDateSheet(ss));
+  const errors = res.errors.concat(res.missing.map(s => `${s.name}: 날짜(MMDD) 형식의 시트를 찾지 못했습니다.`));
+  if (errors.length) {
+    ui.alert('불러오기 실패',
+      '아래 오류로 인해 아무것도 입력하지 않았습니다.\n\n' + errors.map(e => '• ' + e).join('\n'),
+      ui.ButtonSet.OK);
+    return;
+  }
+
+  const warnings = res.warnings.slice();
+  const uniq = [...new Set(Object.values(res.dates))];
+  if (uniq.length > 1) {
+    warnings.unshift(`원본별 날짜가 서로 다릅니다 (${uniq.join(', ')}) → 날짜가 뒤처진 원본은 그날 생산이 없었을 수 있습니다.`);
+  }
+
+  const done = loadDoneDates();
+  CONFIG.SOURCES.forEach(s => {
+    if (res.dates[s.key] && done[s.key] === res.dates[s.key]) {
+      warnings.push(`${s.name} ${mmddLabel(res.dates[s.key])} 자료는 이미 배분했습니다. (④ 실행 시 건너뜀)`);
+    }
+  });
+
+  let msg = '다음 시트의 데이터를 불러옵니다.\n\n' + res.info.map(i => `• ${i.name} → [${i.mmdd}] 시트`).join('\n');
+  if (warnings.length) msg += '\n\n⚠ 확인 필요\n' + warnings.map(w => '• ' + w).join('\n');
+  msg += '\n\n진행할까요?';
+  if (ui.alert('생산일지 모음 불러오기', msg, ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+
+  applyImport(target, res);
+  ui.alert('완료', `'${CONFIG.TARGET_SHEET}' 시트에 입력했습니다.\n(분배 기준 날짜도 함께 저장됨)`, ui.ButtonSet.OK);
+}
+
+/* ═════════════ ①-2 날짜 지정 불러오기 (결과 시트 + 실제 입력) ═════════════ */
+function importByDate() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  const ymd = promptYmd('날짜 지정 불러오기',
+    '불러올 날짜를 YYYY-MM-DD 형식으로 입력하세요.\n예) 2026-09-10\n\n' +
+    `※ 먼저 '${CONFIG.IMPORT_RESULT_SHEET}' 시트에 미리보기를 만든 뒤,\n` +
+    '   확인 창에서 [예]를 눌러야 실제로 입력됩니다.\n' +
+    '※ 해당 날짜 시트가 없는 원본은 "미생산"으로 처리됩니다.');
+  if (!ymd) return;
+
+  let target;
+  try {
+    target = getSummarySheet();
+  } catch (e) {
+    ui.alert('오류', e.message, ui.ButtonSet.OK);
+    return;
+  }
+
+  ss.toast('각 생산일지를 확인하는 중입니다.', '날짜 지정 불러오기', -1);
+  let res, out;
+  try {
+    res = readSources(s => findSheetByName(s, ymd.mmdd));
+    res.warnings = yearWarning(ymd).concat(res.warnings);
+    out = writeImportTestResult(res, ymd, false);
+    ss.toast(`'${CONFIG.IMPORT_RESULT_SHEET}' 시트를 만들었습니다.`, '미리보기 완료', 3);
+  } catch (e) {
+    ss.toast('중단됨', '날짜 지정 불러오기', 2);
+    ui.alert('불러오기 실패', e.message, ui.ButtonSet.OK);
+    return;
+  }
+
+  // 원본 읽기 오류가 있으면 입력하지 않음
+  if (res.errors.length) {
+    ui.alert('입력 불가',
+      `'${CONFIG.IMPORT_RESULT_SHEET}' 시트는 만들었지만, 아래 오류로 인해 아무것도 입력하지 않았습니다.\n\n` +
+      res.errors.map(e => '• ' + e).join('\n'),
+      ui.ButtonSet.OK);
+    return;
+  }
+
+  const found = res.info.filter(s => s.mmdd);
+  if (!found.length) {
+    ui.alert('대상 없음',
+      `${ymd.text} 날짜의 시트를 어느 생산일지에서도 찾지 못했습니다.\n` +
+      '(해당 날짜에 생산이 없었거나, 시트 이름을 확인해 주세요)\n\n' +
+      `자세한 내용은 '${CONFIG.IMPORT_RESULT_SHEET}' 시트를 확인하세요.`,
+      ui.ButtonSet.OK);
+    return;
+  }
+
+  const lines = res.info.map(s => s.mmdd
+    ? `• ${s.name} → [${s.mmdd}] 시트`
+    : `• ${s.name} → 시트 없음 (미생산${CONFIG.CLEAR_MISSING ? ' → 모음 영역 비움' : ' → 기존 값 유지'})`);
+
+  const warnings = res.warnings.slice();
+  const done = loadDoneDates();
+  CONFIG.SOURCES.forEach(s => {
+    if (res.dates[s.key] && done[s.key] === res.dates[s.key]) {
+      warnings.push(`${s.name} ${mmddLabel(res.dates[s.key])} 자료는 이미 배분했습니다. (④ 실행 시 건너뜀)`);
+    }
+  });
+
+  let msg = `[대상] ${ymd.text} (${ymd.dow})\n\n` + lines.join('\n') +
+    `\n\n'${CONFIG.TARGET_SHEET}' 변경 예정\n` +
+    `입력 ${out.cnt['입력']}칸 · 변경 ${out.cnt['변경']}칸 · 비움 ${out.cnt['비움']}칸 · 동일 ${out.cnt['동일']}칸\n\n` +
+    '※ 분배 기준 날짜도 함께 저장되어 ② ④ 에서 사용됩니다.';
+  if (warnings.length) msg += '\n\n⚠ 확인 필요\n' + warnings.map(w => '• ' + w).join('\n');
+  msg += `\n\n'${CONFIG.TARGET_SHEET}' 시트에 실제로 입력할까요?\n(아니오를 누르면 미리보기 시트만 남습니다)`;
+
+  if (ui.alert('날짜 지정 불러오기', msg, ui.ButtonSet.YES_NO) !== ui.Button.YES) {
+    setResultSubtitle(out.sh, out.W,
+      `대상 날짜: ${ymd.text} (${ymd.dow})     ·     상태: 미리보기 — 입력하지 않았습니다.`,
+      '#d9e2f3', '#44546a');
+    return;
+  }
+
+  applyImport(target, res);
+  setResultSubtitle(out.sh, out.W,
+    `대상 날짜: ${ymd.text} (${ymd.dow})     ·     상태: 입력 완료 — '${CONFIG.TARGET_SHEET}' 시트에 반영되었고 분배 기준 날짜도 저장되었습니다.`,
+    '#e8f5e9', '#1b5e20');
+
+  ui.alert('완료',
+    `'${CONFIG.TARGET_SHEET}' 시트에 입력했습니다.\n(분배 기준 날짜도 함께 저장됨)\n\n` +
+    '다음 단계: ② 분배 테스트 → ④ 원부재료 분배 실행',
+    ui.ButtonSet.OK);
+}
+
+/* 모음 시트에 실제 입력 + 기준 날짜 저장 (①·①-2 공통) */
+function applyImport(target, res) {
+  res.jobs.forEach(j =>
+    target.getRange(j.row, j.col, j.values.length, j.values[0].length).setValues(j.values));
+
+  if (CONFIG.CLEAR_MISSING) {
+    res.missing.forEach(src => src.maps.forEach(m => {
+      const d = parseA1Range(m.dst);
+      target.getRange(d.row, d.col, d.numRows, d.numCols).clearContent();
+    }));
+  }
+
+  PropertiesService.getDocumentProperties().setProperty(DIST.DATE_KEY, JSON.stringify(res.dates));
+}
+
+/* 각 생산일지 읽기 (pickSheet: 스프레드시트 → 사용할 시트) */
+function readSources(pickSheet) {
+  const g = parseA1Range(CONFIG.GRID);
+  const grid = Array.from({ length: g.numRows }, () => Array(g.numCols).fill(''));
+  const res = { grid, dates: {}, info: [], jobs: [], warnings: [], errors: [], missing: [] };
+
+  CONFIG.SOURCES.forEach(src => {
+    const info = { key: src.key, short: src.short, name: src.name, mmdd: '', note: '' };
+    res.info.push(info);
+
+    try {
+      const sheet = pickSheet(SpreadsheetApp.openById(src.id));
+      if (!sheet) {
+        res.missing.push(src);
+        info.note = CONFIG.CLEAR_MISSING
+          ? '해당 날짜 시트 없음 (미생산?) → 모음 영역을 비움'
+          : '해당 날짜 시트 없음 (미생산?) → 기존 값 유지';
+        return;
+      }
+
+      src.maps.forEach(m => {
+        const values = sheet.getRange(m.src).getValues();
+        const s = parseA1Range(m.src);
+        const d = parseA1Range(m.dst);
+        const rows = Math.min(values.length, d.numRows);
+        const cols = Math.min(values[0].length, d.numCols);
+
+        if (values.length !== d.numRows || values[0].length !== d.numCols) {
+          res.warnings.push(`${src.name} ${m.src}(${values.length}×${values[0].length}) ↔ ${m.dst}(${d.numRows}×${d.numCols}) 크기 불일치 → 겹치는 부분만 사용`);
+        }
+
+        const data = values.slice(0, rows).map(r => r.slice(0, cols));
+        data.forEach((r, i) => r.forEach((v, j) => {
+          const gr = grid[d.row - 1 + i];
+          if (gr && d.col - 1 + j < g.numCols) gr[d.col - 1 + j] = v;
+        }));
+        res.jobs.push({
+          row: d.row, col: d.col, values: data,
+          key: src.key, short: src.short, srcName: src.name,
+          srcRow: s.row, srcCol: s.col, cleared: false,
+        });
+      });
+
+      info.mmdd = sheet.getName().trim();
+      res.dates[src.key] = info.mmdd;
+    } catch (e) {
+      info.note = '오류: ' + e.message;
+      res.errors.push(`${src.name}: ${e.message}`);
+    }
+  });
+  return res;
+}
+
+/* 최신 날짜(MMDD) 시트 찾기 */
+function findLatestDateSheet(ss) {
+  const today = Number(Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MMdd'));
+  const re = /^(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$/;
+
+  let best = null, bestN = -1;   // 오늘(또는 어제) 이전 중 가장 최신
+  let maxAll = null, maxN = -1;  // 연초 대비용: 전체 중 가장 큰 날짜
+
+  ss.getSheets().forEach(sh => {
+    const name = sh.getName().trim();
+    if (!re.test(name)) return;
+    const n = Number(name);
+
+    if (n > maxN) { maxN = n; maxAll = sh; }
+
+    const inRange = CONFIG.INCLUDE_TODAY ? n <= today : n < today;
+    if (inRange && n > bestN) { bestN = n; best = sh; }
+  });
+
+  // 1월 초처럼 오늘 이전 시트가 없으면 전체 중 최신(작년 12월)을 사용
+  return best || maxAll;
+}
+
+/* ═════════════ ② 분배 테스트 (생산일지 모음 기준) ═════════════ */
+function distributeTest() {
+  runTest(() => {
+    const dates = loadSavedDates();
+    const done = loadDoneDates();
+    const grid = getSummarySheet().getRange(CONFIG.GRID).getValues();
+    return {
+      plan: buildDistributionPlan(grid, dates, done),
+      meta: {
+        mode: '생산일지 모음 기준',
+        done,
+        sources: CONFIG.SOURCES.map(s => ({
+          key: s.key, short: s.short, name: s.name, mmdd: dates[s.key] || '',
+          note: dates[s.key] ? '불러오기 때 저장된 날짜' : '저장된 날짜 없음',
+        })),
+      },
+    };
+  });
+}
+
+/* ═════════════ ③ 분배 테스트 (날짜 지정) ═════════════ */
+function distributeTestByDate() {
+  const ymd = promptYmd('분배 테스트 (날짜 지정)',
+    '테스트할 날짜를 YYYY-MM-DD 형식으로 입력하세요.\n예) 2026-09-10\n\n※ 생산일지 모음 시트는 변경되지 않습니다.');
+  if (!ymd) return;
+
+  runTest(() => {
+    const res = readSources(ss => findSheetByName(ss, ymd.mmdd));
+    // 날짜 지정 테스트는 조회 성격이므로 '이미 배분됨' 건너뛰기를 적용하지 않음 (경고로만 표시)
+    const plan = buildDistributionPlan(res.grid, res.dates, {});
+
+    const done = loadDoneDates();
+    const extra = yearWarning(ymd).concat(res.warnings);
+    CONFIG.SOURCES.forEach(s => {
+      if (res.dates[s.key] && done[s.key] === res.dates[s.key]) {
+        extra.push(`${s.name} ${mmddLabel(res.dates[s.key])} 자료는 이미 배분 기록이 있습니다. (④ 실행 시에는 건너뜁니다)`);
+      }
+    });
+
+    plan.errors = res.errors.concat(plan.errors);
+    plan.warnings = extra.concat(plan.warnings);
+
+    return {
+      plan,
+      meta: { mode: `날짜 지정 · ${ymd.text} (${ymd.dow})`, done, sources: res.info },
+    };
+  });
+}
+
+/* 테스트 공통 실행 (진행 알림 + 결과 시트 작성) */
+function runTest(build) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ss.toast('원부재료 스프레드시트를 확인하는 중입니다. (30초~1분)', '분배 테스트', -1);
+  try {
+    const out = build();
+    writeTestResult(out.plan, out.meta);
+    ss.toast("'테스트 결과' 시트를 확인하세요.", '분배 테스트 완료', 5);
+  } catch (e) {
+    ss.toast('중단됨', '분배 테스트', 2);
+    const ui = SpreadsheetApp.getUi();
+    ui.alert('분배 테스트 실패', e.message, ui.ButtonSet.OK);
+  }
+}
+
+/* ═════════════ ④ 원부재료 분배 실행 ═════════════ */
+function distributeRun() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let plan, dates, done;
+
+  ss.toast('원부재료 스프레드시트를 확인하는 중입니다. (30초~1분)', '분배 실행', -1);
+  try {
+    dates = loadSavedDates();
+    done = loadDoneDates();
+    plan = buildDistributionPlan(getSummarySheet().getRange(CONFIG.GRID).getValues(), dates, done);
+  } catch (e) {
+    ss.toast('중단됨', '분배 실행', 2);
+    ui.alert('분배 실행 실패', e.message, ui.ButtonSet.OK);
+    return;
+  }
+  ss.toast('확인 완료', '분배 실행', 2);
+
+  const toWrite = plan.tasks.filter(t => t.write);
+  const overwrite = toWrite.filter(t => t.status === '덮어쓰기').length;
+  const dateText = CONFIG.SOURCES.map(s => {
+    const d = dates[s.key];
+    const mark = d && done[s.key] === d ? ' (이미 배분됨 → 건너뜀)' : '';
+    return `${s.name}: ${d ? mmddLabel(d) : '없음'}${mark}`;
+  }).join('\n');
+
+  let msg = '[기준 날짜]\n' + dateText + `\n\n입력 예정: ${toWrite.length}칸 (그중 덮어쓰기 ${overwrite}칸)`;
+  if (plan.warnings.length) msg += '\n\n⚠ 경고\n' + plan.warnings.map(w => '• ' + w).join('\n');
+  if (plan.errors.length)   msg += '\n\n❌ 오류 (해당 항목은 제외)\n' + plan.errors.map(e => '• ' + e).join('\n');
+
+  if (!toWrite.length) {
+    ui.alert('원부재료 분배', msg + '\n\n새로 입력할 내용이 없습니다.', ui.ButtonSet.OK);
+    return;
+  }
+
+  msg += '\n\n진행할까요? (칸별 상세 내용은 ② 테스트에서 확인)';
+  if (ui.alert('원부재료 분배 실행', msg, ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+
+  const failed = [], badGroup = {};
+  toWrite.forEach(t => {
+    try {
+      t.sheet.getRange(t.a1).setValue(t.newVal);
+    } catch (e) {
+      failed.push(`• ${t.name} ${t.sheetName}!${t.a1}: ${e.message}`);
+      badGroup[t.group] = true;
+    }
+  });
+  plan.tasks.forEach(t => { if (t.status === '오류') badGroup[t.group] = true; });
+
+  // 배분 기록 저장 (오류·실패 없는 원본만)
+  const marked = [];
+  CONFIG.SOURCES.forEach(s => {
+    const mmdd = dates[s.key];
+    if (!mmdd || badGroup[s.short]) return;
+    done[s.key] = mmdd;
+    marked.push(`• ${s.name}: ${mmddLabel(mmdd)}`);
+  });
+  saveDoneDates(done);
+
+  let doneMsg = `${toWrite.length - failed.length}칸 입력했습니다.`;
+  if (failed.length) doneMsg += '\n\n❌ 입력 실패\n' + failed.join('\n');
+  if (marked.length) doneMsg += '\n\n[배분 기록 저장]\n' + marked.join('\n') + '\n\n※ 같은 날짜 자료는 다시 배분하지 않습니다.';
+  ui.alert('완료', doneMsg, ui.ButtonSet.OK);
+}
+
+/* ═════════════ 배분 기록 보기 / 지우기 ═════════════ */
+function resetDistributionRecord() {
+  const ui = SpreadsheetApp.getUi();
+  const done = loadDoneDates();
+  const lines = CONFIG.SOURCES
+    .map(s => `• ${s.name}: ${done[s.key] ? mmddLabel(done[s.key]) : '없음'}`).join('\n');
+
+  const msg =
+    '[배분 기록이란?]\n' +
+    '④ 원부재료 분배 실행을 마친 날짜를 이 스프레드시트에 메모해 두는 것입니다.\n' +
+    '같은 날짜 자료를 두 번 배분하는 사고를 막는 용도입니다.\n\n' +
+    '※ 이 기록을 지워도 원부재료 스프레드시트에 이미 입력된 숫자는\n' +
+    '   하나도 바뀌지 않습니다. 셀을 비우거나 되돌리는 기능이 아닙니다.\n' +
+    '※ 생산일지를 정정해서 같은 날짜를 다시 배분해야 할 때만 지우세요.\n\n' +
+    '[현재 기록]\n' + lines + '\n\n' +
+    '기록을 모두 지울까요?';
+
+  if (ui.alert('배분 기록 보기 / 지우기', msg, ui.ButtonSet.YES_NO) === ui.Button.YES) {
+    PropertiesService.getDocumentProperties().deleteProperty(DIST.DONE_KEY);
+    ui.alert('배분 기록을 지웠습니다.\n(원부재료 스프레드시트의 값은 그대로입니다)');
+  }
+}
+
+/* ═════════════ 도움말 ═════════════ */
+function showHelp() {
+  const html = HtmlService.createHtmlOutput(HELP_HTML).setWidth(800).setHeight(640);
+  SpreadsheetApp.getUi().showModalDialog(html, '생산일지 자동화 — 도움말');
+}
+
+const HELP_HTML = `
+<style>
+  body { font-family: 'Malgun Gothic', sans-serif; font-size: 13px; color: #222; line-height: 1.65; padding: 4px 8px; }
+  h2 { font-size: 15px; color: #1f3864; border-bottom: 2px solid #1f3864; padding-bottom: 4px; margin: 22px 0 10px; }
+  h3 { font-size: 13.5px; color: #1f3864; margin: 16px 0 4px; }
+  p, li { margin: 3px 0; }
+  ul { margin: 4px 0 4px 4px; padding-left: 18px; }
+  .flow { background: #f0f4fb; border-left: 4px solid #1f3864; padding: 10px 14px; margin: 8px 0; }
+  .warn { background: #fff3e0; border-left: 4px solid #e65100; padding: 10px 14px; margin: 8px 0; }
+  .safe { background: #e8f5e9; border-left: 4px solid #2e7d32; padding: 10px 14px; margin: 8px 0; }
+  table { border-collapse: collapse; margin: 6px 0; width: 100%; }
+  th, td { border: 1px solid #d0d0d0; padding: 5px 8px; text-align: left; vertical-align: top; }
+  th { background: #1f3864; color: #fff; }
+  code { background: #eee; padding: 1px 4px; border-radius: 3px; }
+</style>
+
+<h2>전체 흐름</h2>
+<div class="flow">
+  <b>1단계 — 모으기</b> : 제품 / 반제품 / 탄산 생산일지의 그날 시트 → <b>'생산일지 모음'</b> 시트<br>
+  <b>2단계 — 나누기</b> : '생산일지 모음' → <b>원부재료별 스프레드시트</b>의 해당 월 시트, 해당 일자 행<br><br>
+  실제 입력은 <b>①(또는 ①-2)</b> 와 <b>④</b> 두 개뿐이고, 나머지는 확인용입니다.
+</div>
+
+<h2>메뉴별 설명</h2>
+
+<h3>① 생산일지 모음 불러오기 (최신 날짜)</h3>
+<p>평소에 쓰는 기능입니다. 각 생산일지에서 <b>가장 최근 날짜 시트</b>를 알아서 찾아 '생산일지 모음'에 채웁니다.</p>
+<ul>
+  <li>값과 함께 <b>원본별 기준 날짜</b>가 저장됩니다. ②④ 가 이 날짜로 행을 찾습니다.</li>
+  <li>원본마다 최신 날짜가 다를 수 있습니다(예: 탄산만 미생산). 그럴 땐 확인 창에 경고가 뜹니다.</li>
+  <li>날짜 시트를 하나도 못 찾으면 <b>아무것도 입력하지 않고</b> 중단합니다.</li>
+</ul>
+
+<h3>①-2 생산일지 모음 불러오기 (날짜 지정)</h3>
+<p>날짜를 직접 지정해서 불러옵니다. 지난 날짜를 다시 가져오거나, "그날 진짜 생산이 있었나?"를 확인할 때 씁니다.</p>
+<ul>
+  <li>먼저 <b>'불러오기 테스트 결과'</b> 시트에 미리보기를 만들고, 확인 창에서 <b>[예]</b>를 눌러야 실제로 입력됩니다.</li>
+  <li>[아니오]를 누르면 미리보기 시트만 남습니다. 순수 테스트로 쓸 수 있습니다.</li>
+  <li>지정한 날짜 시트가 없는 원본은 <b>미생산</b>으로 보고, 모음의 해당 영역을 <b>비웁니다</b>. 그 원본은 ④에서 자동으로 빠집니다.</li>
+</ul>
+
+<h3>② 분배 테스트 (생산일지 모음 기준)</h3>
+<p>지금 모음에 들어있는 값이 <b>④를 실행하면 어디에 어떻게 들어가는지</b>를 '테스트 결과' 시트로 보여줍니다. 실제 입력은 없습니다. ④와 동일한 조건으로 계산하므로, ④ 전에 한 번 보는 것을 권합니다.</p>
+
+<h3>③ 분배 테스트 (날짜 지정)</h3>
+<p>모음 시트를 건드리지 않고, 지정한 날짜의 생산일지를 직접 읽어 분배 결과를 미리 봅니다. 순수 조회용입니다.</p>
+
+<h3>④ 원부재료 분배 실행</h3>
+<p>실제로 각 원부재료 스프레드시트에 값을 씁니다.</p>
+<ul>
+  <li>빈칸 · <b>0</b> · 오류값(#N/A 등) · 수식이 들어있는 셀은 <b>건드리지 않습니다</b>.</li>
+  <li>이미 같은 값이 있으면 그냥 둡니다.</li>
+  <li>성공하면 원본별로 <b>배분 기록</b>을 남깁니다.</li>
+</ul>
+
+<h3>배분 기록 보기 / 지우기</h3>
+<div class="safe">
+  <b>셀을 지우는 기능이 아닙니다.</b> ④를 마친 날짜를 이 스프레드시트에 메모해 두었다가,
+  같은 날짜를 또 배분하려 하면 자동으로 건너뛰게 하는 용도입니다.<br><br>
+  <b>지워도 원부재료 스프레드시트의 숫자는 하나도 바뀌지 않습니다.</b>
+  생산일지를 정정해서 같은 날짜를 다시 배분해야 할 때만 지우세요.
+</div>
+
+<h2>상태 표시 읽는 법</h2>
+<table>
+  <tr><th>상태</th><th>뜻</th></tr>
+  <tr><td>입력</td><td>대상 셀이 비어 있어 새로 씁니다.</td></tr>
+  <tr><td>덮어쓰기 / 변경</td><td>기존 값이 있는데 다른 값으로 바꿉니다. <b>가장 주의해서 볼 항목</b>입니다.</td></tr>
+  <tr><td>동일</td><td>값이 같아서 아무것도 하지 않습니다.</td></tr>
+  <tr><td>비움</td><td>(불러오기 전용) 원본이 비어 있어 모음의 기존 값이 지워집니다.</td></tr>
+  <tr><td>건너뜀(빈칸)</td><td>모음 값이 비어 있어 원부재료 시트의 기존 값을 그대로 둡니다.</td></tr>
+  <tr><td>건너뜀(0)</td><td>모음 값이 0입니다. 생산이 없었다는 뜻이므로 입력하지 않습니다.</td></tr>
+  <tr><td>건너뜀(수식 셀)</td><td>대상 칸이 수식이라 덮어쓰지 않습니다.</td></tr>
+  <tr><td>건너뜀(원본 없음)</td><td>그 생산일지의 그날 자료가 없습니다. (미생산)</td></tr>
+  <tr><td>건너뜀(이미 배분됨)</td><td>같은 날짜를 이미 배분했습니다. 다시 하려면 배분 기록을 지우세요.</td></tr>
+  <tr><td>오류</td><td>월 시트나 일자 행을 못 찾았습니다. 해당 항목만 빠집니다.</td></tr>
+</table>
+
+<h2>알아두면 좋은 것</h2>
+<div class="warn">
+  <b>원본마다 날짜가 다를 수 있습니다.</b> 9월 11일에 ①을 돌려도 탄산 생산이 없었으면
+  탄산은 9월 10일 시트를 집어옵니다. 이때 탄산 값은 <b>9월 10일 행</b>으로 들어가지 11일 행으로 가지 않으며,
+  이미 배분했다면 배분 기록 때문에 건너뜁니다. 확실히 하려면 <b>①-2</b>로 날짜를 찍어서 확인하세요.
+</div>
+<div class="warn">
+  <b>시트 이름이 곧 날짜입니다.</b> 생산일지 시트 이름은 <code>MMDD</code>(예: <code>0911</code>) 형식이어야 하며,
+  이름이 잘못되면 엉뚱한 행에 들어갑니다.
+</div>
+<div class="warn">
+  <b>1월 초 주의.</b> 새해 첫 며칠은 올해 시트가 없어 작년 12월 시트를 집어올 수 있습니다.
+  연초에는 ①-2로 날짜를 지정해 쓰는 편이 안전합니다.
+</div>
+`;
+
+/* ═════════════ 분배 계획 만들기 (②③④ 공통 · 읽기만 함) ═════════════ */
+function buildDistributionPlan(grid, dates, done) {
+  done = done || {};
+
+  const getSum = a1 => {
+    const p = parseA1Range(a1);
+    const row = grid[p.row - 1];
+    return row && row[p.col - 1] !== undefined ? row[p.col - 1] : '';
+  };
+  const srcOf = key => CONFIG.SOURCES.find(s => s.key === key) || { key, short: key, name: key };
+
+  const tasks = [], warnings = [], errors = [], skipped = {}, already = {};
+
+  const items = DIST.ITEMS.map(it => Object.assign({}, it, {
+    cells: Object.keys(it.cols).map(c => ({ from: c + it.row, to: it.cols[c], label: SUM_LABELS[c] })),
+  }));
+  items.push(Object.assign({}, DIST.GLUE, { cells: buildGlueCells(getSum, warnings) }));
+
+  items.forEach(it => {
+    const src = srcOf(it.src);
+    const base = {
+      group: src.short, name: it.name, id: it.id, gid: '', sheet: null, sheetName: '',
+      a1: '', from: '', label: '', oldVal: '', newVal: '', status: '', note: '', write: false,
+    };
+
+    const mmdd = dates[it.src];
+    if (!mmdd) {
+      (skipped[src.name] = skipped[src.name] || []).push(it.name);
+      tasks.push(Object.assign(base, { status: '건너뜀(원본 없음)', note: `${src.name} 데이터 없음` }));
+      return;
+    }
+
+    if (DIST.SKIP_DISTRIBUTED && done[it.src] === mmdd) {
+      (already[src.name] = already[src.name] || { mmdd, names: [] }).names.push(it.name);
+      tasks.push(Object.assign(base, {
+        sheetName: `${Number(mmdd.slice(0, 2))}월`,
+        status: '건너뜀(이미 배분됨)',
+        note: `${src.name} ${mmddLabel(mmdd)} 자료는 이미 배분함`,
+      }));
+      return;
+    }
+
+    const day = Number(mmdd.slice(2));
+    base.sheetName = `${Number(mmdd.slice(0, 2))}월`;
+
+    try {
+      const sheet = SpreadsheetApp.openById(it.id).getSheetByName(base.sheetName);
+      if (!sheet) throw new Error(`'${base.sheetName}' 시트가 없습니다.`);
+
+      const range = sheet.getRange(DIST.FORMS[it.form]);
+      const vals = range.getValues();
+      const formulas = range.getFormulas();
+      const idx = vals.findIndex(r => dayOf(r[0]) === day);
+      if (idx < 0) throw new Error(`'${base.sheetName}' A열에서 ${day}일 행을 찾지 못했습니다.`);
+
+      const row = range.getRow() + idx;
+      const gid = sheet.getSheetId();
+
+      it.cells.forEach(c => {
+        const ci = colToNum(c.to) - range.getColumn();
+        const newVal = getSum(c.from);
+        const oldVal = vals[idx][ci];
+
+        let status, note = c.note || '';
+        if (isBlank(newVal) && !DIST.WRITE_BLANK) status = '건너뜀(빈칸)';
+        else if (DIST.SKIP_ZERO && isZero(newVal)) {
+          status = '건너뜀(0)';
+          note = note || '모음 값이 0이라 입력하지 않음';
+        }
+        else if (isErrorValue(newVal))            status = '건너뜀(오류값)';
+        else if (formulas[idx][ci])               status = '건너뜀(수식 셀)';
+        else if (sameValue(oldVal, newVal))       status = '동일';
+        else                                      status = isBlank(oldVal) ? '입력' : '덮어쓰기';
+
+        tasks.push(Object.assign({}, base, {
+          sheet, gid, a1: c.to + row, from: c.from, label: c.label,
+          oldVal, newVal, status, note,
+          write: status === '입력' || status === '덮어쓰기',
+        }));
+      });
+    } catch (e) {
+      errors.push(`${it.name}: ${e.message}`);
+      tasks.push(Object.assign(base, { status: '오류', note: e.message }));
+    }
+  });
+
+  Object.keys(skipped).forEach(name => warnings.push(`${name} 데이터가 없어 건너뜀 → ${skipped[name].join(', ')}`));
+  Object.keys(already).forEach(name => {
+    const a = already[name];
+    warnings.push(`${name} ${mmddLabel(a.mmdd)} 자료는 이미 배분해서 건너뜀 → ${a.names.join(', ')}`);
+  });
+  return { tasks, warnings, errors };
+}
+
+/* GLUE: 생산 제품을 판별해서 F15의 입력 열 결정 */
+function buildGlueCells(getSum, warnings) {
+  const g = DIST.GLUE;
+  const cells = [{ from: g.inCell, to: 'B', label: '입고량' }];
+
+  const made = g.products.filter(p => p.checks.some(a1 => hasValue(getSum(a1))));
+  if (made.length === 1) {
+    cells.push({
+      from: g.petCell, to: made[0].col, label: `사용량 (${made[0].label})`,
+      note: `${made[0].label} 생산 감지 → ${made[0].col}열`,
+    });
+  } else if (hasValue(getSum(g.petCell))) {
+    warnings.push(made.length === 0
+      ? `GLUE: ${g.petCell}에 사용량이 있지만 생산 제품(1.5L/0.5L/0.33L)을 찾지 못해 건너뜀`
+      : `GLUE: 생산 제품이 여러 개(${made.map(p => p.label).join(', ')})로 감지되어 ${g.petCell} 건너뜀`);
+  }
+
+  cells.push({ from: g.cupCell, to: g.cupCol, label: '사용량 (0.12L)' });
+  return cells;
+}
+
+/* ═════════════ '테스트 결과' 시트 작성 (분배) ═════════════ */
+function writeTestResult(plan, meta) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const BS = SpreadsheetApp.BorderStyle;
+  const W = 11; // A~K
+  const done = meta.done || {};
+
+  const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  const sh = makeResultSheet(
+    DIST.RESULT_SHEET, '원부재료 분배 테스트 결과',
+    `모드: ${meta.mode}     ·     생성: ${now}     ·     ※ 테스트 결과이며, 실제 원부재료 스프레드시트에는 아무것도 입력되지 않았습니다.`,
+    [45, 60, 160, 60, 80, 110, 75, 95, 95, 120, 320]);
+
+  let r = 4;
+
+  // ── 기준 날짜
+  resultSection(sh, r, '■ 기준 날짜', W); r++;
+  const srcRows = [['구분', '생산일지', '사용 시트', '분배 날짜', '배분 기록', '비고']]
+    .concat(meta.sources.map(s => [
+      s.short, s.name, s.mmdd || '-', s.mmdd ? mmddLabel(s.mmdd) : '-',
+      doneLabel(done[s.key], s.mmdd), s.note || '',
+    ]));
+  srcRows.forEach((row, i) => {
+    sh.getRange(r + i, 2, 1, 5).setValues([row.slice(0, 5)]);
+    sh.getRange(r + i, 7, 1, 5).merge().setValue(row[5]);
+  });
+  sh.getRange(r, 2, srcRows.length, 10)
+    .setBorder(true, true, true, true, true, true, '#d0d0d0', BS.SOLID).setVerticalAlignment('middle');
+  sh.getRange(r, 2, srcRows.length, 5).setHorizontalAlignment('center');
+  resultHeaderStyle(sh.getRange(r, 2, 1, 10));
+  meta.sources.forEach((s, i) => {
+    if (!s.mmdd) sh.getRange(r + 1 + i, 2, 1, 10).setFontColor('#c62828');
+    else if (done[s.key] === s.mmdd) sh.getRange(r + 1 + i, 6).setFontColor('#e65100').setFontWeight('bold');
+  });
+  r += srcRows.length + 1;
+
+  // ── 요약 카드
+  resultSection(sh, r, '■ 요약', W); r++;
+  const cnt = countStatus(plan.tasks);
+  const compared = cnt['동일'] + cnt['덮어쓰기'];
+  const compareText = compared
+    ? `${cnt['동일']} / ${compared}칸 일치 (${Math.round(cnt['동일'] / compared * 100)}%)`
+    : '비교할 기존 값 없음';
+  resultCards(sh, r, [
+    [2, 2, '입력',           `${cnt['입력']}칸`,     '#e8f5e9', '#2e7d32'],
+    [4, 2, '덮어쓰기',       `${cnt['덮어쓰기']}칸`, '#fff3e0', '#e65100'],
+    [6, 2, '동일',           `${cnt['동일']}칸`,     '#e3f2fd', '#1565c0'],
+    [8, 2, '건너뜀',         `${cnt['건너뜀']}칸`,   '#f5f5f5', '#757575'],
+    [10, 1, '오류',          `${cnt['오류']}건`,     '#ffebee', '#c62828'],
+    [11, 1, '기존 값과 비교', compareText,            '#ede7f6', '#4527a0', 12],
+  ]);
+  r += 3;
+
+  // ── 확인 필요 (오류/경고)
+  r = writeMessages(sh, r, W, plan.errors, plan.warnings);
+
+  // ── 상세 내역
+  resultSection(sh, r, '■ 상세 내역     (입력 셀 클릭 → 해당 스프레드시트로 이동 · 헤더 필터로 상태별 보기 가능)', W); r++;
+  const head = ['No', '구분', '원부재료', '시트', '입력 셀', '항목', '모음 셀', '기존 값', '입력 값', '상태', '비고'];
+  const hr = r;
+  sh.getRange(hr, 1, 1, W).setValues([head]);
+  resultHeaderStyle(sh.getRange(hr, 1, 1, W));
+  sh.setRowHeight(hr, 30);
+
+  const n = plan.tasks.length;
+  if (n) {
+    const body = sh.getRange(hr + 1, 1, n, W);
+    body.setValues(plan.tasks.map((t, i) =>
+      [i + 1, t.group, t.name, t.sheetName, '', t.label, t.from, t.oldVal, t.newVal, t.status, t.note]));
+
+    const STYLE = { // [배경, 글자, 상태 글자]
+      '입력':     ['#e8f5e9', '#000000', '#2e7d32'],
+      '덮어쓰기': ['#fff3e0', '#000000', '#e65100'],
+      '동일':     ['#ffffff', '#000000', '#1565c0'],
+      '건너뜀':   ['#ffffff', '#9e9e9e', '#9e9e9e'],
+      '오류':     ['#ffebee', '#000000', '#c62828'],
+    };
+    const bgs = [], fgs = [];
+    plan.tasks.forEach(t => {
+      const s = STYLE[t.status.split('(')[0]] || STYLE['동일'];
+      bgs.push(Array(W).fill(s[0]));
+      const row = Array(W).fill(s[1]);
+      row[9] = s[2];
+      fgs.push(row);
+    });
+    body.setBackgrounds(bgs).setFontColors(fgs).setVerticalAlignment('middle')
+      .setBorder(true, true, true, true, true, true, '#d9d9d9', BS.SOLID);
+
+    const colA1 = c => sh.getRange(hr + 1, c, n, 1).getA1Notation();
+    sh.getRangeList([1, 2, 4, 5, 6, 7, 10].map(colA1)).setHorizontalAlignment('center');
+    sh.getRangeList([8, 9].map(colA1)).setHorizontalAlignment('right');
+    sh.getRangeList([3, 10].map(colA1)).setFontWeight('bold');
+
+    // 입력 셀 → 원부재료 스프레드시트 바로가기 링크
+    sh.getRange(hr + 1, 5, n, 1).setRichTextValues(plan.tasks.map(t => {
+      const b = SpreadsheetApp.newRichTextValue().setText(t.a1 || '-');
+      if (t.a1) b.setLinkUrl(`https://docs.google.com/spreadsheets/d/${t.id}/edit#gid=${t.gid}&range=${t.a1}`);
+      return [b.build()];
+    }));
+
+    // 원부재료가 바뀌는 지점에 굵은 구분선
+    plan.tasks.forEach((t, i) => {
+      if (i > 0 && t.name !== plan.tasks[i - 1].name) {
+        sh.getRange(hr + 1 + i, 1, 1, W).setBorder(true, null, null, null, null, null, '#7f7f7f', BS.SOLID_MEDIUM);
+      }
+    });
+
+    sh.getRange(hr, 1, n + 1, W).createFilter();
+  }
+
+  ss.setActiveSheet(sh);
+  sh.setActiveSelection('A1');
+}
+
+/* ═════════════ '불러오기 테스트 결과' 시트 작성 ═════════════ */
+function writeImportTestResult(res, ymd, applied) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const BS = SpreadsheetApp.BorderStyle;
+  const W = 10; // A~J
+
+  const cur = getSummarySheet().getRange(CONFIG.GRID).getValues();
+  const g = parseA1Range(CONFIG.GRID);
+
+  // 시트를 못 찾은 원본 → 비울 영역도 목록에 포함
+  const jobs = res.jobs.slice();
+  if (CONFIG.CLEAR_MISSING) {
+    res.missing.forEach(src => src.maps.forEach(m => {
+      const d = parseA1Range(m.dst), s = parseA1Range(m.src);
+      jobs.push({
+        row: d.row, col: d.col,
+        values: Array.from({ length: d.numRows }, () => Array(d.numCols).fill('')),
+        key: src.key, short: src.short, srcName: src.name,
+        srcRow: s.row, srcCol: s.col, cleared: true,
+      });
+    }));
+  }
+
+  // ── 셀 단위 비교
+  const rows = [];
+  const cnt = { '입력': 0, '변경': 0, '비움': 0, '동일': 0, '빈칸': 0 };
+  jobs.forEach(j => {
+    j.values.forEach((vals, i) => vals.forEach((v, k) => {
+      const gr = j.row - 1 + i, gc = j.col - 1 + k;
+      if (gr >= g.numRows || gc >= g.numCols) return;
+
+      const oldVal = cur[gr][gc];
+      if (isBlank(v) && isBlank(oldVal)) { cnt['빈칸']++; return; }
+
+      let status, note = '';
+      if (sameValue(oldVal, v))   status = '동일';
+      else if (isBlank(v))      { status = '비움'; note = j.cleared ? '해당 날짜 시트 없음(미생산) → 모음 값 지움' : '원본이 비어 있어 모음의 기존 값이 지워짐'; }
+      else if (isBlank(oldVal))   status = '입력';
+      else                      { status = '변경'; note = '모음의 기존 값을 덮어씀'; }
+      if (!note && DIST.SKIP_ZERO && isZero(v)) note = '값이 0 → ④ 배분 때는 입력하지 않음';
+      cnt[status]++;
+
+      rows.push([
+        j.short, j.srcName, res.dates[j.key] || '-',
+        j.cleared ? '-' : colName(j.srcCol + k) + (j.srcRow + i),
+        colName(gc + 1) + (gr + 1),
+        oldVal, v, status, note,
+      ]);
+    }));
+  });
+
+  const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  const sh = makeResultSheet(
+    CONFIG.IMPORT_RESULT_SHEET, '생산일지 모음 불러오기 결과',
+    `대상 날짜: ${ymd.text} (${ymd.dow})     ·     생성: ${now}     ·     상태: ${applied ? '입력 완료' : '미리보기 — 아직 입력하지 않았습니다.'}`,
+    [45, 60, 150, 80, 80, 80, 110, 110, 90, 300]);
+
+  let r = 4;
+
+  // ── 대상 시트
+  resultSection(sh, r, '■ 대상 시트', W); r++;
+  const srcRows = [['구분', '생산일지', '요청 날짜', '찾은 시트', '상태', '비고']]
+    .concat(res.info.map(s => [
+      s.short, s.name, ymd.mmdd, s.mmdd || '-',
+      s.mmdd ? '찾음' : (s.note.indexOf('오류') === 0 ? '오류' : '시트 없음'),
+      s.note || '',
+    ]));
+  srcRows.forEach((row, i) => {
+    sh.getRange(r + i, 2, 1, 5).setValues([row.slice(0, 5)]);
+    sh.getRange(r + i, 7, 1, 4).merge().setValue(row[5]);
+  });
+  sh.getRange(r, 2, srcRows.length, 9)
+    .setBorder(true, true, true, true, true, true, '#d0d0d0', BS.SOLID).setVerticalAlignment('middle');
+  sh.getRange(r, 2, srcRows.length, 5).setHorizontalAlignment('center');
+  resultHeaderStyle(sh.getRange(r, 2, 1, 9));
+  res.info.forEach((s, i) => {
+    if (!s.mmdd) sh.getRange(r + 1 + i, 2, 1, 9).setFontColor('#c62828').setBackground('#ffebee');
+  });
+  r += srcRows.length + 1;
+
+  const notFound = res.info.filter(s => !s.mmdd).length;
+
+  // ── 요약 카드
+  resultSection(sh, r, '■ 요약', W); r++;
+  resultCards(sh, r, [
+    [2, 2, '입력',         `${cnt['입력']}칸`,   '#e8f5e9', '#2e7d32'],
+    [4, 2, '변경',         `${cnt['변경']}칸`,   '#fff3e0', '#e65100'],
+    [6, 1, '비움',         `${cnt['비움']}칸`,   '#ffebee', '#c62828'],
+    [7, 1, '동일',         `${cnt['동일']}칸`,   '#e3f2fd', '#1565c0'],
+    [8, 1, '빈칸→빈칸',    `${cnt['빈칸']}칸`,   '#f5f5f5', '#757575'],
+    [9, 2, '시트 못 찾음', `${notFound}개 원본`, '#ede7f6', '#4527a0', 13],
+  ]);
+  r += 3;
+
+  // ── 확인 필요
+  const extra = res.info.filter(s => !s.mmdd)
+    .map(s => `${s.name}: ${ymd.mmdd} 시트가 없습니다. 해당 날짜에 생산이 없었을 가능성이 높습니다.`);
+  r = writeMessages(sh, r, W, res.errors, extra.concat(res.warnings));
+
+  // ── 상세 내역
+  resultSection(sh, r, '■ 상세 내역     (빈칸 → 빈칸인 셀은 생략 · 헤더 필터로 상태별 보기 가능)', W); r++;
+  const head = ['No', '구분', '생산일지', '원본 시트', '원본 셀', '모음 셀', '기존 값', '불러올 값', '상태', '비고'];
+  const hr = r;
+  sh.getRange(hr, 1, 1, W).setValues([head]);
+  resultHeaderStyle(sh.getRange(hr, 1, 1, W));
+  sh.setRowHeight(hr, 30);
+
+  const n = rows.length;
+  if (n) {
+    const body = sh.getRange(hr + 1, 1, n, W);
+    body.setValues(rows.map((row, i) => [i + 1].concat(row)));
+
+    const STYLE = {
+      '입력': ['#e8f5e9', '#000000', '#2e7d32'],
+      '변경': ['#fff3e0', '#000000', '#e65100'],
+      '비움': ['#ffebee', '#000000', '#c62828'],
+      '동일': ['#ffffff', '#000000', '#1565c0'],
+    };
+    const bgs = [], fgs = [];
+    rows.forEach(row => {
+      const s = STYLE[row[7]] || STYLE['동일'];
+      bgs.push(Array(W).fill(s[0]));
+      const f = Array(W).fill(s[1]);
+      f[8] = s[2];
+      fgs.push(f);
+    });
+    body.setBackgrounds(bgs).setFontColors(fgs).setVerticalAlignment('middle')
+      .setBorder(true, true, true, true, true, true, '#d9d9d9', BS.SOLID);
+
+    const colA1 = c => sh.getRange(hr + 1, c, n, 1).getA1Notation();
+    sh.getRangeList([1, 2, 4, 5, 6, 9].map(colA1)).setHorizontalAlignment('center');
+    sh.getRangeList([7, 8].map(colA1)).setHorizontalAlignment('right');
+    sh.getRangeList([9].map(colA1)).setFontWeight('bold');
+
+    rows.forEach((row, i) => {
+      if (i > 0 && row[0] !== rows[i - 1][0]) {
+        sh.getRange(hr + 1 + i, 1, 1, W).setBorder(true, null, null, null, null, null, '#7f7f7f', BS.SOLID_MEDIUM);
+      }
+    });
+
+    sh.getRange(hr, 1, n + 1, W).createFilter();
+  } else {
+    sh.getRange(hr + 1, 1).setValue('변경할 내용이 없습니다. (모든 대상 셀이 이미 같거나 비어 있습니다)');
+    sh.getRange(hr + 1, 1, 1, W).merge().setFontColor('#9e9e9e').setHorizontalAlignment('center');
+  }
+
+  ss.setActiveSheet(sh);
+  sh.setActiveSelection('A1');
+  return { sh, W, cnt, notFound, total: n };
+}
+
+/* ═════════════ 결과 시트 공통 서식 ═════════════ */
+function makeResultSheet(name, title, subtitle, widths) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const W = widths.length;
+
+  const old = ss.getSheetByName(name);
+  if (old) ss.deleteSheet(old);
+  const sh = ss.insertSheet(name, ss.getNumSheets());
+  sh.setHiddenGridlines(true);
+  widths.forEach((w, i) => sh.setColumnWidth(i + 1, w));
+
+  sh.getRange(1, 1).setValue('  ' + title);
+  sh.getRange(1, 1, 1, W).merge().setFontSize(16).setFontWeight('bold')
+    .setFontColor('#ffffff').setBackground('#1f3864').setVerticalAlignment('middle');
+  sh.setRowHeight(1, 42);
+
+  sh.getRange(2, 1).setValue('  ' + subtitle);
+  sh.getRange(2, 1, 1, W).merge().setFontColor('#44546a').setBackground('#d9e2f3').setVerticalAlignment('middle');
+  sh.setRowHeight(2, 26);
+
+  return sh;
+}
+
+function setResultSubtitle(sh, W, text, bg, color) {
+  sh.getRange(2, 1).setValue('  ' + text);
+  sh.getRange(2, 1, 1, W).setBackground(bg).setFontColor(color).setFontWeight('bold');
+}
+
+function resultSection(sh, row, text, W) {
+  const BS = SpreadsheetApp.BorderStyle;
+  sh.getRange(row, 1).setValue(text);
+  sh.getRange(row, 1, 1, W).merge()
+    .setFontWeight('bold').setFontSize(11).setFontColor('#1f3864').setVerticalAlignment('bottom')
+    .setBorder(null, null, true, null, null, null, '#1f3864', BS.SOLID_MEDIUM);
+  sh.setRowHeight(row, 28);
+}
+
+function resultHeaderStyle(range) {
+  return range.setBackground('#1f3864').setFontColor('#ffffff').setFontWeight('bold')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle');
+}
+
+function resultCards(sh, row, cards) {
+  const BS = SpreadsheetApp.BorderStyle;
+  cards.forEach(c => {
+    const [col, span, label, value, bg, fg, size] = c;
+    sh.getRange(row, col).setValue(label);
+    sh.getRange(row + 1, col).setValue(value);
+    if (span > 1) {
+      sh.getRange(row, col, 1, span).merge();
+      sh.getRange(row + 1, col, 1, span).merge();
+    }
+    sh.getRange(row, col, 2, span)
+      .setBackground(bg).setFontColor(fg).setFontWeight('bold')
+      .setHorizontalAlignment('center').setVerticalAlignment('middle')
+      .setBorder(true, true, true, true, null, null, '#ffffff', BS.SOLID_THICK);
+    sh.getRange(row + 1, col, 1, span).setFontSize(size || 15);
+  });
+  sh.setRowHeight(row, 24);
+  sh.setRowHeight(row + 1, 40);
+}
+
+function writeMessages(sh, r, W, errors, warnings) {
+  const msgs = (errors || []).map(m => ['❌ ' + m, '#c62828'])
+    .concat((warnings || []).map(m => ['⚠ ' + m, '#e65100']));
+  if (!msgs.length) return r;
+
+  resultSection(sh, r, '■ 확인 필요', W); r++;
+  msgs.forEach(([text, color]) => {
+    sh.getRange(r, 2).setValue(text);
+    sh.getRange(r, 2, 1, W - 1).merge().setFontColor(color);
+    r++;
+  });
+  return r + 1;
+}
+
+/* ═════════════ 공통 도우미 ═════════════ */
+function getSummarySheet() {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.TARGET_SHEET);
+  if (!sh) throw new Error(`'${CONFIG.TARGET_SHEET}' 시트를 찾을 수 없습니다.`);
+  return sh;
+}
+
+function loadSavedDates() {
+  const saved = JSON.parse(PropertiesService.getDocumentProperties().getProperty(DIST.DATE_KEY) || '{}');
+  if (!Object.keys(saved).length) {
+    throw new Error('저장된 기준 날짜가 없습니다.\n먼저 ① 또는 ①-2 불러오기를 실행하세요.');
+  }
+  return saved;
+}
+
+function loadDoneDates() {
+  return JSON.parse(PropertiesService.getDocumentProperties().getProperty(DIST.DONE_KEY) || '{}');
+}
+
+function saveDoneDates(done) {
+  PropertiesService.getDocumentProperties().setProperty(DIST.DONE_KEY, JSON.stringify(done));
+}
+
+function doneLabel(doneMmdd, curMmdd) {
+  if (!doneMmdd) return '없음';
+  return doneMmdd === curMmdd ? `${mmddLabel(doneMmdd)} · 이미 배분됨` : `${mmddLabel(doneMmdd)}까지`;
+}
+
+function findSheetByName(ss, name) {
+  return ss.getSheets().find(sh => sh.getName().trim() === name) || null;
+}
+
+function promptYmd(title, text) {
+  const ui = SpreadsheetApp.getUi();
+  const resp = ui.prompt(title, text, ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return null;
+
+  const input = resp.getResponseText().trim();
+  const ymd = parseYmd(input);
+  if (!ymd) {
+    ui.alert('날짜 형식 오류',
+      `'${input}'은(는) 올바른 날짜가 아닙니다.\nYYYY-MM-DD 형식으로 입력하세요. (예: 2026-09-10)`,
+      ui.ButtonSet.OK);
+    return null;
+  }
+  return ymd;
+}
+
+function yearWarning(ymd) {
+  const thisYear = Number(Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy'));
+  if (ymd.y === thisYear) return [];
+  return [`입력 연도(${ymd.y})가 올해(${thisYear})와 다릅니다. 시트 이름에 연도가 없어 현재 설정된 파일의 '${ymd.mmdd}' 시트를 사용했습니다.`];
+}
+
+function parseYmd(text) {
+  const m = String(text).match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (!m) return null;
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+  const dt = new Date(y, mo - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+  const pad = v => String(v).padStart(2, '0');
+  return { y, m: mo, d, mmdd: pad(mo) + pad(d), text: `${y}-${pad(mo)}-${pad(d)}`, dow: '일월화수목금토'[dt.getDay()] };
+}
+
+function parseA1Range(a1) {
+  const m = String(a1).match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/);
+  if (!m) throw new Error(`잘못된 셀 주소: ${a1}`);
+  const row = Number(m[2]), col = colToNum(m[1]);
+  const row2 = m[4] ? Number(m[4]) : row;
+  const col2 = m[3] ? colToNum(m[3]) : col;
+  return { row, col, numRows: row2 - row + 1, numCols: col2 - col + 1 };
+}
+
+function colToNum(col) {
+  return col.split('').reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0);
+}
+
+function colName(num) {
+  let s = '';
+  while (num > 0) {
+    const r = (num - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    num = Math.floor((num - 1) / 26);
+  }
+  return s;
+}
+
+function mmddLabel(mmdd) {
+  return `${Number(mmdd.slice(0, 2))}월 ${Number(mmdd.slice(2))}일`;
+}
+
+function countStatus(tasks) {
+  const c = { '입력': 0, '덮어쓰기': 0, '동일': 0, '건너뜀': 0, '오류': 0 };
+  tasks.forEach(t => {
+    const k = t.status.split('(')[0];
+    if (k in c) c[k]++;
+  });
+  return c;
+}
+
+function dayOf(v) {
+  return v instanceof Date ? v.getDate() : parseInt(v, 10);
+}
+
+function isBlank(v) {
+  return v === '' || v === null;
+}
+
+function isZero(v) {
+  if (isBlank(v) || typeof v === 'boolean' || v instanceof Date) return false;
+  const n = Number(v);
+  return !isNaN(n) && n === 0;
+}
+
+function hasValue(v) {
+  return !isBlank(v) && Number(v) !== 0;
+}
+
+function isErrorValue(v) {
+  return typeof v === 'string' && /^#(N\/A|REF!|DIV\/0!|VALUE!|NAME\?|NUM!|NULL!|ERROR!)/.test(v);
+}
+
+function sameValue(a, b) {
+  if (isBlank(a) || isBlank(b)) return isBlank(a) && isBlank(b);
+  const na = Number(a), nb = Number(b);
+  if (!isNaN(na) && !isNaN(nb)) return Math.abs(na - nb) < 1e-6;
+  return String(a).trim() === String(b).trim();
+}

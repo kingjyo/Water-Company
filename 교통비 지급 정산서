@@ -1,6 +1,20 @@
 // ═══════════════════════════════════════════
 // 교통비 정산 자동화 — Code.gs (통합본)
 // ═══════════════════════════════════════════
+//
+// [2026-10 패치]
+//  • 사람별 구간 (PERSON_ROUTE) — 김은혁: "공장 ↔ 서귀포시" (거리는 시트 기본값 그대로)
+//  • 주행거리(I열)를 코드가 매번 직접 기록 — 시트 기본(BTL·제품생산 50 / 품질 CIP 55),
+//    특이사항에 주행거리를 적으면 그 값(예: 자재 구매 30km). 예전처럼 손으로 고친 값이
+//    다음 달 다른 사람 행에 남는 일이 없음
+//  • ⛽ 유류단가 확인: 메일("X월 마감 자료 요청 및 유류단가 안내")에서 단가를 읽어 시트와 대조,
+//    다르면 바꿀지 물어봄 / 메일을 못 찾으면 확인 질문 (이번 달 확인 기록 남김)
+//  • 실행 후 자동 점검: 개인별 현황 금액·건수 합 = 합계와 같은지, 개인별 현황에 없는 이름,
+//    근무계획 "계" 행 미발견
+//  • 🛠 개인별DATA 참조 범위 통일 (메뉴, 1회) — G·H·J열 VLOOKUP을 B열 전체로
+//
+// ※ Gmail 읽기 권한: 처음 실행 시 권한 승인 창이 뜸. 회사 메일이 Gmail이 아니면
+//    FUEL_USE_GMAIL = false 로 두면 메일 대조 없이 "확인 질문"만 동작함.
 
 // ───────────────────────────────────────────
 // 외부 스프레드시트 ID 설정
@@ -14,28 +28,51 @@ const MENU_OWNER_EMAIL = 'youngjoonkim@kas.co.kr';
 // ───────────────────────────────────────────
 // 근무계획 시트 레이아웃 ★ 이름은 C5부터, A열에 "계"가 나오는 행 전까지
 // ───────────────────────────────────────────
-const WP_HEADER_ROW = 3; // 일자 헤더 행 (G3:AK3)
-const WP_NAME_START_ROW = 5; // 이름 시작 행
-const WP_END_MARK_COL = 1; // A열 — "계"가 나오면 그 위까지가 사람
-const WP_NAME_COL = 3; // C열
-const WP_DAY_START_COL = 7; // G열
-const WP_DAY_COUNT = 31; // G~AK
+const WP_HEADER_ROW = 3;      // 일자 헤더 행 (G3:AK3)
+const WP_NAME_START_ROW = 5;  // 이름 시작 행
+const WP_END_MARK_COL = 1;    // A열 — "계"가 나오면 그 위까지가 사람
+const WP_NAME_COL = 3;        // C열
+const WP_DAY_START_COL = 7;   // G열
+const WP_DAY_COUNT = 31;      // G~AK
 
 // ───────────────────────────────────────────
 // 정산 시트 레이아웃 설정
 // ───────────────────────────────────────────
-const DATA_START_ROW = 5; // 데이터 시작 행
-const TEMPLATE_ROW = 6; // 행 추가/수식 복구 시 기준이 되는 행
-const TARGET_SUM_ROW = 100; // 합계 행 목표 위치 (K100)
-const SUM_COL = 11; // K열
+const DATA_START_ROW = 5;     // 데이터 시작 행
+const TEMPLATE_ROW = 6;       // 행 추가/수식 복구 시 기준이 되는 행
+const TARGET_SUM_ROW = 100;   // 합계 행 목표 위치 (K100)
+const SUM_COL = 11;           // K열
+const DIST_COL = 9;           // I열 (주행거리)
 const DATE_FORMAT = 'm"월" d"일"'; // B열 표시 형식
-const ROUTE_TEXT = '공장 ↔ 제주시';
+const ROUTE_TEXT = '공장 ↔ 제주시'; // 기본 구간
+
+// ───────────────────────────────────────────
+// ★ 구간·주행거리 설정
+// ───────────────────────────────────────────
+// 주행거리 결정 순서: 특이사항에 적은 주행거리 > 사람별 distance > 시트 기본(SHEET_CFG.distance)
+//
+// 사람별 구간 (기본 "공장 ↔ 제주시"와 다른 사람만)
+//   distance 생략 → 시트 기본 거리 사용 (제주시청·서귀포시청 거리 차이가 작아 기본값 그대로)
+//   distance: 숫자 → 모든 시트에 그 km / { CIP: 60 } → 시트별 지정
+const PERSON_ROUTE = {
+  '김은혁': { route: '공장 ↔ 서귀포시' },
+};
+
+// ───────────────────────────────────────────
+// ★ 유류단가 확인 설정
+// ───────────────────────────────────────────
+const FUEL_SHEET_NAME = '유류단가';
+const FUEL_CELLS = { '휘발유': 'C4', '경유': 'C5', 'LPG': 'C6' }; // 전기(C7)는 메일에 없어 대조 안 함
+const FUEL_USE_GMAIL = true;                     // 회사 메일이 Gmail이 아니면 false
+const FUEL_MAIL_KEYWORD = '유류단가';            // 메일 제목 검색어
+const FUEL_MAIL_LOOKBACK_DAYS = 120;
+const FUEL_STAMP_KEY = 'FUEL_CONFIRM_STAMP';     // 문서 속성에 "이번 달 확인함" 기록
 
 // ───────────────────────────────────────────
 // 특이사항 설정 ★ 이름/사유 버튼은 여기서 수정
 // ───────────────────────────────────────────
 const SPECIAL_SHEET_NAME = '특이사항'; // 특이사항 저장용 (숨김 시트, 자동 생성)
-const SPECIAL_EXPIRE_DAYS = 200; // 이 일수보다 오래된 특이사항은 무시 (작년 같은 달 방지)
+const SPECIAL_EXPIRE_DAYS = 200;       // 이 일수보다 오래된 특이사항은 무시 (작년 같은 달 방지)
 
 const PRODUCTION_NAMES = ['이정묵', '김일수', '양공호', '김정운', '강영우', '임상균', '양진복', '강은철', '고남호', '이청훈'];
 const QUALITY_NAMES = ['박수형', '고혁진', '진성령', '김은혁'];
@@ -44,20 +81,23 @@ const SHEET_CFG = {
   SEJEUM: {
     sheetName: '제품생산',
     names: PRODUCTION_NAMES,
+    distance: 50,   // 기본 주행거리(km)
     reasons: ['자재 구매', '농업용수 수위 CHECK', '추석연휴 공장 순찰', '설날연휴 공장 순찰']
   },
   CIP: {
     sheetName: '품질 CIP',
     names: QUALITY_NAMES,
+    distance: 55,
     reasons: ['원수 CIP', '농업용수 CIP', '제품수 정기 대외분석', '민속촌 전용상수도 수질검사', '추석연휴 공장 순찰', '설날연휴 공장 순찰']
   },
   BTL: {
     sheetName: 'BTL 생산',
     names: PRODUCTION_NAMES,
+    distance: 50,
     reasons: []
   }
 };
-const UI_SHEET_ORDER = ['SEJEUM', 'CIP', 'BTL']; // 입력창 탭 순서
+const UI_SHEET_ORDER = ['SEJEUM', 'CIP', 'BTL'];  // 입력창 탭 순서
 const RUN_SHEET_ORDER = ['BTL', 'SEJEUM', 'CIP']; // 전체 실행 순서
 
 // ───────────────────────────────────────────
@@ -74,20 +114,26 @@ function onOpen() {
       .addItem('제품생산 시트만', 'fillSejeumSheet')
       .addItem('품질 CIP 시트만', 'fillCIPSheet')
       .addSeparator()
+      .addItem('⛽ 유류단가 확인 (메일 대조)', 'checkFuelPrices')
       .addItem('근무계획 이름 확인', 'checkWorkPlanNames')
+      .addSeparator()
+      .addItem('🛠 개인별DATA 참조 범위 통일 (1회)', 'unifyPersonDataRange')
       .addItem('⚙ 합계 행을 100행으로 맞추기 (최초 1회)', 'setupSumRow100')
       .addItem('도움말', 'showHelp')
       .addToUi();
   }
 }
 
-// 메뉴 → 모두 특이사항 입력창을 먼저 띄움
+// 메뉴 → 유류단가 확인 → 특이사항 입력창
 function fillAllSheets() { openSpecialDialog_('ALL'); }
 function fillBTLSheet() { openSpecialDialog_('BTL'); }
 function fillSejeumSheet() { openSpecialDialog_('SEJEUM'); }
 function fillCIPSheet() { openSpecialDialog_('CIP'); }
 
 function openSpecialDialog_(mode) {
+  // 유류단가를 먼저 확인 (메일 대조 또는 확인 질문). 취소하면 입력창을 열지 않음.
+  if (!confirmFuelPrices_(getMonthNumber(), false)) return;
+
   const t = HtmlService.createTemplateFromFile('SpecialDialog');
   t.mode = mode;
   const html = t.evaluate().setWidth(800).setHeight(720);
@@ -110,6 +156,10 @@ function normalizeType(raw) {
   let base = parts[0];
   if (/^[a-zA-Z]+$/.test(base)) base = base.toUpperCase();
   return base;
+}
+
+function normName_(s) {
+  return String(s === null || s === undefined ? '' : s).replace(/\s+/g, '');
 }
 
 // ───────────────────────────────────────────
@@ -139,7 +189,7 @@ function isEndMark_(v) {
 
 /**
  * 근무계획 → 해당 월 시트 파싱 + 직급 순위 매핑
- * 범위: C5부터 A열에 "계"가 나오는 행 전까지 (못 찾으면 시트 마지막 행까지)
+ * 범위: C5부터 A열에 "계"가 나오는 행 전까지 (못 찾으면 시트 마지막 행까지 + 경고)
  * 반환: { records: [...], rankMap: { "김일수": 0, ... }, endRow, endMarkFound }
  */
 function parseMonthlyWorkData(month) {
@@ -352,6 +402,23 @@ function getCIPReasonName(col) {
 }
 
 // ───────────────────────────────────────────
+// 구간·주행거리 결정 (특이사항 km > 사람별 > 시트 기본)
+// ───────────────────────────────────────────
+function resolveTrip_(key, row) {
+  let route = ROUTE_TEXT;
+  let distance = SHEET_CFG[key].distance;
+
+  const p = PERSON_ROUTE[normName_(row.name)];
+  if (p) {
+    if (p.route) route = p.route;
+    const d = (p.distance !== null && typeof p.distance === 'object') ? p.distance[key] : p.distance;
+    if (typeof d === 'number' && d > 0) distance = d;
+  }
+  if (typeof row.km === 'number' && row.km > 0) distance = row.km;   // 특이사항에 적은 주행거리
+  return { route, distance };
+}
+
+// ───────────────────────────────────────────
 // 공통 시트 쓰기
 // 반환: { count, sumRow, addedRows }
 // ───────────────────────────────────────────
@@ -388,8 +455,9 @@ function writeToSheet(targetSheet, rows, monthName) {
   // 4) 열 단위 일괄 쓰기 (C:D, E:F 병합 셀 고려해 열별로 기록)
   targetSheet.getRange(DATA_START_ROW, 1, n, 1).setValues(rows.map(r => [r.name]));
   targetSheet.getRange(DATA_START_ROW, 2, n, 1).setValues(rows.map(r => [`${monthName} ${r.day}일`])); // ★ 띄어쓰기
-  targetSheet.getRange(DATA_START_ROW, 3, n, 1).setValues(rows.map(() => [ROUTE_TEXT]));
+  targetSheet.getRange(DATA_START_ROW, 3, n, 1).setValues(rows.map(r => [r.route || ROUTE_TEXT]));
   targetSheet.getRange(DATA_START_ROW, 5, n, 1).setValues(rows.map(r => [r.reason]));
+  targetSheet.getRange(DATA_START_ROW, DIST_COL, n, 1).setValues(rows.map(r => [r.distance]));  // 주행거리
 
   // 5) 합계 수식 (빈 행의 #N/A를 피하려고 마지막 데이터 행까지만 합산)
   const lastDataRow = DATA_START_ROW + n - 1;
@@ -408,7 +476,7 @@ function loadData() {
   const month = getMonthNumber();
   const parsed = parseMonthlyWorkData(month);
   const plan = parsePlanData(month);
-  return { month, records: parsed.records, rankMap: parsed.rankMap, plan };
+  return { month, records: parsed.records, rankMap: parsed.rankMap, plan, endMarkFound: parsed.endMarkFound, endRow: parsed.endRow };
 }
 
 function rankOf_(rankMap, name) {
@@ -469,7 +537,7 @@ function buildAutoRows_(key, data) {
 // ───────────────────────────────────────────
 function mergeAndSort_(key, autoRows, specials, rankMap) {
   const all = autoRows.concat(specials.map(s => ({
-    name: s.name, day: s.day, reason: s.reason, kind: 2, special: true
+    name: s.name, day: s.day, reason: s.reason, km: s.km, kind: 2, special: true
   })));
   const kindFirst = (key === 'CIP');
   all.sort((a, b) => {
@@ -499,6 +567,13 @@ function runFill_(mode, expectedMonth) {
 
   const lines = [];
   const warns = [];
+  const checks = [];
+  const tripNotes = [];
+  const written = []; // { key, sheet, sumRow, rows }
+
+  if (!data.endMarkFound) {
+    checks.push(` - 근무계획 "${monthName}" 시트 A열에서 "계" 행을 못 찾아 시트 끝(${data.endRow}행)까지 읽음 → 메뉴 [근무계획 이름 확인]으로 확인`);
+  }
 
   for (const key of keys) {
     const cfg = SHEET_CFG[key];
@@ -511,10 +586,24 @@ function runFill_(mode, expectedMonth) {
     const autoRows = buildAutoRows_(key, data);
     const specials = specialsAll.filter(s => s.sheetKey === key);
     const rows = mergeAndSort_(key, autoRows, specials, data.rankMap);
+
+    // 구간·주행거리
+    rows.forEach(r => {
+      const t = resolveTrip_(key, r);
+      r.route = t.route;
+      r.distance = t.distance;
+      if (r.special && typeof r.km === 'number' && r.km > 0) {
+        tripNotes.push(` - ${cfg.sheetName} / ${r.name} / ${monthName} ${r.day}일 (${r.reason}) → ${r.km}km`);
+      }
+    });
+
     const res = writeToSheet(sheet, rows, monthName);
+    written.push({ key, sheet, sumRow: res.sumRow, rows });
 
     let line = `• ${cfg.sheetName}: 총 ${res.count}건 (자동 ${autoRows.length} + 특이사항 ${specials.length}) / 합계 ${res.sumRow}행`;
     if (res.addedRows > 0) line += ` ← 행 부족으로 ${res.addedRows}행 자동 추가`;
+    const routeCnt = rows.filter(r => r.route !== ROUTE_TEXT).length;
+    if (routeCnt > 0) line += ` / 다른 구간 ${routeCnt}건`;
     lines.push(line);
 
     specials.forEach(s => {
@@ -526,11 +615,220 @@ function runFill_(mode, expectedMonth) {
 
   SpreadsheetApp.flush();
 
+  // 실행 후 점검: 개인별 현황 = 합계 ?
+  written.forEach(w => checkPersonTables_(w.sheet, w.sumRow, w.rows).forEach(m => checks.push(m)));
+
   let msg = `${monthName} 교통비 정산 완료\n\n` + lines.join('\n');
+  msg += '\n\n' + fuelStatusLine_(data.month);
+  if (tripNotes.length > 0) {
+    msg += '\n\nℹ 특이사항 주행거리 적용\n' + tripNotes.join('\n');
+  }
   if (warns.length > 0) {
     msg += '\n\n⚠ 같은 사람·같은 날에 자동 입력 건과 겹치는 특이사항 (두 행 모두 입력됨, 확인 필요)\n' + warns.join('\n');
   }
+  msg += checks.length > 0
+    ? '\n\n⚠ 자동 점검에서 확인할 것\n' + checks.join('\n')
+    : '\n\n✅ 자동 점검: 개인별 현황 금액·건수가 합계와 일치';
   return msg;
+}
+
+// ═══════════════════════════════════════════
+// 실행 후 점검 — 합계행 아래 "개인별 현황" 표
+//  ① 금액표(첫 번째 '성명' 표) 합 = K 합계
+//  ② 건수표(두 번째 '성명' 표) 합 = 입력 건수
+//  ③ 입력된 이름이 개인별 현황 표에 있는지
+// ═══════════════════════════════════════════
+function readPersonTables_(sheet, sumRow) {
+  const nRows = Math.min(20, Math.max(0, sheet.getLastRow() - sumRow));
+  if (nRows < 1) return [];
+  const vals = sheet.getRange(sumRow + 1, 1, nRows, 10).getValues();
+  const tables = [];
+  let cur = null;
+  for (let i = 0; i < nRows; i++) {
+    const row = vals[i];
+    if (normName_(row[0]) === '성명') { cur = { headerRow: sumRow + 1 + i, items: [] }; tables.push(cur); continue; }
+    if (!cur) continue;
+    let any = false;
+    for (let c = 0; c < 10; c += 2) {
+      const nm = normName_(row[c]);
+      if (!nm) continue;
+      any = true;
+      cur.items.push({ name: nm, value: Number(row[c + 1]) || 0 });
+    }
+    if (!any) cur = null;
+  }
+  return tables;
+}
+
+function checkPersonTables_(sheet, sumRow, rows) {
+  const out = [];
+  const name = sheet.getName();
+  const tables = readPersonTables_(sheet, sumRow);
+  if (tables.length === 0) return out;
+
+  const total = Number(sheet.getRange(sumRow, SUM_COL).getValue()) || 0;
+  const amountSum = tables[0].items.reduce((a, b) => a + b.value, 0);
+  if (Math.round(amountSum) !== Math.round(total)) {
+    out.push(` - ${name}: 개인별 현황 금액 합 ${fmt_(amountSum)} ≠ 합계 K${sumRow} ${fmt_(total)} → 개인별 현황 표의 이름·수식 확인`);
+  }
+  if (tables[1]) {
+    const cntSum = tables[1].items.reduce((a, b) => a + b.value, 0);
+    if (cntSum !== rows.length) {
+      out.push(` - ${name}: 개인별 현황 건수 합 ${cntSum} ≠ 입력 ${rows.length}건 → 교통비 발생 내역 "근무인원"이 틀어짐`);
+    }
+  }
+  const listed = new Set(tables[0].items.map(x => x.name));
+  const missing = [];
+  rows.forEach(r => { const k = normName_(r.name); if (!listed.has(k) && missing.indexOf(k) < 0) missing.push(k); });
+  if (missing.length > 0) {
+    out.push(` - ${name}: 개인별 현황 표에 없는 이름 ${missing.join(', ')} → 금액·인원 집계에서 빠짐 (표에 칸 추가 필요)`);
+  }
+  return out;
+}
+
+function fmt_(n) {
+  return Math.round(Number(n) || 0).toLocaleString('ko-KR');
+}
+
+// ═══════════════════════════════════════════
+// ⛽ 유류단가 확인
+// ═══════════════════════════════════════════
+
+/** 메일 본문에서 휘발유·경유·LPG 단가 추출 (못 읽으면 null) */
+function parseFuelPrices_(body) {
+  const t = String(body || '').replace(/ /g, ' ');
+  const grab = re => { const m = t.match(re); return m ? Number(m[1].replace(/,/g, '')) : null; };
+  const g = grab(/휘\s*발\s*유\s*[:：]\s*([\d,]+)/);
+  const d = grab(/경\s*유\s*[:：]\s*([\d,]+)/);
+  const l = grab(/L\s*\.?\s*P\s*\.?\s*G\s*[:：]\s*([\d,]+)/i);
+  if (!g || !d || !l) return null;
+  return { '휘발유': g, '경유': d, 'LPG': l };
+}
+
+/** "{month}월 마감 ... 유류단가" 메일 찾기 */
+function findFuelMail_(month) {
+  if (!FUEL_USE_GMAIL) return { status: 'off' };
+  try {
+    const threads = GmailApp.search(`subject:${FUEL_MAIL_KEYWORD} newer_than:${FUEL_MAIL_LOOKBACK_DAYS}d`, 0, 30);
+    const subjRe = new RegExp(`(^|[^0-9])${month}\\s*월\\s*마감`);
+    for (const th of threads) {
+      if (!subjRe.test(th.getFirstMessageSubject())) continue;
+      const msgs = th.getMessages();
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const p = parseFuelPrices_(msgs[i].getPlainBody());
+        if (p) return { status: 'found', prices: p, date: msgs[i].getDate(), subject: msgs[i].getSubject() };
+      }
+    }
+    return { status: 'notfound' };
+  } catch (e) {
+    return { status: 'error', error: e.message };
+  }
+}
+
+function readSheetFuel_() {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(FUEL_SHEET_NAME);
+  if (!sh) throw new Error(`"${FUEL_SHEET_NAME}" 시트를 찾을 수 없습니다.`);
+  const cur = {};
+  Object.keys(FUEL_CELLS).forEach(k => { cur[k] = Number(sh.getRange(FUEL_CELLS[k]).getValue()) || 0; });
+  return { sh, cur };
+}
+
+function sameFuel_(a, b) {
+  return !!a && !!b && Object.keys(FUEL_CELLS).every(k => Number(a[k]) === Number(b[k]));
+}
+
+function fuelText_(p) {
+  return Object.keys(FUEL_CELLS).map(k => `${k} ${fmt_(p[k])}`).join(' / ');
+}
+
+function getFuelStamp_() {
+  try { return JSON.parse(PropertiesService.getDocumentProperties().getProperty(FUEL_STAMP_KEY) || 'null'); }
+  catch (e) { return null; }
+}
+
+function saveFuelStamp_(month, prices, how) {
+  PropertiesService.getDocumentProperties().setProperty(FUEL_STAMP_KEY, JSON.stringify({
+    month: month, prices: prices, how: how, at: new Date().toISOString()
+  }));
+}
+
+/**
+ * 정산 전 유류단가 확인 (메뉴 실행 흐름에서만 호출 — 대화상자 UI 사용)
+ * @param standalone 메뉴 [⛽ 유류단가 확인]에서 직접 부른 경우 true (결과를 항상 보여줌)
+ * @return 계속 진행해도 되면 true
+ */
+function confirmFuelPrices_(month, standalone) {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const { sh, cur } = readSheetFuel_();
+  const stamp = getFuelStamp_();
+  const mail = findFuelMail_(month);
+
+  // ① 메일을 찾은 경우 — 값 대조
+  if (mail.status === 'found') {
+    const when = Utilities.formatDate(mail.date, Session.getScriptTimeZone(), 'M/d HH:mm');
+    if (sameFuel_(cur, mail.prices)) {
+      saveFuelStamp_(month, cur, 'mail');
+      if (standalone) ui.alert('⛽ 유류단가 확인', `✅ ${month}월 메일(${when})과 시트 값이 같습니다.\n\n${fuelText_(cur)}`, ui.ButtonSet.OK);
+      else ss.toast(`${month}월 메일 단가와 일치: ${fuelText_(cur)}`, '⛽ 유류단가 확인', 5);
+      return true;
+    }
+    const diff = Object.keys(FUEL_CELLS).map(k =>
+      `• ${k}: 시트 ${fmt_(cur[k])}  →  메일 ${fmt_(mail.prices[k])}${Number(cur[k]) === Number(mail.prices[k]) ? '' : '  ◀ 다름'}`).join('\n');
+    const ans = ui.alert('⛽ 유류단가가 메일과 다릅니다',
+      `메일: "${mail.subject}" (${when})\n\n${diff}\n\n` +
+      `[예] 메일 값으로 바꾸고 진행\n[아니요] 시트 값 그대로 진행\n[취소] 중단`,
+      ui.ButtonSet.YES_NO_CANCEL);
+    if (ans === ui.Button.YES) {
+      Object.keys(FUEL_CELLS).forEach(k => sh.getRange(FUEL_CELLS[k]).setValue(mail.prices[k]));
+      SpreadsheetApp.flush();
+      saveFuelStamp_(month, mail.prices, 'mail-updated');
+      ss.toast(`유류단가 갱신: ${fuelText_(mail.prices)}`, '⛽ 유류단가', 5);
+      return true;
+    }
+    if (ans === ui.Button.NO) { saveFuelStamp_(month, cur, 'manual-override'); return true; }
+    ss.setActiveSheet(sh);
+    return false;
+  }
+
+  // ② 메일을 못 찾은 경우 — 이번 달 이미 확인했고 값도 그대로면 통과
+  if (!standalone && stamp && stamp.month === month && sameFuel_(cur, stamp.prices)) return true;
+
+  const reason = {
+    off: '메일 대조 꺼짐 (FUEL_USE_GMAIL = false)',
+    notfound: `최근 ${FUEL_MAIL_LOOKBACK_DAYS}일 메일에서 "${month}월 마감 … 유류단가" 메일을 못 찾았습니다.`,
+    error: `메일을 읽지 못했습니다 (${mail.error || ''})`,
+  }[mail.status];
+  const sameAsLast = stamp && stamp.month !== month && sameFuel_(cur, stamp.prices);
+  const ans = ui.alert('⛽ 유류단가 확인',
+    `${reason}\n\n현재 유류단가 시트: ${fuelText_(cur)}\n` +
+    (sameAsLast ? `\n⚠️ 지난번(${stamp.month}월) 정산 때와 값이 똑같습니다.\n   ${month}월 메일 단가로 바꿨는지 확인하세요.\n` : '') +
+    `\n이 값이 ${month}월 메일에 안내된 단가가 맞습니까?\n[예] 맞음, 진행   [아니요] 유류단가 시트로 이동`,
+    ui.ButtonSet.YES_NO);
+  if (ans === ui.Button.YES) { saveFuelStamp_(month, cur, 'manual'); return true; }
+  ss.setActiveSheet(sh);
+  return false;
+}
+
+/** 실행 결과에 넣을 한 줄 */
+function fuelStatusLine_(month) {
+  let cur = null;
+  try { cur = readSheetFuel_().cur; } catch (e) { return '⚠ 유류단가 시트를 읽지 못함'; }
+  const stamp = getFuelStamp_();
+  if (stamp && stamp.month === month && sameFuel_(cur, stamp.prices)) {
+    const how = { mail: '메일과 일치', 'mail-updated': '메일 값으로 갱신', manual: '직접 확인', 'manual-override': '메일과 다르지만 시트 값 사용' }[stamp.how] || '확인';
+    return `⛽ 유류단가: ${fuelText_(cur)} (${month}월 ${how})`;
+  }
+  return `⚠ 유류단가: ${fuelText_(cur)} — ${month}월분으로 확인된 기록 없음`;
+}
+
+/** 메뉴: ⛽ 유류단가 확인 */
+function checkFuelPrices() {
+  try {
+    confirmFuelPrices_(getMonthNumber(), true);
+  } catch (e) {
+    SpreadsheetApp.getUi().alert('❌ 오류 발생\n\n' + e.message);
+  }
 }
 
 // ═══════════════════════════════════════════
@@ -546,23 +844,76 @@ function checkWorkPlanNames() {
     const cnt = {};
     records.filter(r => r.name === n).forEach(r => { cnt[r.type] = (cnt[r.type] || 0) + 1; });
     const summary = Object.keys(cnt).map(t => `${t}${cnt[t]}`).join(' ');
-    return `${rankMap[n] + WP_NAME_START_ROW}행 ${n} ${summary ? '(' + summary + ')' : '(표기 없음)'}`;
+    const p = PERSON_ROUTE[normName_(n)];
+    return `${rankMap[n] + WP_NAME_START_ROW}행 ${n}${summary ? '(' + summary + ')' : '(표기 없음)'}` +
+      (p ? ` — 구간: ${p.route}` : '');
   });
 
   const cfgNames = [];
   Object.keys(SHEET_CFG).forEach(k => SHEET_CFG[k].names.forEach(n => { if (cfgNames.indexOf(n) < 0) cfgNames.push(n); }));
   const missing = cfgNames.filter(n => !(n in rankMap));
+  const notInCfg = names.filter(n => cfgNames.indexOf(n) < 0);
+
+  // 개인별DATA(차종·연비)에 없는 이름 → 교통비가 #N/A
+  const personData = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('개인별DATA');
+  let noCar = [];
+  if (personData && personData.getLastRow() >= 1) {
+    const listed = new Set(personData.getRange(1, 2, personData.getLastRow(), 1).getValues().map(r => normName_(r[0])));
+    noCar = names.filter(n => !listed.has(normName_(n)));
+  }
 
   let msg = `${month}월 근무계획에서 읽은 인원 ${names.length}명 ` +
-            `(${WP_NAME_START_ROW}행 ~ ${parsed.endRow}행)\n`;
+    `(${WP_NAME_START_ROW}행 ~ ${parsed.endRow}행)\n`;
   msg += parsed.endMarkFound
     ? `A열 "계" 행: ${parsed.endRow + 1}행\n\n`
     : `⚠ A열에서 "계" 행을 찾지 못해 시트 끝까지 읽었습니다.\n\n`;
   msg += lines.join('\n');
-  if (missing.length > 0) {
-    msg += `\n\n⚠ 코드 이름 목록에는 있지만 근무계획에 없는 이름: ${missing.join(', ')}`;
-  }
+  if (missing.length > 0) msg += `\n\n⚠ 코드 이름 목록에는 있지만 근무계획에 없는 이름: ${missing.join(', ')}`;
+  if (notInCfg.length > 0) msg += `\n\nℹ 근무계획에는 있지만 특이사항 버튼 목록(PRODUCTION/QUALITY_NAMES)에 없는 이름: ${notInCfg.join(', ')}`;
+  if (noCar.length > 0) msg += `\n\n⚠ '개인별DATA'(차종·연비)에 없는 이름: ${noCar.join(', ')} → 이 사람 행은 교통비가 #N/A`;
   SpreadsheetApp.getUi().alert(msg);
+}
+
+// ═══════════════════════════════════════════
+// 🛠 개인별DATA 참조 범위 통일 (1회)
+//  • 5행~합계 직전 G(차종)·H(전용유류)·J(등록연비) VLOOKUP을 '개인별DATA'!$B:$E 전체 열로
+//    → 시트마다 $B$1:$E$18 / $B$6:$E$84 등 달랐던 범위를 통일, 개인별DATA에 행이 늘어도 안 깨짐
+//  • K열(교통비, 전기 76원/km 고정)과 개인별 현황 표는 건드리지 않음
+// ═══════════════════════════════════════════
+function unifyPersonDataRange() {
+  const ui = SpreadsheetApp.getUi();
+  const ans = ui.alert('🛠 개인별DATA 참조 범위 통일',
+    '"BTL 생산", "제품생산", "품질 CIP" 시트의\n' +
+    `${DATA_START_ROW}행~합계 직전 G·H·J열 VLOOKUP 범위를 '개인별DATA'!$B:$E 로 바꿉니다.\n\n` +
+    '• K열(교통비 계산식)과 개인별 현황 표는 그대로 둡니다.\n' +
+    '• 계산 결과는 그대로여야 정상입니다 (실행 후 합계 전후를 보여줌).\n\n계속할까요?',
+    ui.ButtonSet.OK_CANCEL);
+  if (ans !== ui.Button.OK) return;
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const msgs = [];
+  RUN_SHEET_ORDER.forEach(key => {
+    const name = SHEET_CFG[key].sheetName;
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) { msgs.push(`• ${name}: 시트 없음`); return; }
+    try {
+      const sumRow = findSumRow(sheet);
+      const before = Number(sheet.getRange(sumRow, SUM_COL).getValue()) || 0;
+      const n = sumRow - DATA_START_ROW;
+      [[7, 2], [8, 3], [10, 4]].forEach(([col, idx]) => {
+        const f = [];
+        for (let r = DATA_START_ROW; r < sumRow; r++) f.push([`=VLOOKUP(A${r},'개인별DATA'!$B:$E,${idx},FALSE)`]);
+        sheet.getRange(DATA_START_ROW, col, n, 1).setFormulas(f);
+      });
+      SpreadsheetApp.flush();
+      const after = Number(sheet.getRange(sumRow, SUM_COL).getValue()) || 0;
+      msgs.push(`• ${name}: G·H·J ${n}행 통일 / 합계 ${fmt_(before)} → ${fmt_(after)}` +
+        (Math.round(before) !== Math.round(after) ? '  ◀ 합계가 바뀜, 확인 필요' : ''));
+    } catch (e) {
+      msgs.push(`• ${name}: 실패 — ${e.message}`);
+    }
+  });
+  ui.alert('🛠 완료\n\n' + msgs.join('\n'));
 }
 
 // ═══════════════════════════════════════════
@@ -580,7 +931,7 @@ function getDialogInit() {
     cfg.names.forEach(n => {
       if (!(n in rankMap) && unknownNames.indexOf(n) < 0) unknownNames.push(n);
     });
-    return { key: key, sheetName: cfg.sheetName, names: cfg.names, reasons: cfg.reasons };
+    return { key: key, sheetName: cfg.sheetName, names: cfg.names, reasons: cfg.reasons, distance: cfg.distance };
   });
 
   return {
@@ -628,24 +979,35 @@ function sanitizeEntries_(entries) {
     const k = [sheetKey, name, day, reason].join('|');
     if (seen[k]) return;
     seen[k] = true;
-    out.push({ sheetKey: sheetKey, name: name, day: day, reason: reason });
+    out.push({ sheetKey: sheetKey, name: name, day: day, reason: reason, km: parseKm_(e.km) });
   });
   return out;
 }
 
+/** 주행거리 입력값 → 양수면 숫자, 아니면 '' (= 시트 기본 거리) */
+function parseKm_(v) {
+  const n = Number(String(v === null || v === undefined ? '' : v).replace(/[^\d.]/g, ''));
+  return (n > 0) ? n : '';
+}
+
 // ───────────────────────────────────────────
-// 특이사항 저장 시트 (숨김) — A:월 B:시트 C:일 D:이름 E:사유 F:등록일시
+// 특이사항 저장 시트 (숨김) — A:월 B:시트 C:일 D:이름 E:사유 F:등록일시 G:주행거리(km, 비우면 기본)
 // ───────────────────────────────────────────
+const SPECIAL_HEADERS = ['월', '시트', '일', '이름', '사유', '등록일시', '주행거리(km)'];
+
 function getOrCreateSpecialSheet_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sh = ss.getSheetByName(SPECIAL_SHEET_NAME);
-  if (sh) return sh;
+  if (sh) {
+    if (String(sh.getRange(1, 7).getValue()).trim() === '') sh.getRange(1, 7).setValue(SPECIAL_HEADERS[6]).setFontWeight('bold');
+    return sh;
+  }
 
   const active = ss.getActiveSheet();
   sh = ss.insertSheet(SPECIAL_SHEET_NAME, ss.getNumSheets());
   sh.getRange('A:E').setNumberFormat('@');
   sh.getRange('F:F').setNumberFormat('yyyy-mm-dd hh:mm');
-  sh.getRange(1, 1, 1, 6).setValues([['월', '시트', '일', '이름', '사유', '등록일시']]).setFontWeight('bold');
+  sh.getRange(1, 1, 1, SPECIAL_HEADERS.length).setValues([SPECIAL_HEADERS]).setFontWeight('bold');
   sh.setFrozenRows(1);
   sh.hideSheet();
   if (active) ss.setActiveSheet(active);
@@ -661,7 +1023,7 @@ function readSpecials_(month) {
   Object.keys(SHEET_CFG).forEach(k => { nameToKey[SHEET_CFG[k].sheetName] = k; });
 
   const limit = new Date().getTime() - SPECIAL_EXPIRE_DAYS * 24 * 60 * 60 * 1000;
-  const vals = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
+  const vals = sh.getRange(2, 1, sh.getLastRow() - 1, 7).getValues();
   const out = [];
 
   vals.forEach(r => {
@@ -672,7 +1034,7 @@ function readSpecials_(month) {
     const reason = String(r[4]).trim();
     if (!sheetKey || isNaN(day) || !name || !reason) return;
     if (r[5] instanceof Date && r[5].getTime() < limit) return; // 오래된 건(작년 같은 달) 무시
-    out.push({ sheetKey: sheetKey, name: name, day: day, reason: reason });
+    out.push({ sheetKey: sheetKey, name: name, day: day, reason: reason, km: parseKm_(r[6]) });
   });
   return out;
 }
@@ -684,19 +1046,19 @@ function writeSpecials_(month, entries) {
 
   let keep = [];
   if (last >= 2) {
-    keep = sh.getRange(2, 1, last - 1, 6).getValues()
+    keep = sh.getRange(2, 1, last - 1, 7).getValues()
       .filter(r => String(r[0]).trim() !== '' && parseInt(r[0], 10) !== month);
-    sh.getRange(2, 1, last - 1, 6).clearContent();
+    sh.getRange(2, 1, last - 1, 7).clearContent();
   }
 
   const now = new Date();
   const rows = keep.concat(entries.map(e =>
-    [String(month), SHEET_CFG[e.sheetKey].sheetName, String(e.day), e.name, e.reason, now]
+    [String(month), SHEET_CFG[e.sheetKey].sheetName, String(e.day), e.name, e.reason, now, e.km === '' ? '' : e.km]
   ));
 
   if (rows.length > 0) {
     sh.getRange(2, 1, rows.length, 5).setNumberFormat('@');
-    sh.getRange(2, 1, rows.length, 6).setValues(rows);
+    sh.getRange(2, 1, rows.length, 7).setValues(rows);
   }
 }
 
@@ -766,11 +1128,20 @@ function showHelp() {
     '교통비 정산 자동화 사용법\n\n' +
     '【데이터 소스】\n' +
     '• 근무 데이터: 근무계획 스프레드시트 → "X월" 시트\n' +
-    ' (이름은 C5부터, A열에 "계"가 나오는 행 바로 위까지 자동 인식)\n' +
+    ' (이름은 C5부터, A열에 "계"가 나오는 행 바로 위까지 자동 인식 — 인원이 늘어도 그대로 동작)\n' +
     '• 생산 계획: 제품생산 계획 스프레드시트 → "X월 제품생산 계획..." 시트\n' +
     '• 기준 월: "X월 근무현황표" 시트 Z3\n\n' +
+    '【⛽ 유류단가】\n' +
+    '• 자동 채우기 전에 "X월 마감 자료 요청 및 유류단가 안내" 메일을 찾아 시트 C4~C6와 대조\n' +
+    '• 다르면 메일 값으로 바꿀지 물어봄 / 메일을 못 찾으면 확인 질문 (이번 달 한 번만)\n' +
+    '• 지난달과 값이 똑같으면 한 번 더 경고\n\n' +
+    '【구간·주행거리】\n' +
+    '• 기본: 공장 ↔ 제주시 / BTL·제품생산 50km, 품질 CIP 55km (코드 SHEET_CFG.distance)\n' +
+    '• 사람별 구간: 코드 상단 PERSON_ROUTE (김은혁 → 공장 ↔ 서귀포시, 거리는 기본값)\n' +
+    '• 특수 거리(예: 자재 구매 30km): 특이사항 입력창 "주행거리" 칸에 입력\n' +
+    '• I열(주행거리)은 매번 코드가 다시 씀 — 특수 거리는 특이사항에 적어야 다시 돌려도 유지됨\n\n' +
     '【특이사항】\n' +
-    '• 메뉴 실행 시 입력창이 먼저 뜸 (이름·일자·사유 버튼 선택 또는 직접 입력)\n' +
+    '• 메뉴 실행 시 입력창이 먼저 뜸 (이름·일자·사유 버튼 선택 또는 직접 입력, 주행거리는 선택)\n' +
     '• 숨김 시트 "특이사항"에 월별로 저장 → 다시 돌려도 자동 반영\n' +
     '• 이름/사유 버튼 목록은 코드 상단 SHEET_CFG에서 수정\n\n' +
     '【근무 유형 표기】\n' +
@@ -780,12 +1151,13 @@ function showHelp() {
     '• BTL/제품생산: 날짜 → 직급 순 (특이사항도 직급 순으로 섞임)\n' +
     '• 품질 CIP: 날짜 → 조 → 연 → 특이사항 → 직급 순\n' +
     '• 직급 순 = 근무계획 시트의 행 순서\n\n' +
-    '【합계】\n' +
-    '• "합 계" 행을 시트 끝까지 자동 탐색 (기본 100행), 행이 모자라면 자동 추가\n\n' +
+    '【자동 점검 (실행 결과 아래)】\n' +
+    '• 개인별 현황 금액·건수 합 = 합계/입력 건수인지\n' +
+    '• 개인별 현황 표에 없는 이름\n\n' +
     '【실행 순서】\n' +
     '1. Z3 월 확인\n' +
     '2. (인원 변경 시) 메뉴 → 근무계획 이름 확인\n' +
-    '3. 메뉴 → 전체 시트 자동 채우기\n' +
-    '4. 특이사항 입력 → "저장 후 정산 실행"'
+    '3. 메뉴 → 전체 시트 자동 채우기 → 유류단가 확인\n' +
+    '4. 특이사항 입력 → "저장 후 정산 실행" → 결과의 ⚠ 항목 확인'
   );
 }

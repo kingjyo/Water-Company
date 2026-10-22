@@ -196,6 +196,16 @@
       padding: 14px;
     }
 
+    td.km {
+      color: #5f6368;
+      white-space: nowrap;
+    }
+
+    td.km.set {
+      color: #1a73e8;
+      font-weight: bold;
+    }
+
     .dup {
       color: #e37400;
       font-size: 12px;
@@ -221,6 +231,8 @@
       border-radius: 6px;
       padding: 12px;
       margin: 0 0 12px 0;
+      max-height: 600px;
+      overflow-y: auto;
     }
 
     #loading {
@@ -269,6 +281,13 @@
         </div>
       </div>
       <div class="row">
+        <div class="lab">거리</div>
+        <div class="ctl">
+          <input type="text" id="km" placeholder="km" style="width:90px" inputmode="decimal">
+          <span class="hint" id="kmHint"></span>
+        </div>
+      </div>
+      <div class="row">
         <div class="lab"></div>
         <div class="ctl">
           <button class="act primary" id="addBtn">＋ 목록에 추가</button>
@@ -289,6 +308,7 @@
             <th>일자</th>
             <th>이름</th>
             <th>사유</th>
+            <th>거리</th>
             <th></th>
           </tr>
         </thead>
@@ -341,6 +361,18 @@
       m.textContent = text || '';
       m.className = isErr ? 'err' : 'ok';
     }
+    // 주행거리 입력 → 양수면 숫자, 아니면 '' (= 기본 거리)
+    function parseKm(v) {
+      var n = Number(String(v === null || v === undefined ? '' : v).replace(/[^\d.]/g, ''));
+      return n > 0 ? n : '';
+    }
+    function kmText(e) {
+      return (e.km !== '' && e.km !== undefined && e.km !== null) ? e.km + 'km' : '기본';
+    }
+    function renderKmHint() {
+      var cfg = sheetCfg(curSheet);
+      $('kmHint').textContent = '비우면 기본 ' + (cfg.distance || '') + 'km (' + cfg.sheetName + ') — 자재 구매처럼 거리가 다를 때만 입력';
+    }
 
     // ── 초기화 ──
     google.script.run
@@ -359,7 +391,7 @@
       $('modeLbl').textContent = '실행 대상: ' + (MODE_LABEL[RUN_MODE] || RUN_MODE);
       if (data.unknownNames && data.unknownNames.length > 0) $('unknownHint').style.display = 'block';
 
-      renderTabs(); renderNames(); renderDays(); renderReasons(); renderList();
+      renderTabs(); renderNames(); renderDays(); renderReasons(); renderKmHint(); renderList();
       $('loading').style.display = 'none';
       $('main').style.display = 'block';
     }
@@ -375,8 +407,9 @@
           selNames = {};
           $('customName').value = '';
           $('reason').value = '';
+          $('km').value = '';
           setMsg('');
-          renderTabs(); renderNames(); renderReasons();
+          renderTabs(); renderNames(); renderReasons(); renderKmHint();
         };
         box.appendChild(b);
       });
@@ -427,7 +460,7 @@
 
       if (entries.length === 0) {
         var tr0 = el('tr'); var td0 = el('td', 'empty', '입력된 특이사항이 없습니다. 없으면 그대로 "저장 후 정산 실행"을 누르세요.');
-        td0.colSpan = 5; tr0.appendChild(td0); body.appendChild(tr0);
+        td0.colSpan = 6; tr0.appendChild(td0); body.appendChild(tr0);
         return;
       }
 
@@ -452,6 +485,7 @@
         if (count[e.sheetKey + '|' + e.name + '|' + e.day] > 1) tdName.appendChild(el('span', 'dup', '⚠ 같은 날 중복'));
         tr.appendChild(tdName);
         tr.appendChild(el('td', '', e.reason));
+        tr.appendChild(el('td', 'km' + (kmText(e) !== '기본' ? ' set' : ''), kmText(e)));
         var del = el('td', 'del', '✕');
         del.title = '삭제';
         del.onclick = function () {
@@ -485,10 +519,13 @@
       var names = collectNames();
       var days = collectDays();
       var reason = trim($('reason').value);
+      var kmRaw = trim($('km').value);
+      var km = parseKm(kmRaw);
 
       if (names.length === 0) return setMsg('이름을 선택하거나 입력하세요.', true);
       if (days.length === 0) return setMsg('일자를 선택하세요.', true);
       if (!reason) return setMsg('사유를 선택하거나 입력하세요.', true);
+      if (kmRaw !== '' && km === '') return setMsg('주행거리는 숫자로 입력하세요 (비우면 기본 거리).', true);
 
       var added = 0, skipped = 0;
       names.forEach(function (n) {
@@ -497,7 +534,7 @@
             return e.sheetKey === curSheet && e.name === n && e.day === d && e.reason === reason;
           });
           if (exists) { skipped++; return; }
-          entries.push({ sheetKey: curSheet, name: n, day: d, reason: reason });
+          entries.push({ sheetKey: curSheet, name: n, day: d, reason: reason, km: km });
           added++;
         });
       });
@@ -506,6 +543,7 @@
       selNames = {}; selDays = {};
       $('customName').value = '';
       $('reason').value = '';
+      $('km').value = '';
       renderNames(); renderDays(); renderReasons(); renderList();
       setMsg(added + '건 추가됨' + (skipped > 0 ? ' (이미 있는 ' + skipped + '건 제외)' : ''), false);
     };
