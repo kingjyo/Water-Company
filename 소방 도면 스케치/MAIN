@@ -1,0 +1,127 @@
+/** 소방 도면 스케치 · Google Apps Script · 1.0.4
+ * Deploy as USER_ACCESSING. Each Google account owns its own projects.
+ * Immutable revision files + background assets; no browser storage dependency.
+ */
+const FS_APP = {prefix:'FS_PROJECT_', root:'FS_ROOT', last:'FS_LAST', maxChars:25000000};
+function doGet() {
+  return HtmlService.createHtmlOutputFromFile('Index').setTitle('소방 도면 스케치')
+    .addMetaTag('viewport','width=device-width, initial-scale=1');
+}
+function parseJson_(raw,stage){
+ if(typeof raw!=='string')throw Error('[FS_TYPE_'+stage+'] 읽은 값이 문자열이 아닙니다.');
+ const text=raw.replace(/^\uFEFF/,'').trim();
+ if(!text)throw Error('[FS_EMPTY_'+stage+'] 읽은 내용이 비어 있습니다 (문자 '+raw.length+'개). 기존 파일은 변경하지 않았습니다.');
+ try{return JSON.parse(text);}catch(e){throw Error('[FS_JSON_'+stage+'] JSON 내용이 완전하지 않거나 형식이 다릅니다 (문자 '+raw.length+'개). 기존 파일은 변경하지 않았습니다.');}
+}
+function props_(){ return PropertiesService.getUserProperties(); }
+function lock_(fn){ const l=LockService.getUserLock(); l.waitLock(30000); try{return fn();}finally{l.releaseLock();} }
+function id_(s){if(typeof s!=='string'||!/^[a-zA-Z0-9_-]{10,160}$/.test(s))throw Error('올바른 도면 식별자가 아닙니다.');return s;}
+function root_(){
+  const p=props_(),id=p.getProperty(FS_APP.root);
+  if(id){const f=DriveApp.getFolderById(id);if(f.isTrashed())throw Error('도면 보관 폴더가 휴지통에 있습니다. Drive에서 복원하세요.');return f;}
+  const f=DriveApp.createFolder('소방 도면 스케치 — 원본과 이력');p.setProperty(FS_APP.root,f.getId());return f;
+}
+function meta_(id){
+  const raw=props_().getProperty(FS_APP.prefix+id_(id));if(!raw)throw Error('이 계정에 등록된 도면이 없습니다. 계정을 확인하세요.');
+  const m=parseJson_(raw,'META');if(m.projectId!==id||!Number.isInteger(m.revision))throw Error('도면 정보가 손상되었습니다. 원본을 보존하고 복구 목록을 확인하세요.');return m;
+}
+function folder_(m){const f=DriveApp.getFolderById(m.folderId);if(f.isTrashed())throw Error('도면 폴더가 휴지통에 있습니다. 먼저 복원하세요.');return f;}
+function childFile_(folder,id){
+ const f=DriveApp.getFileById(id_(id));if(f.isTrashed())throw Error('도면 파일이 휴지통에 있습니다.');
+ const parents=f.getParents();while(parents.hasNext()){if(parents.next().getId()===folder.getId())return f;}
+ throw Error('이 도면에 속하지 않은 파일입니다.');
+}
+function checked_(text){
+ if(typeof text!=='string'||text.length>FS_APP.maxChars)throw Error('도면 파일은 25MB 이하로 준비하세요.');
+ const p=parseJson_(text,'INPUT'),types=['wall','room','door','doubleDoor','gate','slidingDoor','singleSlidingDoor','stairs','path','text','note','detector','ext','hydrant','call','report','exit','conveyor','conveyorCurve','stairUp','stairDown'];
+ if(!p||p.format!=='fire-sketch'||p.version!==1||!Array.isArray(p.floors)||p.floors.length<1||p.floors.length>10)throw Error('지원하지 않는 도면 형식입니다.');
+ if(typeof p.name!=='string'||p.name.length>70||!Number.isInteger(p.active)||p.active<0||p.active>=p.floors.length)throw Error('도면 이름 또는 층 정보를 확인하세요.');
+ let total=0;const ids={};
+ p.floors.forEach(f=>{
+  if(!f||typeof f.name!=='string'||f.name.length>30||!Array.isArray(f.items)||(total+=f.items.length)>3000)throw Error('층별 도형 정보를 확인하세요 (최대 3,000개).');
+  f.items.forEach(a=>{
+   if(!a||typeof a.type!=='string'||(types.indexOf(a.type)<0&&!/^[a-z][A-Za-z0-9]{1,30}$/.test(a.type))||typeof a.id!=='string'||!/^[a-zA-Z0-9_-]{1,160}$/.test(a.id)||ids[a.id])throw Error('도형 종류 또는 식별자가 올바르지 않습니다. ('+f.name+' · '+(a&&a.type)+' · '+(a&&a.id&&ids[a.id]?'식별자 중복':'형식 오류')+')');ids[a.id]=true;
+   ['x','y','w','h','dx','dy','stroke','angle'].forEach(k=>{if(typeof a[k]!=='number'||!Number.isFinite(a[k])||Math.abs(a[k])>5000)throw Error('도형 좌표가 올바르지 않습니다.');});
+   if(a.w<=0||a.h<=0||a.stroke<1||a.stroke>12)throw Error('도형 크기를 확인하세요.');
+   if(a.color!==undefined&&!/^#[0-9a-f]{6}$/i.test(a.color))throw Error('색상 형식을 확인하세요.');
+   if(typeof a.label!=='string'||a.label.length>60||typeof a.note!=='string'||a.note.length>500)throw Error('글자 또는 메모 길이를 확인하세요.');
+  });
+  if(f.background){const b=f.background;if(typeof b.data!=='string'||b.data.length>18000000||!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(b.data))throw Error('배경 이미지 형식을 확인하세요.');
+   ['x','y','w','h','opacity'].forEach(k=>{if(typeof b[k]!=='number'||!Number.isFinite(b[k]))throw Error('배경 위치를 확인하세요.');});
+   if(b.w<=0||b.h<=0||b.opacity<0||b.opacity>1)throw Error('배경 크기 또는 투명도를 확인하세요.');}
+ });return p;
+}
+function canonical_(v){if(Array.isArray(v))return '['+v.map(canonical_).join(',')+']';if(v&&typeof v==='object')return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical_(v[k])).join(',')+'}';return JSON.stringify(v);}
+function digest_(s){return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,s,Utilities.Charset.UTF_8).map(b=>('0'+((b+256)%256).toString(16)).slice(-2)).join('');}
+function counts_(p){return p.floors.map(f=>({name:f.name,items:f.items.length,background:!!f.background}));}
+function public_(m){return {projectId:m.projectId,name:m.name,revision:m.revision,savedAt:m.savedAt,counts:m.counts,folderUrl:'https://drive.google.com/drive/folders/'+m.folderId};}
+function list_(){const all=props_().getProperties();return Object.keys(all).filter(k=>k.indexOf(FS_APP.prefix)===0).map(k=>public_(parseJson_(all[k],'LIST'))).sort((a,b)=>b.savedAt.localeCompare(a.savedAt));}
+function bootstrap(){return {projects:list_(),lastProjectId:props_().getProperty(FS_APP.last)||'',appVersion:'1.0.4'};}
+function write_(m,p,requestId){
+ const folder=folder_(m),raw=JSON.stringify(p),hash=digest_(canonical_(p)),stored=JSON.parse(raw);
+ // Deduplicate background image bytes across every revision.
+ stored.floors.forEach(f=>{if(!f.background)return;const b=f.background,key=digest_(b.data),name='asset_'+key,found=folder.getFilesByName(name);let file;
+  if(found.hasNext())file=found.next();else{const parts=b.data.match(/^data:(image\/(?:png|jpeg|webp));base64,(.*)$/);file=folder.createFile(Utilities.newBlob(Utilities.base64Decode(parts[2]),parts[1],name));}
+  b.assetId=file.getId();b.mime=file.getMimeType();delete b.data;
+ });
+ const revision=m.revision+1,savedAt=new Date().toISOString(),envelope={format:'fire-sketch-drive',version:1,projectId:m.projectId,revision,savedAt,requestId,hash,project:stored};
+ const file=folder.createFile(Utilities.newBlob(JSON.stringify(envelope),'application/json','r_'+String(revision).padStart(8,'0')+'_'+requestId+'.json'));
+ const next=Object.assign({},m,{name:p.name,revision,savedAt,counts:counts_(p),headId:file.getId(),requestId,hash});
+ // Verify the actual Drive bytes and hydrated project BEFORE publishing the new head.
+ read_(next,next.headId);
+ props_().setProperty(FS_APP.prefix+m.projectId,JSON.stringify(next));return next;
+}
+function createProject(raw,requestId){
+ const p=checked_(raw);id_(requestId);
+ return lock_(()=>{const exists=props_().getProperty(FS_APP.prefix+requestId);if(exists){const m=parseJson_(exists,'CREATE_META');if(m.hash!==digest_(canonical_(p)))throw Error('요청 내용이 바뀌었습니다. 새로 시도하세요.');return public_(m);}
+  if(list_().length>=100)throw Error('이 앱의 계정별 도면 수는 최대 100개입니다.');
+  const f=root_().createFolder(p.name+' — '+requestId),m={projectId:requestId,folderId:f.getId(),revision:0};
+  const next=write_(m,p,requestId);props_().setProperty(FS_APP.last,requestId);return public_(next);
+ });
+}
+function read_(m,fileId){
+ const folder=folder_(m),file=childFile_(folder,fileId);
+ if(!/^r_\d{8}_/.test(file.getName()))throw Error('도면 이력 파일이 아닙니다.');
+ const e=parseJson_(file.getBlob().getDataAsString('UTF-8'),'DRIVE_FILE');
+ if(!e||e.format!=='fire-sketch-drive'||e.version!==1||e.projectId!==m.projectId||!e.project||!Array.isArray(e.project.floors))throw Error('도면 이력 형식이 다릅니다.');
+ e.project.floors.forEach(f=>{if(!f.background)return;const b=f.background,asset=childFile_(folder,b.assetId),mime=asset.getMimeType();
+  if(!/^image\/(png|jpeg|webp)$/.test(mime))throw Error('배경 이미지 종류가 잘못되었습니다.');
+  b.data='data:'+mime+';base64,'+Utilities.base64Encode(asset.getBlob().getBytes());delete b.assetId;delete b.mime;
+ });
+ const raw=JSON.stringify(e.project);checked_(raw);
+ if(digest_(canonical_(e.project))!==e.hash)throw Error('도면 무결성 확인에 실패했습니다. 다른 이전 버전을 확인하세요.');
+ return {projectId:m.projectId,revision:e.revision,savedAt:e.savedAt,project:e.project,appVersion:'1.0.4',folderUrl:'https://drive.google.com/drive/folders/'+m.folderId};
+}
+function loadProject(projectId){const m=meta_(projectId),result=read_(m,m.headId);props_().setProperty(FS_APP.last,projectId);return result;}
+function saveProject(projectId,expectedRevision,raw,requestId){
+ const p=checked_(raw);id_(requestId);
+ return lock_(()=>{const m=meta_(projectId),hash=digest_(canonical_(p));
+  if(m.requestId===requestId){if(m.hash!==hash)throw Error('같은 저장 요청의 내용이 변경되었습니다.');return {ok:true,...public_(m)};}
+  if(expectedRevision!==m.revision)return {ok:false,conflict:true,currentRevision:m.revision};
+  // Verify the current head before accepting edits; damaged head is never silently replaced.
+  read_(m,m.headId);
+  if(hash===m.hash)return {ok:true,...public_(m)};
+  return {ok:true,...public_(write_(m,p,requestId))};
+ });
+}
+function listVersions(projectId){
+ const m=meta_(projectId),files=folder_(m).getFiles(),out=[];
+ while(files.hasNext()){const f=files.next(),match=f.getName().match(/^r_(\d{8})_/);if(match)out.push({fileId:f.getId(),revision:Number(match[1]),savedAt:f.getDateCreated().toISOString(),current:f.getId()===m.headId});}
+ return out.sort((a,b)=>b.revision-a.revision||b.savedAt.localeCompare(a.savedAt)).slice(0,100);
+}
+function loadVersion(projectId,fileId){return read_(meta_(projectId),fileId);}
+
+/** Read-only diagnostics: never creates, replaces or deletes drawings. */
+function diagnoseStorage(){
+ const report={appVersion:'1.0.4',checkedAt:new Date().toISOString(),lines:[]};
+ const p=props_(),id=p.getProperty(FS_APP.last);
+ const all=p.getProperties(),keys=Object.keys(all).filter(k=>k.indexOf(FS_APP.prefix)===0);
+ report.lines.push('등록된 도면: '+keys.length+'개');
+ keys.forEach(k=>{try{parseJson_(all[k],'META');}catch(e){report.lines.push('도면 목록 오류: '+e.message);}});
+ if(!id){report.lines.push('최근 열었던 도면 기록 없음. 도면 목록에서 선택하세요.');return report;}
+ let m;try{m=meta_(id);report.lines.push('최신 저장 버전: v'+m.revision);}catch(e){report.lines.push('연결 정보: '+e.message);return report;}
+ try{const f=childFile_(folder_(m),m.headId),raw=f.getBlob().getDataAsString('UTF-8');report.lines.push('최신 파일: 문자 '+raw.length+'개');parseJson_(raw,'DRIVE_FILE');report.lines.push('최신 파일 JSON 형식: 정상');}catch(e){report.lines.push('최신 파일 검사: '+e.message);}
+ try{const value=read_(m,m.headId);report.lines.push('도면·배경 무결성: 정상');report.lines.push('층별 도형 수: '+value.project.floors.map(f=>f.name+' '+f.items.length+'개').join(' / '));}catch(e){report.lines.push('전체 불러오기 검사: '+e.message);}
+ try{report.lines.push('복구 목록에서 확인 가능한 이력: '+listVersions(id).length+'개 (최대 100개 표시)');}catch(e){report.lines.push('이력 목록: '+e.message);}
+ return report;
+}
