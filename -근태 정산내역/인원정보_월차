@@ -1,0 +1,480 @@
+/**
+ * =====================================================================
+ * 👤 인원정보(근무기간 · 월차) — 새 파일로 추가
+ * =====================================================================
+ *
+ * [해결하는 문제]
+ *  1) 월 중간에 배치된 신입(또는 월 중간 퇴사·전출자)의 "근무기간 밖" 날짜가
+ *     공란 → "1"로 채워져 근무일·기본식이 부풀려지는 문제
+ *     → '인원정보' 시트의 근무 시작일/종료일 밖 날짜는 "-" + 회색으로 고정
+ *       (특수문자 외 → 1, PBL → 연 처리에서도 그대로 유지됨)
+ *  2) 근속 1년 미만(신입·촉탁 계약직) 월차 부여(근태 F열 '년차')를 까먹는 문제
+ *     → 월차 기준일로 "이번 달까지 생겼어야 할 월차 수"를 계산해 근태 F열과 대조,
+ *       다르면 경고 + 자동 수정 제안. 근속 1년 도래 달에는 전환 알림.
+ *
+ * [까먹음 방지 장치]
+ *  • 올인원/근무계획 가져오기 실행 시, 근무계획에 "전월엔 없던 이름"이 나타났는데
+ *    '인원정보'에 등록이 안 돼 있으면 → 근무 시작일을 물어보고 등록해야 진행됨
+ *  • 근태 시트 입사일자(E열)가 1년 미만인데 월차 기준일이 미등록이면 → 경고 + 자동 등록 제안
+ *
+ * '인원정보' 시트 열 구성 (1행 제목, 2행부터 한 사람씩)
+ *  A 성명 | B 근무 시작일(배치일) | C 근무 종료일(퇴사·전출) | D 월차 기준일(입사·계약 시작)
+ *  E 월차 조정(±, 결근 달 등) | F 비고
+ *  - B/C 비워두면 제한 없음, D 비워두면 월차 대상 아님
+ */
+
+const STAFF_INFO_SHEET = '인원정보';
+const STAFF_INFO_HEADERS = ['성명', '근무 시작일(배치일)', '근무 종료일(퇴사·전출)', '월차 기준일(입사·계약 시작)', '월차 조정(±)', '비고'];
+const STAFF_INFO_NOTES = [
+  '근무계획/근무현황표에 적힌 이름 (띄어쓰기 무시)',
+  '이 부서에서 근무를 시작한 날. 이 날짜 이전은 "-"로 처리됨. 비우면 제한 없음',
+  '퇴사·전출 등으로 근무가 끝난 마지막 날. 이 날짜 이후는 "-"로 처리됨. 비우면 제한 없음',
+  '근속 1년 미만 월차 대상자만 입력(신입 입사일, 촉탁 계약 시작일). 비우면 월차 점검 대상 아님',
+  '결근 등으로 월차가 안 생긴 달이 있으면 -1처럼 입력 (계산값에 더해짐)',
+  '자유 메모',
+];
+
+const MASK_MARK = '-';         // 근무기간 밖 날짜 표시
+const MASK_BG   = '#d9d9d9';   // 근무기간 밖 날짜 배경(회색)
+
+const MONTHLY_LEAVE_MAX  = 11; // 1년 미만 월차 최대 개수
+const ATTEND_COL_NAME    = 4;  // X월 근태 D열: 성명
+const ATTEND_COL_HIRE    = 5;  // X월 근태 E열: 입사일자
+const ATTEND_COL_ANNUAL  = 6;  // X월 근태 F열: 총휴가일수-년차
+
+// 월차 발생 판정 기준
+//  'end'   : 정산월 말일까지 발생한 월차 포함 (예: 10/14 입사 → 11월 정산에 1개)
+//  'start' : 정산월 1일까지 발생한 월차만   (예: 10/14 입사 → 11월 정산에 0개)
+const MONTHLY_LEAVE_CUTOFF = 'end';
+
+// =====================================================================
+// 날짜 유틸 (yyyymmdd 숫자로 비교 → 시간대 문제 없음)
+// =====================================================================
+
+function getTz_() {
+  return SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+}
+
+function ymdOf_(y, m, d) { return y * 10000 + m * 100 + d; }
+
+function toYmd_(date) {
+  return Number(Utilities.formatDate(date, getTz_(), 'yyyyMMdd'));
+}
+
+function ymdToText_(ymd) {
+  const s = String(ymd);
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+}
+
+function validYmd_(y, m, d) {
+  if (!y || m < 1 || m > 12 || d < 1 || d > getLastDayOfMonth(y, m)) return null;
+  return ymdOf_(y, m, d);
+}
+
+/** 셀 값/입력 문자열 → yyyymmdd 숫자 (못 읽으면 null) */
+function parseYmd_(v, defYear, defMonth) {
+  if (v == null || v === '') return null;
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : toYmd_(v);
+  if (typeof v === 'number') {
+    if (v > 19000101 && v < 30000000) return v;               // 20261014 형식
+    if (v > 20000 && v < 80000) {                              // 엑셀 날짜 일련번호
+      const ms = Math.round((v - 25569) * 86400000);
+      return Number(Utilities.formatDate(new Date(ms), 'UTC', 'yyyyMMdd'));
+    }
+    if (v >= 1 && v <= 31 && defYear && defMonth) return validYmd_(defYear, defMonth, v);
+    return null;
+  }
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?$/);
+  if (m) return validYmd_(+m[1], +m[2], +m[3]);
+  m = s.match(/^(\d{8})$/);
+  if (m) return validYmd_(+s.slice(0, 4), +s.slice(4, 6), +s.slice(6, 8));
+  m = s.match(/^(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?$/);
+  if (m && defYear) return validYmd_(defYear, +m[1], +m[2]);
+  m = s.match(/^(\d{1,2})\s*일?$/);
+  if (m && defYear && defMonth) return validYmd_(defYear, defMonth, +m[1]);
+  return null;
+}
+
+/** yyyymmdd + n개월 (말일 보정: 1/31 + 1개월 → 2/28) */
+function addMonthsYmd_(ymd, n) {
+  let y = Math.floor(ymd / 10000);
+  let m = Math.floor(ymd / 100) % 100 + n;
+  const d = ymd % 100;
+  y += Math.floor((m - 1) / 12);
+  m = (((m - 1) % 12) + 12) % 12 + 1;
+  return ymdOf_(y, m, Math.min(d, getLastDayOfMonth(y, m)));
+}
+
+function normName_(s) {
+  return (s == null ? '' : String(s)).replace(/\s/g, '');
+}
+
+/** [1,2,3,7,8] → "1~3일, 7~8일" */
+function summarizeDays_(days) {
+  if (!days.length) return '';
+  const parts = [];
+  let s = days[0], p = days[0];
+  for (let i = 1; i <= days.length; i++) {
+    const d = days[i];
+    if (d === p + 1) { p = d; continue; }
+    parts.push(s === p ? `${s}일` : `${s}~${p}일`);
+    s = p = d;
+  }
+  return parts.join(', ');
+}
+
+// =====================================================================
+// '인원정보' 시트 읽기/쓰기
+// =====================================================================
+
+function getStaffInfoSheet_(ss, create) {
+  let sh = ss.getSheetByName(STAFF_INFO_SHEET);
+  if (!sh && create) {
+    sh = ss.insertSheet(STAFF_INFO_SHEET);
+    const head = sh.getRange(1, 1, 1, STAFF_INFO_HEADERS.length);
+    head.setValues([STAFF_INFO_HEADERS])
+        .setFontWeight('bold')
+        .setBackground('#e8f0fe')
+        .setWrap(true)
+        .setVerticalAlignment('middle');
+    head.setNotes([STAFF_INFO_NOTES]);
+    sh.setFrozenRows(1);
+    sh.getRange('B:D').setNumberFormat('yyyy-mm-dd');
+    sh.setColumnWidth(1, 90);
+    sh.setColumnWidths(2, 3, 150);
+    sh.setColumnWidth(5, 90);
+    sh.setColumnWidth(6, 240);
+  }
+  return sh;
+}
+
+/** 인원정보 → { 이름키: { name, row, start, end, leaveBase, leaveAdj, note } } */
+function loadStaffInfo_(ss) {
+  const sh = getStaffInfoSheet_(ss, false);
+  const map = {};
+  if (!sh || sh.getLastRow() < 2) return map;
+  const vals = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
+  vals.forEach((r, i) => {
+    const key = normName_(r[0]);
+    if (!key) return;
+    map[key] = {
+      name: String(r[0]).trim(),
+      row: i + 2,
+      start: parseYmd_(r[1]),
+      end: parseYmd_(r[2]),
+      leaveBase: parseYmd_(r[3]),
+      leaveAdj: Number(r[4]) || 0,
+      note: r[5],
+    };
+  });
+  return map;
+}
+
+/** 이름 기준으로 추가/수정 (patch에 들어있는 항목만 바꿈) */
+function upsertStaffInfo_(ss, name, patch) {
+  const sh = getStaffInfoSheet_(ss, true);
+  const cur = loadStaffInfo_(ss)[normName_(name)];
+  const merged = Object.assign(
+    { start: null, end: null, leaveBase: null, leaveAdj: 0, note: '' },
+    cur || {},
+    patch
+  );
+  const row = cur ? cur.row : Math.max(sh.getLastRow(), 1) + 1;
+  const d = ymd => (ymd ? ymdToText_(ymd) : '');
+  sh.getRange(row, 1, 1, 6).setValues([[
+    cur ? cur.name : String(name).trim(),
+    d(merged.start),
+    d(merged.end),
+    d(merged.leaveBase),
+    merged.leaveAdj ? merged.leaveAdj : '',
+    merged.note || '',
+  ]]);
+  SpreadsheetApp.flush();
+}
+
+// =====================================================================
+// ⛔ 근무기간 밖 날짜 표시 ("-" + 회색)
+// =====================================================================
+
+/** 해당 월에서 근무기간 밖인 날짜 목록 */
+function getOffDays_(info, year, month) {
+  const last = getLastDayOfMonth(year, month);
+  const off = [];
+  for (let d = 1; d <= last; d++) {
+    const ymd = ymdOf_(year, month, d);
+    if ((info.start && ymd < info.start) || (info.end && ymd > info.end)) off.push(d);
+  }
+  return off;
+}
+
+/**
+ * 대상 시트(8행 ~ "합계" 직전)에서 인원정보 근무기간 밖 날짜를 "-" + 회색으로 덮어씀.
+ * 근무현황표 · 간식정산 · 연장야근정산 · 차월 근무계획 공통.
+ */
+function applyEmploymentMask_(sheet, year, month, staffMap) {
+  const map = staffMap || loadStaffInfo_(sheet.getParent());
+  if (!Object.keys(map).length) return [];
+
+  const lastRow = getDestLastDataRow_(sheet);
+  const names = readWorkerNames(sheet, DEST_NAME_START_ROW, lastRow);
+  const dateRow = sheet.getRange('C5:AG5').getValues()[0];
+  const colOfDay = {};
+  dateRow.forEach((v, c) => { const d = Number(v); if (d > 0) colOfDay[d] = c; });
+
+  const logs = [];
+  for (const { name, rowIndex } of names) {
+    const info = map[normName_(name)];
+    if (!info) continue;
+    const off = getOffDays_(info, year, month);
+    if (!off.length) continue;
+
+    const rng = sheet.getRange(DEST_NAME_START_ROW + rowIndex, 3, 1, dateRow.length);
+    const v = rng.getValues();
+    const bg = rng.getBackgrounds();
+    off.forEach(d => {
+      const c = colOfDay[d];
+      if (c == null) return;
+      v[0][c] = MASK_MARK;
+      bg[0][c] = MASK_BG;
+    });
+    rng.setValues(v);
+    rng.setBackgrounds(bg);
+    logs.push(`   ⛔ ${name}: ${summarizeDays_(off)} 근무기간 외 → "-"`);
+  }
+  SpreadsheetApp.flush();
+  return logs;
+}
+
+// =====================================================================
+// 🆕 신규 인원 감지 → 근무 시작일 등록 (까먹음 방지)
+// =====================================================================
+
+/** 근무계획 원본 시트의 이름 목록 (5행 ~ "계" 직전, C열) */
+function readSourceNames_(srcSheet) {
+  const last = getSourceLastDataRow_(srcSheet);
+  const n = last - SRC_NAME_START_ROW + 1;
+  if (n < 1) return [];
+  return srcSheet.getRange(SRC_NAME_START_ROW, 3, n, 1).getValues()
+    .map(r => String(r[0] == null ? '' : r[0]).trim())
+    .filter(s => s !== '');
+}
+
+function askDate_(ui, title, baseMsg, year, month, allowBlank) {
+  let msg = baseMsg;
+  for (let tries = 0; tries < 3; tries++) {
+    const res = ui.prompt(title, msg, ui.ButtonSet.OK_CANCEL);
+    if (res.getSelectedButton() !== ui.Button.OK) return { cancel: true };
+    const txt = res.getResponseText().trim();
+    if (txt === '' && allowBlank) return { ymd: null };
+    const ymd = parseYmd_(txt, year, month);
+    if (ymd) return { ymd };
+    msg = `⚠️ "${txt}"은(는) 날짜로 읽을 수 없습니다. 다시 입력해 주세요.\n\n` + baseMsg;
+  }
+  return { cancel: true };
+}
+
+/**
+ * 근무계획 {month}월 시트에 "전월 시트엔 없던 이름"이 있고 '인원정보'에도 없으면
+ * 근무 시작일 · 월차 대상 여부를 물어서 등록.
+ * 취소하면 { ok:false } → 호출한 쪽에서 작업 중단.
+ */
+function ensureNewMembersRegistered_(ss, year, month) {
+  const ui = SpreadsheetApp.getUi();
+  const logs = [];
+  const srcSS = linkOpen('근무계획');
+  const curSheet = srcSS.getSheetByName(`${month}월`);
+  if (!curSheet) return { ok: true, logs };
+
+  const prevMonth = month === 1 ? 12 : month - 1;
+  const prevSheet = srcSS.getSheetByName(`${prevMonth}월`);
+  if (!prevSheet) {
+    logs.push(` ℹ️ 근무계획 "${prevMonth}월" 시트가 없어 ${month}월 신규 인원 비교 생략`);
+    return { ok: true, logs };
+  }
+
+  const prevSet = new Set(readSourceNames_(prevSheet).map(normName_));
+  const staff = loadStaffInfo_(ss);
+  const newcomers = readSourceNames_(curSheet)
+    .filter(n => !prevSet.has(normName_(n)) && !staff[normName_(n)]);
+
+  if (!newcomers.length) {
+    logs.push(` ✅ ${month}월 근무계획: 미등록 신규 인원 없음`);
+    return { ok: true, logs };
+  }
+
+  for (const name of newcomers) {
+    const title = `🆕 신규 인원 확인 — ${name}`;
+    const startRes = askDate_(ui, title,
+      `『${name}』 님이 ${month}월 근무계획에 새로 나타났습니다. (${prevMonth}월에는 없음)\n\n` +
+      `이 부서에서 근무를 시작한 날짜를 입력하세요.\n` +
+      `  예) ${month}/14   또는   ${year}-${String(month).padStart(2, '0')}-14\n\n` +
+      `• ${month}월 1일 이전부터 근무한 사람이면 빈칸으로 [확인]\n` +
+      `• [취소]하면 작업을 멈춥니다 ('인원정보' 시트에 직접 적고 다시 실행해도 됨)`,
+      year, month, true);
+    if (startRes.cancel) return { ok: false, logs };
+
+    let leaveBase = null;
+    const isMonthly = ui.alert(title,
+      `『${name}』 님은 근속 1년 미만이라 매달 월차가 생기는 대상(신입·촉탁 계약직)입니까?`,
+      ui.ButtonSet.YES_NO);
+    if (isMonthly === ui.Button.YES) {
+      const baseRes = askDate_(ui, title,
+        `월차 기준일(입사일 또는 계약 시작일)을 입력하세요.\n\n` +
+        (startRes.ymd ? `• 빈칸으로 [확인]하면 근무 시작일(${ymdToText_(startRes.ymd)})과 같게 처리` : '• 예) 2026-10-14'),
+        year, month, !!startRes.ymd);
+      if (baseRes.cancel) return { ok: false, logs };
+      leaveBase = baseRes.ymd || startRes.ymd;
+    }
+
+    upsertStaffInfo_(ss, name, { start: startRes.ymd, leaveBase: leaveBase });
+    logs.push(` 🆕 ${name}: 근무 시작일 ${startRes.ymd ? ymdToText_(startRes.ymd) : '(제한 없음)'}` +
+      (leaveBase ? ` / 월차 기준일 ${ymdToText_(leaveBase)}` : ' / 월차 대상 아님') + ' → 인원정보 등록');
+  }
+  return { ok: true, logs };
+}
+
+// =====================================================================
+// 🗓️ 1년 미만 월차 점검 (근태 F열 '년차' 대조)
+// =====================================================================
+
+/**
+ * @param interactive true면 불일치·미등록 발견 시 [예/아니요]로 자동 반영 여부를 물어봄
+ * @return logs 배열
+ */
+function checkMonthlyLeave_(ss, year, month, interactive) {
+  const logs = [];
+  const attendName = findSheetByPattern(ss, new RegExp(`^${month}월 근태$`));
+  if (!attendName) { logs.push(` ⚠️ "${month}월 근태" 시트 없음 — 월차 점검 생략`); return logs; }
+
+  const sh = ss.getSheetByName(attendName);
+  const sumRow = getAttendSumRow(sh, ATTEND_START_ROW);
+  const n = sumRow - ATTEND_START_ROW;
+  if (n < 1) return logs;
+
+  const vals = sh.getRange(ATTEND_START_ROW, ATTEND_COL_NAME, n, 3).getValues(); // D 성명, E 입사일자, F 년차
+  const forms = sh.getRange(ATTEND_START_ROW, ATTEND_COL_ANNUAL, n, 1).getFormulas();
+  const staff = loadStaffInfo_(ss);
+
+  const monthStart = ymdOf_(year, month, 1);
+  const monthEnd = ymdOf_(year, month, getLastDayOfMonth(year, month));
+  const cutoff = MONTHLY_LEAVE_CUTOFF === 'start' ? monthStart : monthEnd;
+
+  const fixes = [];     // { row, name, from, to }
+  const registers = []; // { name, hire }
+  let targetCount = 0;
+
+  for (let i = 0; i < n; i++) {
+    const name = String(vals[i][0] == null ? '' : vals[i][0]).trim();
+    const key = normName_(name);
+    if (!key) continue;
+    const row = ATTEND_START_ROW + i;
+    const info = staff[key];
+    const base = info && info.leaveBase;
+
+    // 안전망: 근태 입사일자로 보면 1년 미만인데 월차 기준일 미등록
+    if (!base) {
+      const hire = parseYmd_(vals[i][1]);
+      if (hire && hire <= monthEnd && addMonthsYmd_(hire, 12) > monthStart) {
+        logs.push(` ⚠️ ${name}: 근태 입사일자 ${ymdToText_(hire)} → 근속 1년 미만인데 '인원정보'에 월차 기준일이 없음`);
+        registers.push({ name, hire });
+      }
+      continue;
+    }
+
+    const oneYear = addMonthsYmd_(base, 12);
+    if (oneYear < monthStart) continue;           // 1년 지난 지 오래 → 점검 대상 아님
+    if (oneYear <= monthEnd) {
+      logs.push(` 🎉 ${name}: ${ymdToText_(oneYear)} 근속 1년 도래 → 이번 달부터 연차 부여 기준으로 전환됐는지 확인`);
+      continue;
+    }
+
+    targetCount++;
+    let count = 0;
+    for (let k = 1; k <= MONTHLY_LEAVE_MAX; k++) {
+      if (addMonthsYmd_(base, k) <= cutoff) count++;
+    }
+    const expected = Math.max(0, Math.min(MONTHLY_LEAVE_MAX, count + (info.leaveAdj || 0)));
+    const curRaw = vals[i][2];
+    const current = (curRaw === '' || curRaw == null) ? 0 : Number(curRaw);
+    const adjText = info.leaveAdj ? ` (조정 ${info.leaveAdj > 0 ? '+' : ''}${info.leaveAdj} 포함)` : '';
+
+    if (current === expected) {
+      logs.push(` ✅ ${name}: 월차 ${expected}개${adjText} — 근태 F${row} 일치`);
+    } else if (forms[i][0]) {
+      logs.push(` ❗ ${name}: 근태 F${row} = ${curRaw} / 예상 ${expected}개${adjText} — F열이 수식이라 자동 수정 안 함, 직접 확인`);
+    } else {
+      logs.push(` ❗ ${name}: 근태 F${row} = ${curRaw === '' ? '빈칸' : curRaw} / 예상 ${expected}개${adjText} (기준일 ${ymdToText_(base)})`);
+      fixes.push({ row, name, from: curRaw, to: expected });
+    }
+  }
+
+  if (!targetCount && !registers.length && !logs.length) logs.push(' ✅ 1년 미만 월차 대상자 없음');
+
+  if (interactive && (fixes.length || registers.length)) {
+    const ui = SpreadsheetApp.getUi();
+    const lines = []
+      .concat(fixes.map(f => `• [${attendName}] ${f.name} F${f.row}: ${f.from === '' ? '빈칸' : f.from} → ${f.to}`))
+      .concat(registers.map(r => `• [인원정보] ${r.name} 월차 기준일 = ${ymdToText_(r.hire)} (근태 입사일자)`));
+    const ans = ui.alert('🗓️ 월차 점검 — 자동 반영할까요?',
+      lines.join('\n') +
+      `\n\n※ 촉탁 계약직은 근태 입사일자가 최초 입사일일 수 있으니, 계약 시작일과 다르면 [아니요] 후 '인원정보'에 직접 입력하세요.`,
+      ui.ButtonSet.YES_NO);
+    if (ans === ui.Button.YES) {
+      fixes.forEach(f => sh.getRange(f.row, ATTEND_COL_ANNUAL).setValue(f.to));
+      registers.forEach(r => upsertStaffInfo_(ss, r.name, { leaveBase: r.hire }));
+      SpreadsheetApp.flush();
+      logs.push(` 🛠️ 자동 반영: F열 ${fixes.length}건 수정 / 인원정보 ${registers.length}건 등록`);
+      if (registers.length) logs.push('   (새로 등록한 인원은 다음 실행부터 월차 개수 대조가 됩니다 — 지금 한 번 더 점검 메뉴를 눌러도 됨)');
+    } else {
+      logs.push(' ⏭️ 자동 반영 안 함 — 위 ❗/⚠️ 항목 직접 확인 필요');
+    }
+  }
+  return logs;
+}
+
+// =====================================================================
+// 메뉴용
+// =====================================================================
+
+/** 👤 인원정보 시트 열기 (없으면 만들기) */
+function openStaffInfoSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const existed = !!ss.getSheetByName(STAFF_INFO_SHEET);
+  const sh = getStaffInfoSheet_(ss, true);
+  ss.setActiveSheet(sh);
+  ss.toast(
+    existed ? '근무 시작/종료일, 월차 기준일을 확인·수정하세요.'
+            : '새로 만들었습니다. 제목 셀에 마우스를 올리면 설명이 보입니다.',
+    '👤 인원정보', 6);
+}
+
+/** 🗓️ 월차 대상자 점검 (X월 근무현황표 Z3/X3 기준 월) */
+function checkMonthlyLeave() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const { year, month } = getCurrentYearMonth(ss);
+    const logs = checkMonthlyLeave_(ss, year, month, true);
+    ui.alert(`🗓️ ${year}년 ${month}월 1년 미만 월차 점검\n\n` + logs.join('\n'));
+  } catch (e) {
+    ui.alert('❌ 오류 발생\n\n' + e.message);
+    console.error(e);
+  }
+}
+
+/** ⛔ 근무기간 외 "-" 다시 표시 (현재 시트) */
+function reapplyEmploymentMask() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getActiveSheet();
+    const { year, month } = resolveYearMonthForActiveSheet(ss, sheet);
+    const logs = applyEmploymentMask_(sheet, year, month);
+    ui.alert(`⛔ [${sheet.getName()}] ${year}년 ${month}월 근무기간 외 표시\n\n` +
+      (logs.length ? logs.join('\n') : '해당 인원 없음'));
+  } catch (e) {
+    ui.alert('❌ 오류 발생\n\n' + e.message);
+    console.error(e);
+  }
+}

@@ -1,0 +1,348 @@
+/**
+ * =====================================================================
+ * 🩺 구조·수식 총점검 — 새 파일로 추가
+ * =====================================================================
+ * 행을 넣거나 뺀 뒤 깨지기 쉬운 곳을 자동으로 찾아줌 (읽기 전용)
+ *  ① 합계행 SUM/COUNTIF 범위가 인원 행 전체를 덮는지
+ *  ② 새로 넣은 행에 수식이 빠졌는지 / 다른 행과 수식이 다른 칸
+ *  ③ 다른 시트를 같은 행 번호로 참조하는 수식이 "같은 사람"을 가리키는지
+ *  ④ 시트별 인원 누락·순서
+ *  ⑤ 합계행 아래 그룹별 부분 집계 범위(예: 품질 11~13행)의 경계
+ *  ⑥ 근무(AH) 수식이 "-"(근무기간 외)를 근무일로 세는지 → 확인 후 자동 수정
+ *  ⑦ 결과보고 A12 총원(수동값) ≠ 실제 인원
+ */
+
+const AUDIT_TARGETS = [
+  { label: '근무현황표',    pattern: /^\d+월 근무현황표$/, start: DEST_NAME_START_ROW, nameCol: 2, base: true },
+  { label: '근태',          pattern: /^\d+월 근태$/,       start: ATTEND_START_ROW,    nameCol: 4, missLevel: 'error' },
+  { label: '연장야근정산',  pattern: /^연장야근정산$/,     start: DEST_NAME_START_ROW, nameCol: 2, missLevel: 'error' },
+  { label: '차월 근무계획', pattern: /^차월 근무계획$/,    start: DEST_NAME_START_ROW, nameCol: 2, missLevel: 'warn' },
+  { label: '간식정산',      pattern: /^간식정산$/,         start: DEST_NAME_START_ROW, nameCol: 2, subset: true },
+  { label: '야근식대',      pattern: /^야근식대$/,         start: 5,                   nameCol: 4, subset: true },
+];
+
+const AUDIT_RANGE_RE = /\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?(\d+)/g;
+const AUDIT_XREF_RE = /(?:'([^']+)'|([A-Za-z0-9가-힣_.]+))!\$?([A-Z]{1,3})\$?(\d+)(?![\d:])/g;
+const AUDIT_COL_AH = 34;
+
+// =====================================================================
+// 메인
+// =====================================================================
+
+/** @return { issues:[{level,sheet,msg,tag}], dashFix:[{sh,row}] } */
+function auditStructure_(ss) {
+  const issues = [];
+  const add = (level, sheet, msg, tag) => issues.push({ level, sheet, msg, tag });
+  const ctx = {};
+  const byName = {};
+
+  for (const t of AUDIT_TARGETS) {
+    const shName = findSheetByPattern(ss, t.pattern);
+    if (!shName) { add('info', t.label, '시트 없음 — 점검 생략'); continue; }
+    const sh = ss.getSheetByName(shName);
+    const total = findTotalRow_(sh, t.start, KEY_TOTAL, true);
+    if (total < 0) { add('error', shName, `${t.start}행 이후 A/B열에서 "합계"/"계" 행을 못 찾음`); continue; }
+    const last = total - 1;
+    const n = last - t.start + 1;
+    const rowName = {};
+    if (n > 0) {
+      sh.getRange(t.start, t.nameCol, n, 1).getValues().forEach((r, i) => {
+        const s = String(r[0] == null ? '' : r[0]).trim();
+        if (s) rowName[t.start + i] = s;
+      });
+    }
+    const c = { t, sh, shName, start: t.start, last, total, n, rowName, lastCol: sh.getLastColumn() };
+    ctx[t.label] = c;
+    byName[shName] = c;
+  }
+
+  for (const c of Object.values(ctx)) {
+    if (c.n < 1) { add('error', c.shName, '인원 행이 없음'); continue; }
+    auditTotalRow_(c, add);
+    auditRowFormulas_(c, add);
+    auditCrossRefs_(c, byName, add);
+    auditPartialRanges_(c, add);
+  }
+  auditMembership_(ctx, add);
+  auditHeadcount_(ss, ctx, add);
+
+  const dashFix = findDashFormulaFix_(ctx);
+  if (dashFix.length) {
+    const masked = Object.values(loadStaffInfo_(ss)).some(s => s.start || s.end);
+    add(masked ? 'error' : 'warn', '근무현황표·차월',
+      `근무(AH) 수식이 "-"(근무기간 외) 칸을 근무일로 셈 — ${dashFix.length}개 행 (자동 수정 가능)`, 'dash');
+  }
+  return { issues, dashFix };
+}
+
+// ① 합계행 범위
+function auditTotalRow_(c, add) {
+  const f = c.sh.getRange(c.total, 1, 1, c.lastCol).getFormulas()[0];
+  const bad = {};
+  f.forEach((fx, j) => {
+    if (!fx) return;
+    for (const m of fx.matchAll(AUDIT_RANGE_RE)) {
+      if (fx[m.index - 1] === '!') continue;          // 다른 시트 범위는 제외
+      const s = +m[2], e = +m[4];
+      if (s < c.start - 1 || s > c.start + 1) continue; // 인원 범위를 겨냥한 것만
+      if (e === c.last) continue;
+      const key = `${s}~${e}`;
+      (bad[key] = bad[key] || []).push(j + 1);
+    }
+  });
+  for (const [key, cols] of Object.entries(bad)) {
+    const [s, e] = key.split('~').map(Number);
+    const what = e < c.last
+      ? `${e + 1}~${c.last}행(${namesBetween_(c, e + 1, c.last)}) 빠짐`
+      : `${c.last + 1}~${e}행(합계행 포함) 넘침`;
+    add('error', c.shName, `${c.total}행 합계 ${compactCols_(uniq_(cols))}열: ${s}~${e}행만 집계 → ${what}`);
+  }
+}
+
+// ② 행별 수식 누락 / 다른 수식
+function auditRowFormulas_(c, add) {
+  const r1 = c.sh.getRange(c.start, 1, c.n, c.lastCol).getFormulasR1C1();
+  const named = [];
+  for (let i = 0; i < c.n; i++) if (c.rowName[c.start + i]) named.push(i);
+  if (named.length < 2) return;
+
+  const missing = {}, diff = {};
+  let checkedCols = 0;
+  for (let col = 0; col < c.lastCol; col++) {
+    const pats = r1.map(r => normR1C1_(r[col]));
+    const cnt = {};
+    named.forEach(i => { if (pats[i]) cnt[pats[i]] = (cnt[pats[i]] || 0) + 1; });
+    const filled = Object.values(cnt).reduce((a, b) => a + b, 0);
+    if (filled < Math.ceil(named.length * 0.6)) continue;   // 일부 행에만 있는 열은 판단 안 함
+    checkedCols++;
+    let major = null, best = 0;
+    for (const [p, k] of Object.entries(cnt)) if (k > best) { major = p; best = k; }
+    named.forEach(i => {
+      const row = c.start + i;
+      if (!pats[i]) (missing[row] = missing[row] || []).push(col + 1);
+      else if (pats[i] !== major && best >= 2) (diff[row] = diff[row] || []).push(col + 1);
+    });
+  }
+  for (const [row, cols] of Object.entries(missing)) {
+    // 수식 칸 대부분이 비어 있으면 = 새로 넣고 수식을 안 채운 행 → 꼭 확인
+    // 몇 칸만 다르면 = 그룹(품질 등)별로 원래 다르게 만든 행일 가능성 → 확인 권장
+    const fresh = cols.length > checkedCols * 0.5;
+    add(fresh ? 'error' : 'warn', c.shName,
+      `${row}행(${c.rowName[row]}): ${fresh ? '수식이 거의 다 비어 있음 (새 행에 수식 복사 안 됨?)' : '다른 행엔 있는 수식이 없음'} — ${compactCols_(cols)}열`);
+  }
+  for (const [row, cols] of Object.entries(diff)) {
+    add('info', c.shName, `${row}행(${c.rowName[row]}): 다른 행과 수식이 다름 — ${compactCols_(cols)}열`);
+  }
+}
+
+// ③ 다른 시트 행 참조가 같은 사람인지
+function auditCrossRefs_(c, byName, add) {
+  const f = c.sh.getRange(c.start, 1, c.n, c.lastCol).getFormulas();
+  const groups = {};
+  for (let i = 0; i < c.n; i++) {
+    const row = c.start + i;
+    const own = c.rowName[row];
+    if (!own) continue;
+    for (let col = 0; col < c.lastCol; col++) {
+      const fx = f[i][col];
+      if (!fx || fx.indexOf('!') < 0) continue;
+      for (const m of fx.matchAll(AUDIT_XREF_RE)) {
+        const tc = byName[m[1] || m[2]];
+        if (!tc || tc === c) continue;
+        const refRow = +m[4];
+        if (refRow < tc.start) continue;                 // 머리글(X3, Z3, 5행 날짜 등) 참조는 무시
+        const key = `${row}|${tc.shName}|${refRow}`;
+        if (!groups[key]) {
+          let level = null, msg = '';
+          if (refRow > tc.last) {
+            level = 'error'; msg = `인원 범위 밖(${refRow}행${refRow === tc.total ? ', 합계행' : ''}) 참조`;
+          } else {
+            const tn = tc.rowName[refRow];
+            if (!tn) { level = 'warn'; msg = '이름 없는 빈 행 참조'; }
+            else if (normName_(tn) !== normName_(own)) { level = 'error'; msg = `다른 사람(${tn}) 참조`; }
+          }
+          groups[key] = { level, msg, row, own, tc, refRow, cols: [] };
+        }
+        groups[key].cols.push(col + 1);
+      }
+    }
+  }
+  for (const g of Object.values(groups)) {
+    if (!g.level) continue;
+    add(g.level, c.shName,
+      `${g.row}행(${g.own}) ${compactCols_(uniq_(g.cols))}열 → [${g.tc.shName}] ${g.refRow}행: ${g.msg}`);
+  }
+}
+
+// ⑤ 합계행 아래의 그룹별 부분 범위
+function auditPartialRanges_(c, add) {
+  const lastRow = Math.min(c.sh.getLastRow(), c.total + 15);
+  if (lastRow <= c.total) return;
+  const f = c.sh.getRange(c.total + 1, 1, lastRow - c.total, c.lastCol).getFormulas();
+  const byCol = {};
+  f.forEach((rowF, i) => rowF.forEach((fx, j) => {
+    if (!fx) return;
+    for (const m of fx.matchAll(AUDIT_RANGE_RE)) {
+      if (fx[m.index - 1] === '!') continue;
+      const s = +m[2], e = +m[4];
+      if (s > e || s < c.start || e > c.last || (s === c.start && e === c.last)) continue;
+      (byCol[j] = byCol[j] || []).push({ cell: colIndexToLetter(j + 1) + (c.total + 1 + i), s, e });
+    }
+  }));
+  for (const list of Object.values(byCol)) {
+    const covered = new Set();
+    list.forEach(x => { for (let r = x.s; r <= x.e; r++) covered.add(r); });
+    list.forEach(x => {
+      const out = [x.s - 1, x.e + 1]
+        .filter(r => c.rowName[r] && !covered.has(r))
+        .map(r => `${r}행 ${c.rowName[r]}`);
+      add(out.length ? 'warn' : 'info', c.shName,
+        `${x.cell}: ${x.s}~${x.e}행만 집계 (${c.rowName[x.s] || '?'} ~ ${c.rowName[x.e] || '?'})` +
+        (out.length ? ` — 바로 옆 ${out.join(', ')}은(는) 어느 집계에도 안 들어감` : ''));
+    });
+  }
+}
+
+// ④ 시트별 인원·순서
+function auditMembership_(ctx, add) {
+  const base = ctx['근무현황표'];
+  if (!base) return;
+  const baseNames = Object.values(base.rowName);
+  const baseKeys = baseNames.map(normName_);
+  const baseSet = new Set(baseKeys);
+  for (const c of Object.values(ctx)) {
+    if (c === base) continue;
+    const names = Object.values(c.rowName);
+    const set = new Set(names.map(normName_));
+    const missing = baseNames.filter(n => !set.has(normName_(n)));
+    const extra = names.filter(n => !baseSet.has(normName_(n)));
+    if (c.t.subset) {
+      if (missing.length) add('info', c.shName, `여기에 없는 인원 (대상이 아니면 정상): ${missing.join(', ')}`);
+    } else if (missing.length) {
+      add(c.t.missLevel, c.shName, `근무현황표에 있는데 여기엔 없는 인원: ${missing.join(', ')}`);
+    }
+    if (extra.length) add('warn', c.shName, `근무현황표에 없는 인원: ${extra.join(', ')}`);
+    if (!c.t.subset && !missing.length && !extra.length &&
+        names.map(normName_).join('|') !== baseKeys.join('|')) {
+      add('warn', c.shName, '인원 순서가 근무현황표와 다름 (행 번호로 서로 참조하는 수식이 있으면 위험)');
+    }
+  }
+}
+
+// ⑦ 결과보고 총원
+function auditHeadcount_(ss, ctx, add) {
+  const base = ctx['근무현황표'];
+  const rs = findSheetByPattern(ss, /^\d+월 결과보고$/);
+  if (!base || !rs) return;
+  const cell = ss.getSheetByName(rs).getRange('A12');
+  if (cell.getFormula()) return;
+  const cnt = Object.keys(base.rowName).length;
+  if (Number(cell.getValue()) !== cnt) {
+    add('warn', rs, `A12 총원 ${cell.getValue()} ≠ 근무현황표 인원 ${cnt}명 (손으로 적는 값)`);
+  }
+}
+
+// ⑥ AH "-" 처리
+function findDashFormulaFix_(ctx) {
+  const out = [];
+  for (const label of ['근무현황표', '차월 근무계획']) {
+    const c = ctx[label];
+    if (!c || c.n < 1) continue;
+    c.sh.getRange(c.start, AUDIT_COL_AH, c.n, 1).getFormulas().forEach((r, i) => {
+      const row = c.start + i;
+      const fx = r[0];
+      if (!fx || !c.rowName[row]) return;
+      if (/\$C\$3\s*-\s*AY\d+/i.test(fx) && fx.indexOf('"-"') < 0) out.push({ sh: c.sh, row });
+    });
+  }
+  return out;
+}
+
+/** AH 수정 제안 → 수정했으면 true (해당 issue도 목록에서 제거) */
+function offerDashFormulaFix_(ui, audit) {
+  if (!audit.dashFix.length) return false;
+  const ans = ui.alert('🩺 근무(AH) 수식 수정',
+    `근무현황표·차월 근무계획의 근무(AH) 수식 ${audit.dashFix.length}개 행이\n` +
+    `"-"(입사 전·퇴사 후) 칸을 근무일로 세고 있습니다.\n\n` +
+    `=$C$3-AY8  →  =$C$3-AY8-COUNTIF($C8:$AG8,"-")\n\n` +
+    `이렇게 고칠까요? (결과보고 근무일수·총일수가 실제 재직일 기준이 됨)`,
+    ui.ButtonSet.YES_NO);
+  if (ans !== ui.Button.YES) return false;
+  audit.dashFix.forEach(({ sh, row }) => {
+    sh.getRange(row, AUDIT_COL_AH).setFormula(`=$C$3-AY${row}-COUNTIF($C${row}:$AG${row},"-")`);
+  });
+  SpreadsheetApp.flush();
+  audit.issues = audit.issues.filter(x => x.tag !== 'dash');
+  audit.dashFix = [];
+  return true;
+}
+
+// =====================================================================
+// 메뉴
+// =====================================================================
+
+function auditStructure() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const audit = auditStructure_(ss);
+    const fixed = offerDashFormulaFix_(ui, audit);
+    const body = formatAudit_(audit.issues, ['error', 'warn', 'info']) || '✅ 발견된 문제 없음';
+    ui.alert('🩺 구조·수식 총점검', body + (fixed ? '\n\n🛠️ 근무(AH) 수식 "-" 제외 처리 완료' : ''), ui.ButtonSet.OK);
+    console.log(formatAudit_(audit.issues, ['error', 'warn', 'info'], 999));
+  } catch (e) {
+    ui.alert('❌ 오류 발생\n\n' + e.message);
+    console.error(e);
+  }
+}
+
+// =====================================================================
+// 유틸
+// =====================================================================
+
+function formatAudit_(issues, levels, maxPer) {
+  const lim = maxPer || 12;
+  const head = { error: '❌ 꼭 확인', warn: '⚠️ 확인 권장', info: 'ℹ️ 참고' };
+  const out = [];
+  for (const lv of levels) {
+    const list = issues.filter(x => x.level === lv);
+    if (!list.length) continue;
+    out.push(`${head[lv]} (${list.length})`);
+    list.slice(0, lim).forEach(x => out.push(`  • [${x.sheet}] ${x.msg}`));
+    if (list.length > lim) out.push(`  … 외 ${list.length - lim}건 (실행 로그에 전체)`);
+    out.push('');
+  }
+  return out.join('\n').trim();
+}
+
+/** R1C1 수식 정규화 — 셀 참조가 없는 상수식(=1+4+3 누계 등)은 '' 로 취급 */
+function normR1C1_(s) {
+  if (!s) return '';
+  const x = String(s).replace(/\s+/g, '').replace(/^=\+/, '=').toUpperCase();
+  const noStr = x.replace(/"[^"]*"/g, '');
+  return /R(\[|\d|C)|C(\[|\d)/.test(noStr) ? x : '';
+}
+
+function namesBetween_(c, s, e) {
+  const list = [];
+  for (let r = s; r <= e; r++) if (c.rowName[r]) list.push(c.rowName[r]);
+  return list.length > 3 ? `${list.slice(0, 3).join(', ')} 외 ${list.length - 3}명` : list.join(', ');
+}
+
+function uniq_(arr) {
+  return Array.from(new Set(arr)).sort((a, b) => a - b);
+}
+
+/** [3,4,5,9] → "C~E, I" */
+function compactCols_(cols) {
+  const a = uniq_(cols);
+  if (!a.length) return '';
+  const parts = [];
+  let s = a[0], p = a[0];
+  for (let i = 1; i <= a.length; i++) {
+    if (a[i] === p + 1) { p = a[i]; continue; }
+    parts.push(s === p ? colIndexToLetter(s) : `${colIndexToLetter(s)}~${colIndexToLetter(p)}`);
+    s = p = a[i];
+  }
+  return parts.join(', ');
+}

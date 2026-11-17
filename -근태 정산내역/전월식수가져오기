@@ -1,0 +1,133 @@
+// =====================================================================
+// 📥 전월 기본식·연장식 수치 가져오기
+// ---------------------------------------------------------------------
+// 1) 현재 파일 "X월 근무현황표"의 X3(년도), Z3(월)을 읽음
+// 2) 전월 계산 (1월이면 → 전년도 12월)
+// 3) 공유 드라이브 "생수공장 근태관리"에서 "YYYY년 M월 ... 정산내역" 스프레드시트 검색
+// 4) 그 파일의 "M월 결과보고" 시트 D28, D29 값을 읽음
+// 5) 확인창에서 [예]를 누르면 현재 파일 "X월 결과보고" D25, D26에 입력
+// =====================================================================
+
+const ATTEND_SHARED_DRIVE_ID = '0AF2f6StXDZmVUk9PVA'; // 생수공장 근태관리 공유 드라이브
+const PREV_MEAL_SRC_CELLS  = ['D28', 'D29'];          // 전월 파일에서 읽을 셀 (기본식, 연장식)
+const PREV_MEAL_DEST_CELLS = ['D25', 'D26'];          // 현재 파일에 쓸 셀
+const PREV_MEAL_SEARCH_DEPTH = 3;                     // 하위 폴더 탐색 깊이
+
+function importPrevMonthMealCounts() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const destSS = SpreadsheetApp.getActiveSpreadsheet();
+
+    // ── 1. 현재 기준 년/월 → 전월 계산 ──────────────────────────────
+    const { year, month } = getCurrentYearMonth(destSS);
+    const prevMonth = month === 1 ? 12 : month - 1;
+    const prevYear  = month === 1 ? year - 1 : year;
+
+    // ── 2. 현재 파일의 결과보고 시트 ────────────────────────────────
+    const destSheetName = findSheetByPattern(destSS, /^\d+월 결과보고$/);
+    if (!destSheetName) throw new Error('현재 파일에서 "X월 결과보고" 시트를 찾을 수 없습니다.');
+    const destSheet = destSS.getSheetByName(destSheetName);
+
+    // ── 3. 공유 드라이브에서 전월 정산내역 파일 검색 ───────────────
+    const candidates = findSettlementFiles_(prevYear, prevMonth, destSS.getId());
+    if (candidates.length === 0) {
+      throw new Error(
+        `공유 드라이브에서 "${prevYear}년 ${prevMonth}월 정산내역" 스프레드시트를 찾을 수 없습니다.\n\n` +
+        `• 파일명에 "${prevYear}년 ${prevMonth}월"과 "정산내역"이 모두 들어있는지 확인\n` +
+        `• 공유 드라이브 접근 권한 확인`
+      );
+    }
+    candidates.sort((a, b) => b.getLastUpdated() - a.getLastUpdated()); // 최근 수정본 우선
+    const srcFile = candidates[0];
+
+    // ── 4. 전월 파일의 "M월 결과보고" 시트에서 값 읽기 ─────────────
+    const srcSS = SpreadsheetApp.openById(srcFile.getId());
+    const srcSheetName = findSheetByPattern(srcSS, new RegExp(`^${prevMonth}월 결과보고$`));
+    if (!srcSheetName) {
+      throw new Error(
+        `[${srcFile.getName()}] 파일에서 "${prevMonth}월 결과보고" 시트를 찾을 수 없습니다.\n\n` +
+        `시트 목록: ${srcSS.getSheets().map(s => s.getName()).join(', ')}`
+      );
+    }
+    const srcSheet = srcSS.getSheetByName(srcSheetName);
+
+    const srcVals  = PREV_MEAL_SRC_CELLS.map(a => srcSheet.getRange(a).getValue());
+    const curVals  = PREV_MEAL_DEST_CELLS.map(a => destSheet.getRange(a).getValue());
+
+    // 값 이상 여부 체크
+    const warnings = [];
+    srcVals.forEach((v, i) => {
+      if (v === '' || v == null) warnings.push(`⚠️ 원본 ${PREV_MEAL_SRC_CELLS[i]}가 비어 있음`);
+      else if (isNaN(Number(v))) warnings.push(`⚠️ 원본 ${PREV_MEAL_SRC_CELLS[i]}가 숫자가 아님: "${v}"`);
+    });
+    if (candidates.length > 1) {
+      warnings.push(
+        `⚠️ 후보 파일 ${candidates.length}개 — 가장 최근 수정본 사용\n` +
+        candidates.map(f => `   - ${f.getName()}`).join('\n')
+      );
+    }
+
+    // ── 5. 확인 후 입력 ─────────────────────────────────────────────
+    const tz = Session.getScriptTimeZone();
+    const updated = Utilities.formatDate(srcFile.getLastUpdated(), tz, 'yyyy-MM-dd HH:mm');
+    const labels = ['기본식', '연장식'];
+
+    const msg =
+      `📥 전월 기본식·연장식 가져오기\n\n` +
+      `• 기준: ${year}년 ${month}월 → 전월 ${prevYear}년 ${prevMonth}월\n` +
+      `• 원본 파일: ${srcFile.getName()} (수정 ${updated})\n` +
+      `• 원본 시트: ${srcSheetName}\n\n` +
+      PREV_MEAL_SRC_CELLS.map((a, i) =>
+        `${labels[i]}: 원본 ${a} = ${srcVals[i]}  →  현재 ${PREV_MEAL_DEST_CELLS[i]} (지금 값: ${curVals[i] === '' ? '빈칸' : curVals[i]})`
+      ).join('\n') +
+      (warnings.length ? `\n\n${warnings.join('\n')}` : '') +
+      `\n\n현재 파일 [${destSheetName}]에 입력할까요?`;
+
+    const answer = ui.alert('전월 수치 확인', msg, ui.ButtonSet.YES_NO);
+    if (answer !== ui.Button.YES) {
+      SpreadsheetApp.getActiveSpreadsheet().toast('취소했습니다. 값은 변경되지 않았습니다.', '근태관리', 4);
+      return;
+    }
+
+    PREV_MEAL_DEST_CELLS.forEach((a, i) => destSheet.getRange(a).setValue(srcVals[i]));
+    SpreadsheetApp.flush();
+
+    ui.alert(
+      `✅ 입력 완료\n\n` +
+      `[${destSheetName}]\n` +
+      PREV_MEAL_DEST_CELLS.map((a, i) => `• ${a} (${labels[i]}): ${srcVals[i]}`).join('\n') +
+      `\n\n출처: ${srcFile.getName()} / ${srcSheetName}`
+    );
+
+  } catch (e) {
+    ui.alert('❌ 오류 발생\n\n' + e.message);
+    console.error(e);
+  }
+}
+
+/**
+ * 공유 드라이브(하위 폴더 포함)에서 "YYYY년 M월" + "정산내역"이 들어간 스프레드시트 검색
+ * - "2026년 1월"이 "2026년 10·11·12월"과 섞이지 않도록 정규식으로 정확히 매칭
+ * - "2026년 08월", "2026 년 8 월" 같은 표기도 허용
+ */
+function findSettlementFiles_(year, month, excludeId) {
+  const root = DriveApp.getFolderById(ATTEND_SHARED_DRIVE_ID);
+  const nameRe = new RegExp(`(^|\\D)${year}\\s*년\\s*0?${month}\\s*월`);
+  const result = [];
+
+  const walk = (folder, depth) => {
+    const files = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
+    while (files.hasNext()) {
+      const f = files.next();
+      if (f.isTrashed() || f.getId() === excludeId) continue;
+      const name = f.getName();
+      if (nameRe.test(name) && name.includes('정산내역')) result.push(f);
+    }
+    if (depth >= PREV_MEAL_SEARCH_DEPTH) return;
+    const subs = folder.getFolders();
+    while (subs.hasNext()) walk(subs.next(), depth + 1);
+  };
+
+  walk(root, 0);
+  return result;
+}

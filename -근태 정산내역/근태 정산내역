@@ -37,9 +37,6 @@ function _ensureDocumentScope() {
 // 📐 행 범위 자동 인식 (핵심 유틸)
 // =====================================================================
 
-const SOURCE_SS_ID = '12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY'; // 근무계획
-const PROD_SS_ID   = '1ibZaOX0NKni6vRTVE0i2Wb5AXNHn9D72F5CFWSxH3qQ'; // 제품생산 계획
-
 const SRC_NAME_START_ROW  = 5;  // 근무계획: 이름/데이터 시작 행
 const DEST_NAME_START_ROW = 8;  // 근무현황표·간식정산·연장야근정산·차월 근무계획
 const ATTEND_START_ROW    = 7;  // X월 근태
@@ -251,7 +248,7 @@ function runAllInOne() {
 
     // ── STEP 1. 당월 근무계획 가져오기 ──────────────────────────────
     logs.push('[ STEP 1 ] 당월 근무계획 가져오기');
-    const srcCurrent = loadSourceData(currentMonth);
+    const srcCurrent = loadSourceData(currentMonth, currentYear);
     const currentTargets = [
       { sheetName: statusSheetName },
       { sheetName: findSheetByPattern(destSS, /^간식정산$/) },
@@ -281,7 +278,7 @@ function runAllInOne() {
     if (!nextSheetName) {
       logs.push(' ⚠️ "차월 근무계획" 시트 없음 — 건너뜀');
     } else {
-      const srcNext = loadSourceData(nextMonth);
+      const srcNext = loadSourceData(nextMonth, nextYear);
       const { updated, skipped, log, lastDataRow } = writeToSheet({
         sheet: destSS.getSheetByName(nextSheetName),
         srcNameMap: srcNext.srcNameMap,
@@ -422,7 +419,7 @@ function createReportDoc() {
     const overtimeData = destSS.getSheetByName(overtimeReportName)
                                .getRange('C16:G20').getDisplayValues();
 
-    const TRAFFIC_SS_ID = '16z8tsSrWuu7rd1ViJUIAU9odqCQJrUSiImCBENLfek8';
+    const TRAFFIC_SS_ID = linkId('교통비정산서');
     const trafficSheet = SpreadsheetApp.openById(TRAFFIC_SS_ID)
                                         .getSheetByName('교통비 발생 내역');
     if (!trafficSheet) throw new Error('교통비 지급 정산서에서 "교통비 발생 내역" 시트를 찾을 수 없습니다.');
@@ -435,7 +432,7 @@ function createReportDoc() {
     const planRow = findPlanSummaryRow_(nextPlanSheet);
     const nextPlanRow = nextPlanSheet.getRange(planRow, 63, 1, 8).getDisplayValues()[0]; // BK~BR
 
-    const TEMPLATE_ID = '1Q9wBfik-DWFxBsFc6V4FZ9P0Gr2-xIvJsd0O0Xdt9fE';
+    const TEMPLATE_ID = linkId('근태결과보고템플릿');
     const docTitle = `[보고] 생수공장 ${YY}년 ${currentMonth}월 근무실적 및 ${nextYY}년 ${nextMonth}월 계획`;
     const newDoc = DriveApp.getFileById(TEMPLATE_ID).makeCopy(docTitle);
     const doc = DocumentApp.openById(newDoc.getId());
@@ -626,7 +623,7 @@ function importWorkPlan() {
     if (!reg.ok) throw new Error(`신규 인원의 근무 시작일 등록이 취소되어 작업을 멈췄습니다.\n('인원정보' 시트에 직접 입력한 뒤 다시 실행해도 됩니다)`);
     const staffMap = loadStaffInfo_(destSS);
 
-    const { srcNameMap, srcDateMap, srcDataGrid, srcBgGrid } = loadSourceData(targetMonth);
+    const { srcNameMap, srcDateMap, srcDataGrid, srcBgGrid } = loadSourceData(targetMonth, targetYear);
     const targets = [
       { sheetName: statusSheetName },
       { sheetName: findSheetByPattern(destSS, /^간식정산$/) },
@@ -694,7 +691,7 @@ function importNextMonthWorkPlan() {
     const reg = ensureNewMembersRegistered_(destSS, nextYear, nextMonth);
     if (!reg.ok) throw new Error(`신규 인원의 근무 시작일 등록이 취소되어 작업을 멈췄습니다.\n('인원정보' 시트에 직접 입력한 뒤 다시 실행해도 됩니다)`);
 
-    const { srcNameMap, srcDateMap, srcDataGrid, srcBgGrid } = loadSourceData(nextMonth);
+    const { srcNameMap, srcDateMap, srcDataGrid, srcBgGrid } = loadSourceData(nextMonth, nextYear);
     const { updated, skipped, log, lastDataRow } = writeToSheet({
       sheet: nextSheet, srcNameMap, srcDateMap, srcDataGrid, srcBgGrid,
       year: nextYear, month: nextMonth,
@@ -758,8 +755,8 @@ function getLeaveHistoryTarget(month) {
 /**
  * 근무계획 원본(X월 시트) 읽기 — 5행 ~ A열 "계" 직전 행까지 자동 인식
  */
-function loadSourceData(targetMonth) {
-  const sourceSS = SpreadsheetApp.openById(SOURCE_SS_ID);
+function loadSourceData(targetMonth, targetYear) {
+  const sourceSS = linkOpen('근무계획', targetYear);
   const sourceSheet = sourceSS.getSheetByName(`${targetMonth}월`);
   if (!sourceSheet) throw new Error(`근무계획 스프레드시트에서 "${targetMonth}월" 시트를 찾을 수 없습니다.`);
 
@@ -1147,7 +1144,7 @@ function debugRowRanges() {
   const statusSheetName = findSheetByPattern(ss, /^\d+월 근무현황표$/);
   if (statusSheetName) {
     const month = Number(ss.getSheetByName(statusSheetName).getRange('Z3').getValue());
-    const srcSS = SpreadsheetApp.openById(SOURCE_SS_ID);
+    const srcSS = linkOpen('근무계획');
     const srcSheet = srcSS.getSheetByName(`${month}월`);
     if (srcSheet) {
       const r = safe(() => getSourceLastDataRow_(srcSheet));
@@ -1234,7 +1231,7 @@ function debugAttendSumRow() {
 
 /** 근무계획 원본에서 날짜행 + 인원 코드 행만 읽어오는 공통 함수 */
 function loadWorkPlanGrid_(month) {
-  const workSS = SpreadsheetApp.openById(SOURCE_SS_ID);
+  const workSS = linkOpen('근무계획');
   let workSheet = null;
   for (const s of workSS.getSheets()) {
     if (s.getName().includes(month + '월')) { workSheet = s; break; }
@@ -1266,7 +1263,7 @@ function fillKeunTaeData() {
 
     const { dateRow, staffRows } = loadWorkPlanGrid_(month);
 
-    const prodSS = SpreadsheetApp.openById(PROD_SS_ID);
+    const prodSS = linkOpen('제품생산계획');
     let prodSheet = null;
     for (const s of prodSS.getSheets()) {
       const name = s.getName();
@@ -1416,7 +1413,7 @@ function debugKeunTaeData() {
   Logger.log('=== 정비연장(L) 집계 ===');
   Logger.log(JSON.stringify(lDays));
 
-  const prodSS = SpreadsheetApp.openById(PROD_SS_ID);
+  const prodSS = linkOpen('제품생산계획');
   Logger.log('=== 제품생산 계획 시트 목록 ===');
   prodSS.getSheets().forEach(s => Logger.log(` "${s.getName()}"`));
 

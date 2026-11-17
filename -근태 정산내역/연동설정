@@ -1,0 +1,258 @@
+/**
+ * ════════════════════════════════════════════════════════════════════
+ *  연동설정.gs — 외부 파일 ID를 '시스템 연동 설정' 스프레드시트에서 읽어오는 공통 코드
+ * ────────────────────────────────────────────────────────────────────
+ *  [이 프로젝트]  근태관리 통합본 + Z3 제목 연동(onEditInstallable)
+ *  [붙여넣는 곳]  '생수공장 근태 정산내역' 스프레드시트 → 확장 프로그램 → Apps Script → 파일 옆 [+] → 스크립트 → 이름 '연동설정'
+ *  [할 일]        ① 아래 LINK_REGISTRY_ID 에 '시스템 연동 설정' 스프레드시트 ID 붙여넣기
+ *                 ② 맨 아래 '이 프로젝트 전용' 칸의 안내대로 기존 코드 수정
+ *                 ③ 저장 → 함수 목록에서 linkSelfTest 실행 → 실행 로그에 ✅ 만 나오면 끝
+ *
+ *  ※ 이 파일 위쪽(공통 부분)은 모든 프로젝트에서 똑같습니다. 고치지 마세요.
+ * ════════════════════════════════════════════════════════════════════
+ */
+
+// ★ '시스템 연동 설정' 스프레드시트 ID — 모든 프로젝트에 같은 값 (이 파일은 매년 새로 만들지 않음)
+const LINK_REGISTRY_ID = '1yXYycyeVvFkKSoGL18e4NBpnL_3Ag_BszfevcY2LEFg';
+const LINK_SHEET_NAME = '연동 목록';
+const LINK_CACHE_SECONDS = 300;   // 5분. 연동 목록을 고치면 최대 5분 뒤 반영 (즉시 반영: linkClearCache 실행)
+
+let _linkMemo = null;
+const _LINK_CONST = {};
+
+
+/**
+ * 키(+연도) → 파일 ID
+ *   linkId('근무계획')        : 이 프로젝트 기준 연도(LINK_YEAR_BASIS)의 근무계획
+ *   linkId('근무계획', 2027)  : 2027년 근무계획 (연도를 넘나드는 작업용)
+ */
+function linkId(key, year) {
+  const reg = _linkLoad_();
+  const k = String(key).trim();
+  const row = reg.rows[k];
+  if (!row) {
+    throw new Error(`[연동설정] '${LINK_SHEET_NAME}' 시트에 '${k}' 키가 없습니다. 키 이름(띄어쓰기 포함)을 확인하세요.`);
+  }
+  const y = Number(year) || _linkYear_(reg);
+  if (row.ids[y]) return row.ids[y];
+
+  // '매년 새 파일? = 아니오' (템플릿 등) → 가장 가까운 이전 연도 값을 계속 사용
+  if (!row.annual) {
+    const ys = Object.keys(row.ids).map(Number).sort((a, b) => b - a);
+    const prev = ys.find(n => n <= y) || ys[ys.length - 1];
+    if (prev) return row.ids[prev];
+  }
+  throw new Error(
+    `[연동설정] ${y}년 '${k}' 칸이 비어 있습니다.\n` +
+    `'시스템 연동 설정' → [${LINK_SHEET_NAME}] 시트 ${row.row}행의 ${y} 열에 새 파일 주소를 넣어 주세요.`
+  );
+}
+
+/** 키(+연도) → 스프레드시트 열기 */
+function linkOpen(key, year) {
+  return SpreadsheetApp.openById(linkId(key, year));
+}
+
+/** 키(+연도) → 스프레드시트 URL (openByUrl 을 쓰던 곳용) */
+function linkUrl(key, year) {
+  return 'https://docs.google.com/spreadsheets/d/' + linkId(key, year) + '/edit';
+}
+
+/**
+ * 기존 상수 이름을 그대로 살려 씀 — 예) linkConstants({ PROD_PLAN_SS_ID: '제품생산계획' })
+ * 상수를 실제로 쓰는 순간에만 연동 목록을 읽으므로 onOpen(메뉴) 등에는 영향 없음.
+ * ※ 기존 코드의 같은 이름 const 줄은 반드시 지워야 합니다 (linkSelfTest 가 남은 줄을 찾아 줌).
+ */
+function linkConstants(map) {
+  Object.keys(map).forEach(name => {
+    _LINK_CONST[name] = map[name];
+    Object.defineProperty(globalThis, name, {
+      get: () => linkId(map[name]),
+      configurable: true,
+      enumerable: false
+    });
+  });
+}
+
+/** 캐시 비우기 — 연동 목록을 고친 뒤 바로 반영하고 싶을 때 실행 */
+function linkClearCache() {
+  _linkMemo = null;
+  try { CacheService.getScriptCache().remove(_linkCacheKey_()); } catch (e) {}
+}
+
+/** 점검 — 편집기에서 실행 후 '실행 로그' 확인 */
+function linkSelfTest() {
+  linkClearCache();
+  const out = [];
+  let bad = 0;
+  try {
+    const reg = _linkLoad_();
+    const basis = _linkBasis_();
+    const y = _linkYear_(reg);
+    out.push(`✅ 연동 목록 읽기 성공 — 키 ${Object.keys(reg.rows).length}개 / 연도 열 ${reg.years.join(', ')}`);
+    out.push(`ℹ 이 프로젝트 기준: '${basis}' → ${y}년 파일 사용` +
+      (basis === '정산' ? ` (연동 목록의 '정산 기준 연도' = ${reg.settleYear})` : ' (오늘 날짜의 연도)'));
+
+    const keys = [];
+    (typeof LINK_USES !== 'undefined' ? LINK_USES : []).concat(Object.keys(_LINK_CONST).map(n => _LINK_CONST[n]))
+      .forEach(k => { if (keys.indexOf(k) === -1) keys.push(k); });
+
+    keys.forEach(k => {
+      try {
+        const id = linkId(k);
+        out.push(`✅ ${k} → ${_linkName_(id)}`);
+      } catch (e) {
+        bad++;
+        out.push(`❌ ${k} → ${e.message}`);
+      }
+    });
+
+    Object.keys(_LINK_CONST).forEach(name => {
+      try {
+        const actual = new Function('return ' + name)();
+        const expect = linkId(_LINK_CONST[name]);
+        if (actual === expect) {
+          out.push(`✅ 상수 ${name} → 연동 목록 값 사용 중`);
+        } else {
+          bad++;
+          out.push(`❌ 상수 ${name} → 기존 코드에 'const ${name} = ...' 줄이 아직 남아 있습니다. 그 줄을 지우세요. (지금 값: ${actual})`);
+        }
+      } catch (e) {
+        bad++;
+        out.push(`❌ 상수 ${name} → ${e.message}`);
+      }
+    });
+  } catch (e) {
+    bad++;
+    out.push('❌ ' + e.message);
+  }
+
+  out.unshift(bad === 0 ? '🎉 연동 점검 통과\n' : `⚠️ 문제 ${bad}건\n`);
+  const msg = out.join('\n');
+  Logger.log(msg);
+  try { SpreadsheetApp.getUi().alert('연동 점검', msg, SpreadsheetApp.getUi().ButtonSet.OK); } catch (e) {}
+  return msg;
+}
+
+
+// ─── 내부 함수 ───────────────────────────────────────────────────────
+function _linkBasis_() {
+  return (typeof LINK_YEAR_BASIS !== 'undefined' && LINK_YEAR_BASIS === '정산') ? '정산' : '오늘';
+}
+
+function _linkYear_(reg) {
+  if (_linkBasis_() === '정산') {
+    if (!reg.settleYear) throw new Error(`[연동설정] [${LINK_SHEET_NAME}] 시트의 '정산 기준 연도' 칸이 비어 있습니다.`);
+    return reg.settleYear;
+  }
+  return Number(Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy'));
+}
+
+function _linkCacheKey_() {
+  return 'LINK_REGISTRY_' + LINK_REGISTRY_ID;
+}
+
+function _linkLoad_() {
+  if (_linkMemo) return _linkMemo;
+
+  const cache = CacheService.getScriptCache();
+  try {
+    const hit = cache.get(_linkCacheKey_());
+    if (hit) return (_linkMemo = JSON.parse(hit));
+  } catch (e) {}
+
+  let ss;
+  try {
+    ss = SpreadsheetApp.openById(LINK_REGISTRY_ID);
+  } catch (e) {
+    throw new Error('[연동설정] 시스템 연동 설정 스프레드시트를 열 수 없습니다. ' +
+      '연동설정.gs 의 LINK_REGISTRY_ID 값과 파일 공유 권한을 확인하세요.\n(' + e.message + ')');
+  }
+  const sh = ss.getSheetByName(LINK_SHEET_NAME);
+  if (!sh) throw new Error(`[연동설정] '${LINK_SHEET_NAME}' 시트가 없습니다.`);
+
+  const v = sh.getDataRange().getDisplayValues();
+  const h = v.findIndex(r => r.some(c => String(c).trim() === '키'));
+  if (h < 0) throw new Error(`[연동설정] '${LINK_SHEET_NAME}' 시트에서 '키' 머리글을 찾지 못했습니다.`);
+
+  const head = v[h].map(c => String(c).trim());
+  const cKey = head.indexOf('키');
+  const cAnnual = head.findIndex(c => c.indexOf('매년') === 0);
+  const yearCols = [];
+  head.forEach((c, i) => { if (/^20\d\d$/.test(c)) yearCols.push({ year: Number(c), col: i }); });
+
+  let settleYear = null;
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < v[r].length - 1; c++) {
+      if (String(v[r][c]).replace(/\s/g, '') === '정산기준연도') {
+        const n = Number(String(v[r][c + 1]).replace(/[^0-9]/g, ''));
+        if (n) settleYear = n;
+      }
+    }
+  }
+
+  const rows = {};
+  for (let r = h + 1; r < v.length; r++) {
+    const key = String(v[r][cKey]).trim();
+    if (!key) continue;
+    const ids = {};
+    yearCols.forEach(y => {
+      const id = _linkExtractId_(v[r][y.col]);
+      if (id) ids[y.year] = id;
+    });
+    rows[key] = {
+      row: r + 1,
+      annual: cAnnual < 0 ? true : String(v[r][cAnnual]).trim() !== '아니오',
+      ids: ids
+    };
+  }
+
+  _linkMemo = { settleYear: settleYear, rows: rows, years: yearCols.map(y => y.year) };
+  try { cache.put(_linkCacheKey_(), JSON.stringify(_linkMemo), LINK_CACHE_SECONDS); } catch (e) {}
+  return _linkMemo;
+}
+
+/** URL 이든 ID 든 ID 만 꺼냄 */
+function _linkExtractId_(s) {
+  const t = String(s == null ? '' : s).trim();
+  if (!t) return '';
+  const m = t.match(/\/d\/([A-Za-z0-9_-]{20,})/) ||
+            t.match(/\/folders\/([A-Za-z0-9_-]{20,})/) ||
+            t.match(/[?&]id=([A-Za-z0-9_-]{20,})/);
+  if (m) return m[1];
+  return /^[A-Za-z0-9_-]{20,}$/.test(t) ? t : '';
+}
+
+function _linkName_(id) {
+  try { return DriveApp.getFileById(id).getName(); } catch (e) {}
+  try { return '📁 ' + DriveApp.getFolderById(id).getName(); } catch (e) {}
+  throw new Error('파일을 열 수 없습니다 (ID ' + id + ') — 주소나 공유 권한 확인');
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+//  ▼▼▼ 이 프로젝트 전용 ▼▼▼
+// ════════════════════════════════════════════════════════════════════
+const LINK_YEAR_BASIS = '정산';
+const LINK_USES = ['근무계획', '제품생산계획', '교통비정산서', '연장근로계획', '근태결과보고템플릿'];
+
+// [기존 코드 수정] — 편집기에서 Ctrl+H (찾기/바꾸기)
+//
+// ◆ 근태관리 통합본
+//   326행  const TRAFFIC_SS_ID = '16z8tsSr…';      →  const TRAFFIC_SS_ID = linkId('교통비정산서');
+//   337행  const TEMPLATE_ID = '1Q9wBfik…';        →  const TEMPLATE_ID = linkId('근태결과보고템플릿');
+//
+//   ※ 차월 근무계획이 12월→1월로 넘어갈 때 새해 파일을 읽도록 '연도'를 함께 넘김
+//   599행  function loadSourceData(targetMonth) {   →  function loadSourceData(targetMonth, targetYear) {
+//   600행  const SOURCE_SS_ID = '12yP7AxfC…';        →  const SOURCE_SS_ID = linkId('근무계획', targetYear);
+//   149행  loadSourceData(currentMonth)             →  loadSourceData(currentMonth, currentYear)
+//   179행  loadSourceData(nextMonth)                →  loadSourceData(nextMonth, nextYear)
+//   473행  loadSourceData(targetMonth)              →  loadSourceData(targetMonth, targetYear)
+//   540행  loadSourceData(nextMonth)                →  loadSourceData(nextMonth, nextYear)
+//
+//   모두 바꾸기: SpreadsheetApp.openById('12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY')  →  linkOpen('근무계획')       (1005·1143행)
+//   모두 바꾸기: SpreadsheetApp.openById('1ibZaOX0NKni6vRTVE0i2Wb5AXNHn9D72F5CFWSxH3qQ')  →  linkOpen('제품생산계획')   (1019·1181행)
+//
+// ◆ Z3 제목 연동 (onEditInstallable / syncSheetTitle / syncTransportTitle)
+//   52행  const TARGET_URL = "https://…1uqWQ3Xn…/edit";     →  const TARGET_URL = linkUrl('연장근로계획');
+//   92행  const TRANSPORT_URL = "https://…16z8tsSr…/edit";  →  const TRANSPORT_URL = linkUrl('교통비정산서');

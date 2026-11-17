@@ -49,7 +49,7 @@ function syncSheetTitle() {
   const planYear  = baseMonth === 12 ? baseYear + 1 : baseYear;
   const planMonth = baseMonth === 12 ? 1 : baseMonth + 1;
 
-  const TARGET_URL = "https://docs.google.com/spreadsheets/d/1uqWQ3XnPwoOXR5SlqJy7ZO-bxyyC-1XL6v362S4QmGs/edit";
+  const TARGET_URL = linkUrl('연장근로계획');
   const targetSS    = SpreadsheetApp.openByUrl(TARGET_URL);
   const targetSheet = targetSS.getSheets()[0];
 
@@ -89,7 +89,7 @@ function syncTransportTitle() {
     return;
   }
 
-  const TRANSPORT_URL = "https://docs.google.com/spreadsheets/d/16z8tsSrWuu7rd1ViJUIAU9odqCQJrUSiImCBENLfek8/edit";
+  const TRANSPORT_URL = linkUrl('교통비정산서');
   const transportSS   = SpreadsheetApp.openByUrl(TRANSPORT_URL);
 
   const sheetConfigs = [
