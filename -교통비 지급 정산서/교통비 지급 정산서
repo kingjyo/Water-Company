@@ -2,26 +2,28 @@
 // 교통비 정산 자동화 — Code.gs (통합본)
 // ═══════════════════════════════════════════
 //
+// [2026-11 패치] 📅 특이사항 달력
+//  • (11/9) 사람마다 하루 칸 3줄 — 하루 특이사항 여러 건을 한 칸에 한 건씩. 옛 양식 달력은 열 때 변환
+//  • 특이사항을 "N월 특이사항" 시트(사람 × 날짜 달력)에 평소에 바로 적어 둠 — 구글 Tasks 메모 대신
+//  • 칸에는 사유만 적으면 됨. 구간·주행거리는 '특이사항 사유표' 시트에서 사유별로 자동 결정
+//    (예: 민속촌 채수 → 공장 ↔ 제주민속촌 50km). 그때그때 다르면 칸에 "(30km)", "@성읍교"
+//  • 정산 실행 → 달력 내용 확인창 → 정산 → 달력 칸에 색 표시
+//      초록 = 정산서에 반영됨 / 주황 = 확인 필요(정산서 구간·거리가 달력과 다름)
+//      빨강 = 정산서에 없음 / 노랑 = 사유 미정(?)
+//    (같은 날 근무계획 근무와 특이사항이 같이 있는 건 정상 — 경고 안 함)
+//  • 메뉴 [✅ 특이사항 반영 점검] — 정산서를 손으로 고친 뒤에도 언제든 다시 대조
+//  • 정산서에 손으로 넣은 행(달력·근무계획 어디에도 없는 행)도 찾아서 알려 줌
+//  • 기존 특이사항 입력창(SpecialDialog.html)은 더 이상 쓰지 않음.
+//    숨김 '특이사항' 시트의 기록은 그 달 달력을 처음 만들 때 자동으로 옮겨짐
+//
 // [2026-10 패치]
 //  • 사람별 구간 (PERSON_ROUTE) — 김은혁: "공장 ↔ 서귀포시" (거리는 시트 기본값 그대로)
-//  • 주행거리(I열)를 코드가 매번 직접 기록 — 시트 기본(BTL·제품생산 50 / 품질 CIP 55),
-//    특이사항에 주행거리를 적으면 그 값(예: 자재 구매 30km). 예전처럼 손으로 고친 값이
-//    다음 달 다른 사람 행에 남는 일이 없음
-//  • ⛽ 유류단가 확인: 메일("X월 마감 자료 요청 및 유류단가 안내")에서 단가를 읽어 시트와 대조,
-//    다르면 바꿀지 물어봄 / 메일을 못 찾으면 확인 질문 (이번 달 확인 기록 남김)
-//  • 실행 후 자동 점검: 개인별 현황 금액·건수 합 = 합계와 같은지, 개인별 현황에 없는 이름,
-//    근무계획 "계" 행 미발견
-//  • 🛠 개인별DATA 참조 범위 통일 (메뉴, 1회) — G·H·J열 VLOOKUP을 B열 전체로
+//  • 주행거리(I열)를 코드가 매번 직접 기록 — 시트 기본(BTL·제품생산 50 / 품질 CIP 55)
+//  • ⛽ 유류단가 확인: 메일("X월 마감 자료 요청 및 유류단가 안내")에서 단가를 읽어 시트와 대조
+//  • 실행 후 자동 점검: 개인별 현황 금액·건수 합 = 합계, 개인별 현황에 없는 이름, 근무계획 "계" 행
+//  • 🛠 개인별DATA 참조 범위 통일 (메뉴, 1회)
 //
-// ※ Gmail 읽기 권한: 처음 실행 시 권한 승인 창이 뜸. 회사 메일이 Gmail이 아니면
-//    FUEL_USE_GMAIL = false 로 두면 메일 대조 없이 "확인 질문"만 동작함.
-
-// ───────────────────────────────────────────
-// 외부 스프레드시트 ID 설정
-// ───────────────────────────────────────────
-const WORK_PLAN_SS_ID = '12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY'; // 근무계획
-const PROD_PLAN_SS_ID = '1ibZaOX0NKni6vRTVE0i2Wb5AXNHn9D72F5CFWSxH3qQ'; // 제품생산 계획
-const ATTENDANCE_SS_ID = '1UjHzUCH3w4eUQuxIZrzOtgeCi4itVUOTXDq7sm8PcvE'; // 근무현황표 (월 기준)
+// ※ 외부 스프레드시트 ID(WORK_PLAN_SS_ID 등)는 '연동설정.gs'에서 가져옴
 
 const MENU_OWNER_EMAIL = 'youngjoonkim@kas.co.kr';
 
@@ -49,11 +51,7 @@ const ROUTE_TEXT = '공장 ↔ 제주시'; // 기본 구간
 // ───────────────────────────────────────────
 // ★ 구간·주행거리 설정
 // ───────────────────────────────────────────
-// 주행거리 결정 순서: 특이사항에 적은 주행거리 > 사람별 distance > 시트 기본(SHEET_CFG.distance)
-//
-// 사람별 구간 (기본 "공장 ↔ 제주시"와 다른 사람만)
-//   distance 생략 → 시트 기본 거리 사용 (제주시청·서귀포시청 거리 차이가 작아 기본값 그대로)
-//   distance: 숫자 → 모든 시트에 그 km / { CIP: 60 } → 시트별 지정
+// 결정 순서: 달력 칸에 직접 적은 값 > 특이사항 사유표 > 사람별(PERSON_ROUTE) > 시트 기본(SHEET_CFG.distance)
 const PERSON_ROUTE = {
   '김은혁': { route: '공장 ↔ 서귀포시' },
 };
@@ -69,14 +67,12 @@ const FUEL_MAIL_LOOKBACK_DAYS = 120;
 const FUEL_STAMP_KEY = 'FUEL_CONFIRM_STAMP';     // 문서 속성에 "이번 달 확인함" 기록
 
 // ───────────────────────────────────────────
-// 특이사항 설정 ★ 이름/사유 버튼은 여기서 수정
+// 대상 인원·시트 설정
 // ───────────────────────────────────────────
-const SPECIAL_SHEET_NAME = '특이사항'; // 특이사항 저장용 (숨김 시트, 자동 생성)
-const SPECIAL_EXPIRE_DAYS = 200;       // 이 일수보다 오래된 특이사항은 무시 (작년 같은 달 방지)
-
 const PRODUCTION_NAMES = ['이정묵', '김일수', '양공호', '김정운', '강영우', '임상균', '양진복', '강은철', '고남호', '이청훈'];
 const QUALITY_NAMES = ['박수형', '고혁진', '진성령', '김은혁'];
 
+// reasons: '특이사항 사유표' 시트를 "처음 만들 때"만 쓰는 초기 목록. 그 뒤로는 사유표 시트에서 관리
 const SHEET_CFG = {
   SEJEUM: {
     sheetName: '제품생산',
@@ -88,7 +84,9 @@ const SHEET_CFG = {
     sheetName: '품질 CIP',
     names: QUALITY_NAMES,
     distance: 55,
-    reasons: ['원수 CIP', '농업용수 CIP', '제품수 정기 대외분석', '민속촌 전용상수도 수질검사', '추석연휴 공장 순찰', '설날연휴 공장 순찰']
+    reasons: ['원수 CIP', '농업용수 CIP', '민속촌 CIP', '민속촌 채수', '민속촌/전용상수도 시료채수',
+      '제품수 정기 대외분석', '0.5L 대외분석의뢰', '18.9L 대외분석의뢰', '민속촌 전용상수도 수질검사',
+      '추석연휴 공장 순찰', '설날연휴 공장 순찰']
   },
   BTL: {
     sheetName: 'BTL 생산',
@@ -97,8 +95,48 @@ const SHEET_CFG = {
     reasons: []
   }
 };
-const UI_SHEET_ORDER = ['SEJEUM', 'CIP', 'BTL'];  // 입력창 탭 순서
 const RUN_SHEET_ORDER = ['BTL', 'SEJEUM', 'CIP']; // 전체 실행 순서
+
+// ───────────────────────────────────────────
+// 📅 특이사항 달력 설정
+// ───────────────────────────────────────────
+const CAL_SHEET_SUFFIX = '월 특이사항';        // 시트 이름: "10월 특이사항"
+const CAL_SECTIONS = ['CIP', 'SEJEUM'];        // 달력 구역(위→아래). BTL 특이사항은 제품생산 칸에 "BTL: 사유"
+const CAL_HEADER_ROW = 3;                      // 날짜 행
+const CAL_WEEK_ROW = 4;                        // 요일 행
+const CAL_FIRST_ROW = 5;                       // 사람 시작 행
+const CAL_SEC_COL = 1;                         // A: 구분
+const CAL_NAME_COL = 2;                        // B: 이름
+const CAL_DAY_COL = 3;                         // C = 1일 … AG = 31일
+const CAL_COUNT_COL = CAL_DAY_COL + 31;        // AH: 건수
+const CAL_SLOTS = 3;                           // 사람마다 하루 칸 수 (하루 특이사항 최대 3건, 4건부터는 마지막 칸에 줄바꿈)
+const CAL_STATUS_COL = 18;                     // R1: 마지막 점검 결과 (C1:Q1 제목)
+const CAL_NOTE_TAG = '[점검]';                 // 코드가 단 메모 표시 (직접 단 메모는 건드리지 않음)
+const CAL_COLORS = {
+  ok: '#d9ead3', warn: '#fce5cd', miss: '#f4cccc', pending: '#fff2cc',
+  weekend: '#f3f3f3', off: '#bdbdbd', none: '#ffffff'
+};
+const CAL_SECTION_BG = { CIP: '#e8f0fe', SEJEUM: '#e6f4ea', BTL: '#fef7e0' };
+const CAL_GUIDE =
+  `✏ 사람마다 하루 칸이 ${CAL_SLOTS}줄 — 특이사항이 여러 번이면 위에서부터 한 칸에 한 건씩 (▼ 목록에서 고르거나 직접 입력). ` +
+  `${CAL_SLOTS + 1}건 이상이면 마지막 칸에 줄바꿈(Alt+Enter)   · 거리가 다를 때: 자재 구매 (30km)   · 목적지가 다를 때: 민속촌 채수 @제주민속촌   · 사유를 아직 모를 때: ?\n` +
+  '🎨 정산·점검 후 칸 색: 초록 반영됨 / 주황 확인 필요 / 빨강 정산서에 없음 / 노랑 사유 미정 — 칸을 고치면 색이 지워짐. ' +
+  '칸에 마우스를 올리면 점검 내용이 보임. 사유별 기본 구간·거리는 [특이사항 사유표] 시트';
+
+// ───────────────────────────────────────────
+// 특이사항 사유표 설정
+// ───────────────────────────────────────────
+const CATALOG_SHEET_NAME = '특이사항 사유표';
+const CATALOG_FIRST_ROW = 4;
+// 사유표를 처음 만들 때 사유 이름에 이 글자가 있으면 구간·거리를 미리 채움 (만든 뒤엔 시트에서 수정)
+const CATALOG_SEED_ROUTES = [
+  { kw: '민속촌', route: '공장 ↔ 제주민속촌', km: 50 },
+  { kw: '성읍교', route: '공장 ↔ 성읍교', km: 60 }
+];
+
+// 옛 입력창이 쓰던 숨김 시트 (달력으로 옮길 때만 읽음)
+const SPECIAL_SHEET_NAME = '특이사항';
+const SPECIAL_EXPIRE_DAYS = 200;
 
 // ───────────────────────────────────────────
 // 메뉴 등록 (본인 계정에게만 표시)
@@ -108,8 +146,11 @@ function onOpen() {
   if (userEmail === MENU_OWNER_EMAIL) {
     SpreadsheetApp.getUi()
       .createMenu('교통비 정산')
-      .addItem('전체 시트 자동 채우기', 'fillAllSheets')
+      .addItem('📅 특이사항 달력 열기', 'openCalendar')
+      .addItem('✅ 특이사항 반영 점검', 'checkCalendarMenu')
+      .addItem('📋 특이사항 사유표 열기', 'openCatalog')
       .addSeparator()
+      .addItem('전체 시트 자동 채우기', 'fillAllSheets')
       .addItem('BTL 생산 시트만', 'fillBTLSheet')
       .addItem('제품생산 시트만', 'fillSejeumSheet')
       .addItem('품질 CIP 시트만', 'fillCIPSheet')
@@ -124,20 +165,31 @@ function onOpen() {
   }
 }
 
-// 메뉴 → 유류단가 확인 → 특이사항 입력창
-function fillAllSheets() { openSpecialDialog_('ALL'); }
-function fillBTLSheet() { openSpecialDialog_('BTL'); }
-function fillSejeumSheet() { openSpecialDialog_('SEJEUM'); }
-function fillCIPSheet() { openSpecialDialog_('CIP'); }
+// 메뉴 → 유류단가 확인 → 달력 내용 확인 → 정산 → 반영 점검
+function fillAllSheets() { startFill_('ALL'); }
+function fillBTLSheet() { startFill_('BTL'); }
+function fillSejeumSheet() { startFill_('SEJEUM'); }
+function fillCIPSheet() { startFill_('CIP'); }
 
-function openSpecialDialog_(mode) {
-  // 유류단가를 먼저 확인 (메일 대조 또는 확인 질문). 취소하면 입력창을 열지 않음.
-  if (!confirmFuelPrices_(getMonthNumber(), false)) return;
+function startFill_(mode) {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  try {
+    const month = getMonthNumber();
+    if (!confirmFuelPrices_(month, false)) return;
 
-  const t = HtmlService.createTemplateFromFile('SpecialDialog');
-  t.mode = mode;
-  const html = t.evaluate().setWidth(800).setHeight(720);
-  SpreadsheetApp.getUi().showModalDialog(html, '교통비 정산 — 특이사항 입력');
+    const cal = readCalendar_(month, true); // 달력이 없으면 만들고(옛 기록 옮김) 읽음
+    const ans = ui.alert(`교통비 정산 — ${month}월 특이사항 확인`,
+      calendarPreview_(cal, mode) + '\n\n이대로 정산할까요?\n[확인] 정산 실행   [취소] 달력으로 이동',
+      ui.ButtonSet.OK_CANCEL);
+    if (ans !== ui.Button.OK) { cal.sheet.activate(); return; }
+
+    ss.toast('근무계획·생산계획을 읽고 시트를 채우는 중… (10~30초)', '교통비 정산', 60);
+    const msg = runFill_(mode, month, cal);
+    ui.alert('교통비 정산 결과', msg, ui.ButtonSet.OK);
+  } catch (e) {
+    ui.alert('❌ 오류 발생\n\n' + e.message);
+  }
 }
 
 // ───────────────────────────────────────────
@@ -161,6 +213,8 @@ function normalizeType(raw) {
 function normName_(s) {
   return String(s === null || s === undefined ? '' : s).replace(/\s+/g, '');
 }
+function normReason_(s) { return normName_(s); }
+function normRoute_(s) { return normName_(s).replace(/<->|<>|↔|⇔|-/g, '↔'); }
 
 // ───────────────────────────────────────────
 // 월 숫자 가져오기 (근무현황표 Z3) — 실패 시 오류 발생
@@ -189,7 +243,6 @@ function isEndMark_(v) {
 
 /**
  * 근무계획 → 해당 월 시트 파싱 + 직급 순위 매핑
- * 범위: C5부터 A열에 "계"가 나오는 행 전까지 (못 찾으면 시트 마지막 행까지 + 경고)
  * 반환: { records: [...], rankMap: { "김일수": 0, ... }, endRow, endMarkFound }
  */
 function parseMonthlyWorkData(month) {
@@ -205,7 +258,6 @@ function parseMonthlyWorkData(month) {
     throw new Error(`"${monthName}" 시트 ${WP_NAME_START_ROW}행 이후에 데이터가 없습니다.`);
   }
 
-  // A열에서 "계" 행 찾기 → 그 위까지가 사람
   const markCol = monthSheet.getRange(WP_NAME_START_ROW, WP_END_MARK_COL, lastRow - WP_NAME_START_ROW + 1, 1).getValues();
   let numRows = markCol.length;
   let endMarkFound = false;
@@ -402,7 +454,8 @@ function getCIPReasonName(col) {
 }
 
 // ───────────────────────────────────────────
-// 구간·주행거리 결정 (특이사항 km > 사람별 > 시트 기본)
+// 구간·주행거리 결정 (달력·사유표 > 사람별 > 시트 기본)
+// 특이사항 행의 routeSet/kmSet 은 readCalendar_ 에서 달력 칸 > 사유표 순으로 이미 정해 둔 값
 // ───────────────────────────────────────────
 function resolveTrip_(key, row) {
   let route = ROUTE_TEXT;
@@ -414,7 +467,8 @@ function resolveTrip_(key, row) {
     const d = (p.distance !== null && typeof p.distance === 'object') ? p.distance[key] : p.distance;
     if (typeof d === 'number' && d > 0) distance = d;
   }
-  if (typeof row.km === 'number' && row.km > 0) distance = row.km;   // 특이사항에 적은 주행거리
+  if (row.routeSet) route = row.routeSet;
+  if (typeof row.kmSet === 'number' && row.kmSet > 0) distance = row.kmSet;
   return { route, distance };
 }
 
@@ -431,7 +485,7 @@ function writeToSheet(targetSheet, rows, monthName) {
   // 1) 숨겨진 데이터 행 모두 펼치기
   targetSheet.showRows(DATA_START_ROW, sumRow - DATA_START_ROW);
 
-  // 2) 행이 모자라면 자동 확장 (데이터가 잘리지 않게)
+  // 2) 행이 모자라면 자동 확장
   let addedRows = 0;
   if (rows.length > sumRow - DATA_START_ROW) {
     addedRows = rows.length - (sumRow - DATA_START_ROW);
@@ -457,7 +511,7 @@ function writeToSheet(targetSheet, rows, monthName) {
   targetSheet.getRange(DATA_START_ROW, 2, n, 1).setValues(rows.map(r => [`${monthName} ${r.day}일`])); // ★ 띄어쓰기
   targetSheet.getRange(DATA_START_ROW, 3, n, 1).setValues(rows.map(r => [r.route || ROUTE_TEXT]));
   targetSheet.getRange(DATA_START_ROW, 5, n, 1).setValues(rows.map(r => [r.reason]));
-  targetSheet.getRange(DATA_START_ROW, DIST_COL, n, 1).setValues(rows.map(r => [r.distance]));  // 주행거리
+  targetSheet.getRange(DATA_START_ROW, DIST_COL, n, 1).setValues(rows.map(r => [r.distance]));
 
   // 5) 합계 수식 (빈 행의 #N/A를 피하려고 마지막 데이터 행까지만 합산)
   const lastDataRow = DATA_START_ROW + n - 1;
@@ -496,12 +550,12 @@ function buildAutoRows_(key, data) {
 
   if (key === 'BTL') {
     return records.filter(r => r.type === '야').sort(byDayRank)
-      .map(r => ({ name: r.name, day: r.day, reason: getBTLReason(plan[r.day]), kind: 0, special: false }));
+      .map(r => ({ name: r.name, day: r.day, reason: getBTLReason(plan[r.day]), kind: 0, special: false, type: r.type }));
   }
 
   if (key === 'SEJEUM') {
     return records.filter(r => ['B', 'P', 'L'].includes(r.type)).sort(byDayRank)
-      .map(r => ({ name: r.name, day: r.day, reason: getSejeumReason(r.type, plan[r.day]), kind: 0, special: false }));
+      .map(r => ({ name: r.name, day: r.day, reason: getSejeumReason(r.type, plan[r.day]), kind: 0, special: false, type: r.type }));
   }
 
   // CIP
@@ -524,7 +578,7 @@ function buildAutoRows_(key, data) {
     const group = dayGroups[day];
     const reasons = getCIPReasons(plan[day], group);
     group.forEach((r, i) => {
-      rows.push({ name: r.name, day: r.day, reason: reasons[i], kind: r.type === '조' ? 0 : 1, special: false });
+      rows.push({ name: r.name, day: r.day, reason: reasons[i], kind: r.type === '조' ? 0 : 1, special: false, type: r.type });
     });
   }
   return rows;
@@ -537,7 +591,8 @@ function buildAutoRows_(key, data) {
 // ───────────────────────────────────────────
 function mergeAndSort_(key, autoRows, specials, rankMap) {
   const all = autoRows.concat(specials.map(s => ({
-    name: s.name, day: s.day, reason: s.reason, km: s.km, kind: 2, special: true
+    name: s.name, day: s.day, reason: s.reason, kmSet: s.km, routeSet: s.route,
+    kind: 2, special: true, src: s
   })));
   const kindFirst = (key === 'CIP');
   all.sort((a, b) => {
@@ -550,23 +605,34 @@ function mergeAndSort_(key, autoRows, specials, rankMap) {
   return all;
 }
 
+/** 한 시트에 들어갈 최종 행 (자동 + 특이사항, 구간·거리 결정까지) */
+function buildRows_(key, data, specials) {
+  const autoRows = buildAutoRows_(key, data);
+  const rows = mergeAndSort_(key, autoRows, specials, data.rankMap);
+  rows.forEach(r => {
+    const t = resolveTrip_(key, r);
+    r.route = t.route;
+    r.distance = t.distance;
+  });
+  return { rows, autoCount: autoRows.length };
+}
+
 // ───────────────────────────────────────────
 // 정산 실행 본체 — mode: 'ALL' | 'BTL' | 'SEJEUM' | 'CIP'
 // 반환: 결과 요약 문자열
 // ───────────────────────────────────────────
-function runFill_(mode, expectedMonth) {
+function runFill_(mode, expectedMonth, cal) {
   const data = loadData();
   if (expectedMonth && data.month !== expectedMonth) {
-    throw new Error(`기준 월이 ${expectedMonth}월 → ${data.month}월로 바뀌었습니다. 창을 닫고 다시 실행해주세요.`);
+    throw new Error(`기준 월이 ${expectedMonth}월 → ${data.month}월로 바뀌었습니다. 다시 실행해주세요.`);
   }
+  if (!cal) cal = readCalendar_(data.month, true);
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const monthName = `${data.month}월`;
   const keys = mode === 'ALL' ? RUN_SHEET_ORDER : [mode];
-  const specialsAll = readSpecials_(data.month);
 
   const lines = [];
-  const warns = [];
   const checks = [];
   const tripNotes = [];
   const written = []; // { key, sheet, sumRow, rows }
@@ -583,60 +649,976 @@ function runFill_(mode, expectedMonth) {
       throw new Error(`"${cfg.sheetName}" 시트를 찾을 수 없습니다.`);
     }
 
-    const autoRows = buildAutoRows_(key, data);
-    const specials = specialsAll.filter(s => s.sheetKey === key);
-    const rows = mergeAndSort_(key, autoRows, specials, data.rankMap);
+    const specials = cal.items.filter(s => s.sheetKey === key);
+    const built = buildRows_(key, data, specials);
+    const rows = built.rows;
 
-    // 구간·주행거리
     rows.forEach(r => {
-      const t = resolveTrip_(key, r);
-      r.route = t.route;
-      r.distance = t.distance;
-      if (r.special && typeof r.km === 'number' && r.km > 0) {
-        tripNotes.push(` - ${cfg.sheetName} / ${r.name} / ${monthName} ${r.day}일 (${r.reason}) → ${r.km}km`);
+      if (r.special && (r.route !== ROUTE_TEXT || r.distance !== cfg.distance)) {
+        tripNotes.push(` - ${cfg.sheetName} / ${r.name} / ${monthName} ${r.day}일 (${r.reason}) → ${r.route}, ${r.distance}km`);
       }
     });
 
     const res = writeToSheet(sheet, rows, monthName);
     written.push({ key, sheet, sumRow: res.sumRow, rows });
 
-    let line = `• ${cfg.sheetName}: 총 ${res.count}건 (자동 ${autoRows.length} + 특이사항 ${specials.length}) / 합계 ${res.sumRow}행`;
+    let line = `• ${cfg.sheetName}: 총 ${res.count}건 (자동 ${built.autoCount} + 특이사항 ${specials.length}) / 합계 ${res.sumRow}행`;
     if (res.addedRows > 0) line += ` ← 행 부족으로 ${res.addedRows}행 자동 추가`;
-    const routeCnt = rows.filter(r => r.route !== ROUTE_TEXT).length;
-    if (routeCnt > 0) line += ` / 다른 구간 ${routeCnt}건`;
     lines.push(line);
-
-    specials.forEach(s => {
-      if (autoRows.some(a => a.name === s.name && a.day === s.day)) {
-        warns.push(` - ${cfg.sheetName} / ${s.name} / ${monthName} ${s.day}일 (${s.reason})`);
-      }
-    });
   }
 
   SpreadsheetApp.flush();
 
-  // 실행 후 점검: 개인별 현황 = 합계 ?
+  // 실행 후 점검 ①: 개인별 현황 = 합계 ?
   written.forEach(w => checkPersonTables_(w.sheet, w.sumRow, w.rows).forEach(m => checks.push(m)));
 
   let msg = `${monthName} 교통비 정산 완료\n\n` + lines.join('\n');
   msg += '\n\n' + fuelStatusLine_(data.month);
   if (tripNotes.length > 0) {
-    msg += '\n\nℹ 특이사항 주행거리 적용\n' + tripNotes.join('\n');
-  }
-  if (warns.length > 0) {
-    msg += '\n\n⚠ 같은 사람·같은 날에 자동 입력 건과 겹치는 특이사항 (두 행 모두 입력됨, 확인 필요)\n' + warns.join('\n');
+    const shown = tripNotes.slice(0, 12);
+    msg += '\n\nℹ 기본과 다른 구간·거리로 넣은 특이사항\n' + shown.join('\n') +
+      (tripNotes.length > shown.length ? `\n   … 외 ${tripNotes.length - shown.length}건` : '');
   }
   msg += checks.length > 0
     ? '\n\n⚠ 자동 점검에서 확인할 것\n' + checks.join('\n')
     : '\n\n✅ 자동 점검: 개인별 현황 금액·건수가 합계와 일치';
+
+  // 실행 후 점검 ②: 달력 ↔ 정산서 대조 + 달력 색칠
+  const chk = checkCalendar_(data.month, data, cal);
+  msg += '\n\n' + chk.text;
   return msg;
 }
 
 // ═══════════════════════════════════════════
+// 📅 특이사항 달력
+// ═══════════════════════════════════════════
+
+function calSheetName_(month) { return month + CAL_SHEET_SUFFIX; }
+
+/** 달력의 연도: 지금 날짜 기준 (12월분을 1월에 정산 / 1월 달력을 12월에 미리 만드는 경우 처리) */
+function calYear_(month) {
+  const now = new Date();
+  let y = now.getFullYear();
+  const cur = now.getMonth() + 1;
+  if (month - cur > 6) y -= 1;
+  else if (cur - month > 6) y += 1;
+  return y;
+}
+
+function daysInMonth_(month) {
+  return new Date(calYear_(month), month, 0).getDate();
+}
+
+function calBaseBg_(year, month, day, dim) {
+  if (day > dim) return CAL_COLORS.off;
+  const w = new Date(year, month - 1, day).getDay();
+  return (w === 0 || w === 6) ? CAL_COLORS.weekend : CAL_COLORS.none;
+}
+
+function sheetNameToKey_() {
+  const m = {};
+  Object.keys(SHEET_CFG).forEach(k => { m[normName_(SHEET_CFG[k].sheetName)] = k; m[k] = k; });
+  return m;
+}
+
+/** 특이사항의 시트 → 달력에서 들어갈 구역 */
+function calSectionFor_(sheetKey) {
+  if (CAL_SECTIONS.indexOf(sheetKey) >= 0) return sheetKey;
+  if (sheetKey === 'BTL' && CAL_SECTIONS.indexOf('SEJEUM') >= 0) return 'SEJEUM';
+  return null;
+}
+
+function colA1_(col) {
+  let s = '';
+  while (col > 0) { const m = (col - 1) % 26; s = String.fromCharCode(65 + m) + s; col = Math.floor((col - 1) / 26); }
+  return s;
+}
+
+/** 칸 하나 → 여러 건 (줄바꿈 또는 " + ") */
+function splitCalLines_(raw) {
+  return String(raw === null || raw === undefined ? '' : raw)
+    .split(/\r?\n|\s\+\s/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 한 건 해석
+ *  "자재 구매 (30km)"          → 거리 30
+ *  "민속촌 채수 @제주민속촌"    → 구간 "공장 ↔ 제주민속촌"
+ *  "BTL: 사유"                 → BTL 생산 시트 (제품생산 구역에 적을 때)
+ *  "?" / "농업용수 CIP?"        → 사유 미정 (정산에서 뺌)
+ */
+function parseCalLine_(line, secKey) {
+  let s = String(line).trim();
+  let sheetKey = secKey;
+
+  const mb = s.match(/^\[?\s*BTL\s*\]?\s*[:：]\s*/i);
+  if (mb) { sheetKey = 'BTL'; s = s.slice(mb[0].length); }
+
+  let km = '';
+  const mk = s.match(/[(（]?\s*(\d+(?:\.\d+)?)\s*km\s*[)）]?/i);
+  if (mk) {
+    km = Number(mk[1]);
+    s = (s.slice(0, mk.index) + ' ' + s.slice(mk.index + mk[0].length)).trim();
+  }
+
+  let route = '';
+  const mr = s.match(/[@＠]\s*(.+)$/);
+  if (mr) {
+    const place = mr[1].trim();
+    if (place) route = place.indexOf('↔') >= 0 ? place : '공장 ↔ ' + place;
+    s = s.slice(0, mr.index).trim();
+  }
+
+  let pending = false;
+  if (/[?？]\s*$/.test(s)) { pending = true; s = s.replace(/[?？]+\s*$/, '').trim(); }
+  s = s.replace(/\s+/g, ' ');
+  if (!s) pending = true;
+
+  return { sheetKey, reason: s, km, route, pending };
+}
+
+/**
+ * 달력 읽기
+ * 반환: { sheet, month, dim, items: [...], pending: [...], problems: [...], created, imported }
+ *   item: { sheetKey, name, day, reason, km, route, inCatalog, row, col, raw }
+ */
+function readCalendar_(month, createIfMissing) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(calSheetName_(month));
+  let created = false, imported = 0;
+  if (!sh) {
+    if (!createIfMissing) {
+      return { sheet: null, month, dim: daysInMonth_(month), items: [], pending: [], problems: [], created: false, imported: 0 };
+    }
+    const r = createCalendar_(month);
+    sh = r.sheet; created = true; imported = r.imported;
+  }
+
+  const catalog = readCatalog_();
+  const dim = daysInMonth_(month);
+  const out = { sheet: sh, month, dim, items: [], pending: [], problems: [], created, imported };
+  const lastRow = sh.getLastRow();
+  if (lastRow < CAL_FIRST_ROW) return out;
+
+  const vals = sh.getRange(CAL_FIRST_ROW, 1, lastRow - CAL_FIRST_ROW + 1, CAL_DAY_COL + 30).getDisplayValues();
+  const keyByName = sheetNameToKey_();
+  const probSeen = {};
+  const problem = (k, text) => { if (!probSeen[k]) { probSeen[k] = true; out.problems.push(text); } };
+  let curSec = '', curName = '';
+
+  vals.forEach((r, i) => {
+    const rowNo = CAL_FIRST_ROW + i;
+    const secRaw = String(r[CAL_SEC_COL - 1]).trim();
+    if (secRaw) { curSec = secRaw; curName = ''; }
+    const nameRaw = String(r[CAL_NAME_COL - 1]).trim();
+    if (nameRaw) curName = nameRaw;   // 이름 칸은 사람마다 ${CAL_SLOTS}줄 병합 → 아래 줄은 위 이름을 이어 씀
+    const name = curName;
+
+    for (let d = 1; d <= 31; d++) {
+      const raw = String(r[CAL_DAY_COL + d - 2]).trim();
+      if (!raw) continue;
+      const col = CAL_DAY_COL + d - 1;
+      const cell = colA1_(col) + rowNo;
+      if (!name) { problem('noname' + rowNo, ` - ${rowNo}행: 이름(B열)이 비어 있어 이 줄은 무시`); continue; }
+      if (d > dim) { problem(cell, ` - ${cell} ${name}: ${month}월에는 ${d}일이 없어 무시`); continue; }
+      const secKey = keyByName[normName_(curSec)];
+      if (!secKey) { problem('sec' + rowNo, ` - ${rowNo}행 ${name}: 구분 "${curSec}"을(를) 몰라 무시 (품질 CIP / 제품생산)`); continue; }
+
+      splitCalLines_(raw).forEach(line => {
+        const p = parseCalLine_(line, secKey);
+        const base = { sheetKey: p.sheetKey, name, day: d, row: rowNo, col, raw: line, reason: p.reason };
+        if (p.pending) { out.pending.push(base); return; }
+        const cat = catalog.map[catKey_(p.sheetKey, p.reason)];
+        out.items.push(Object.assign(base, {
+          km: p.km !== '' ? p.km : (cat && cat.km !== '' ? cat.km : ''),
+          route: p.route || (cat && cat.route) || '',
+          inCatalog: !!cat
+        }));
+      });
+    }
+  });
+  return out;
+}
+
+/** 정산 전 확인창에 보여줄 요약 */
+function calendarPreview_(cal, mode) {
+  const m = cal.month;
+  const out = [];
+  if (cal.created) {
+    out.push(`📅 "${calSheetName_(m)}" 시트가 없어 새로 만들었습니다.` +
+      (cal.imported ? ` (예전 입력창 기록 ${cal.imported}건을 옮김)` : ''));
+  }
+  const cnt = {};
+  cal.items.forEach(s => { cnt[s.sheetKey] = (cnt[s.sheetKey] || 0) + 1; });
+  const parts = Object.keys(SHEET_CFG).filter(k => cnt[k]).map(k => `${SHEET_CFG[k].sheetName} ${cnt[k]}건`);
+  out.push(`📅 ${m}월 특이사항 달력 → 정산에 넣을 것 ${cal.items.length}건` + (parts.length ? ` (${parts.join(' / ')})` : ''));
+
+  if (mode !== 'ALL') {
+    const other = cal.items.filter(s => s.sheetKey !== mode).length;
+    if (other > 0) out.push(`ℹ 이번 실행은 ${SHEET_CFG[mode].sheetName} 시트만 — 다른 시트 특이사항 ${other}건은 이번엔 쓰지 않음`);
+  }
+  if (cal.pending.length > 0) {
+    out.push(`\n🟨 사유 미정(?) ${cal.pending.length}건 — 정산에서 빠집니다`);
+    cal.pending.slice(0, 10).forEach(p => out.push(` - ${p.name} ${m}/${p.day} ${p.reason || '(사유 없음)'}`));
+    if (cal.pending.length > 10) out.push(`   … 외 ${cal.pending.length - 10}건`);
+  }
+  const unknown = {};
+  cal.items.filter(s => !s.inCatalog && s.km === '' && !s.route).forEach(s => {
+    const k = SHEET_CFG[s.sheetKey].sheetName + ' · ' + s.reason;
+    unknown[k] = (unknown[k] || 0) + 1;
+  });
+  const uk = Object.keys(unknown);
+  if (uk.length > 0) {
+    out.push('\nℹ 사유표에 없는 사유 → 기본 구간·거리로 계산 (필요하면 사유표에 추가)');
+    uk.slice(0, 8).forEach(k => out.push(` - ${k} (${unknown[k]}건)`));
+    if (uk.length > 8) out.push(`   … 외 ${uk.length - 8}가지`);
+  }
+  if (cal.problems.length > 0) {
+    out.push('\n⚠ 무시된 칸');
+    cal.problems.slice(0, 8).forEach(p => out.push(p));
+  }
+  return out.join('\n');
+}
+
+/** 숨김 '특이사항' 시트(옛 입력창) 기록 읽기 — month 생략 시 전체 */
+function readHiddenSpecials_(month) {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SPECIAL_SHEET_NAME);
+  if (!sh || sh.getLastRow() < 2) return [];
+  const keyByName = sheetNameToKey_();
+  const limit = Date.now() - SPECIAL_EXPIRE_DAYS * 24 * 60 * 60 * 1000;
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 7).getValues()
+    .map(r => ({
+      month: parseInt(r[0], 10),
+      sheetKey: keyByName[normName_(r[1])],
+      day: parseInt(r[2], 10),
+      name: String(r[3]).trim(),
+      reason: String(r[4]).trim().replace(/\s+/g, ' '),
+      at: r[5],
+      km: parseKm_(r[6])
+    }))
+    .filter(e => e.sheetKey && e.name && e.reason && e.day >= 1 && e.day <= 31 && !isNaN(e.month))
+    .filter(e => month === undefined ||
+      (e.month === month && !(e.at instanceof Date && e.at.getTime() < limit)));
+}
+
+/** 주행거리 입력값 → 양수면 숫자, 아니면 '' */
+function parseKm_(v) {
+  const n = Number(String(v === null || v === undefined ? '' : v).replace(/[^\d.]/g, ''));
+  return (n > 0) ? n : '';
+}
+
+/** 옛 기록 한 건 → 달력 칸 글자 */
+function calLineText_(e, secKey, catalog) {
+  const prefix = (e.sheetKey !== secKey) ? e.sheetKey + ': ' : '';
+  const cat = catalog.map[catKey_(e.sheetKey, e.reason)];
+  const expectKm = (cat && cat.km !== '') ? cat.km : SHEET_CFG[e.sheetKey].distance;
+  const kmTxt = (e.km !== '' && Number(e.km) !== Number(expectKm)) ? ` (${e.km}km)` : '';
+  return prefix + e.reason + kmTxt;
+}
+
+/**
+ * 달력 시트 새로 만들기
+ *  preset 없으면: 코드 이름 목록 + 숨김 '특이사항' 시트(옛 입력창)의 그 달 기록을 옮김
+ *  preset 있으면: { sections: [{key, names}], cells: {"키|이름|일": [줄...]}, imported } 그대로 씀 (옛 양식 달력 변환용)
+ */
+function createCalendar_(month, preset) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const name = calSheetName_(month);
+  if (ss.getSheetByName(name)) throw new Error(`"${name}" 시트가 이미 있습니다.`);
+
+  const catalog = readCatalog_(); // 사유표도 없으면 함께 만듦
+  const year = calYear_(month);
+  const dim = daysInMonth_(month);
+
+  let sections, cells, imported = 0;
+  if (preset) {
+    sections = preset.sections; cells = preset.cells; imported = preset.imported || 0;
+  } else {
+    // 구역별 이름 (코드 목록 + 옛 기록에만 있는 이름)
+    sections = CAL_SECTIONS.map(key => ({ key, names: SHEET_CFG[key].names.slice() }));
+    cells = {};
+    readHiddenSpecials_(month).forEach(e => {
+      const secKey = calSectionFor_(e.sheetKey);
+      const sec = sections.find(s => s.key === secKey);
+      if (!sec) return;
+      if (sec.names.indexOf(e.name) < 0) sec.names.push(e.name);
+    const k = secKey + '|' + e.name + '|' + e.day;
+    (cells[k] = cells[k] || []).push(calLineText_(e, secKey, catalog));
+    imported++;
+    });
+  }
+
+  // 시트 생성 — '품질 CIP' 바로 뒤
+  const anchor = ss.getSheetByName(SHEET_CFG.CIP.sheetName);
+  const sh = ss.insertSheet(name, anchor ? anchor.getIndex() : ss.getNumSheets());
+  try {
+    layoutCalendar_(sh, { month, year, dim, sections, cells, catalog });
+  } catch (e) {
+    try { ss.deleteSheet(sh); } catch (e2) {} // 만들다 실패하면 반쯤 만든 시트를 지움 (다음에 깨끗하게 다시 만들도록)
+    throw e;
+  }
+  return { sheet: sh, imported };
+}
+
+/** 사람마다 한 줄뿐인 옛 양식 달력인지 (이름 칸이 병합돼 있지 않음) */
+function isOldCalLayout_(sh) {
+  if (CAL_SLOTS <= 1 || sh.getLastRow() < CAL_FIRST_ROW) return false;
+  return !sh.getRange(CAL_FIRST_ROW, CAL_NAME_COL).isPartOfMerge();
+}
+
+/** 옛 양식 달력 → 하루 여러 칸 양식으로 다시 만들기 (적어 둔 내용은 그대로 옮김) */
+function convertCalendar_(sh, month) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const keyByName = sheetNameToKey_();
+  const last = sh.getLastRow();
+  const vals = sh.getRange(CAL_FIRST_ROW, 1, last - CAL_FIRST_ROW + 1, CAL_DAY_COL + 30).getDisplayValues();
+
+  const sections = [];
+  const cells = {};
+  let moved = 0, curSec = null, curName = '';
+  vals.forEach(r => {
+    const secRaw = String(r[CAL_SEC_COL - 1]).trim();
+    if (secRaw) {
+      const key = keyByName[normName_(secRaw)];
+      curSec = key ? (sections.find(x => x.key === key) || (sections.push({ key, names: [] }), sections[sections.length - 1])) : null;
+      curName = '';
+    }
+    const nameRaw = String(r[CAL_NAME_COL - 1]).trim();
+    if (nameRaw) curName = nameRaw;
+    if (!curSec || !curName) return;
+    if (curSec.names.indexOf(curName) < 0) curSec.names.push(curName);
+    for (let d = 1; d <= 31; d++) {
+      const lines = splitCalLines_(r[CAL_DAY_COL + d - 2]);
+      if (lines.length === 0) continue;
+      const k = curSec.key + '|' + curName + '|' + d;
+      cells[k] = (cells[k] || []).concat(lines);
+      moved += lines.length;
+    }
+  });
+  // 코드 목록에 있는데 옛 달력에 없던 사람도 넣음
+  CAL_SECTIONS.forEach(key => {
+    let sec = sections.find(x => x.key === key);
+    if (!sec) { sec = { key, names: [] }; sections.push(sec); }
+    SHEET_CFG[key].names.forEach(n => { if (sec.names.indexOf(n) < 0) sec.names.push(n); });
+  });
+
+  const name = sh.getName();
+  const backupName = name + ' (옛 양식)';
+  const old = ss.getSheetByName(backupName);
+  if (old) ss.deleteSheet(old);
+  sh.setName(backupName);
+  let created;
+  try {
+    created = createCalendar_(month, { sections, cells, imported: moved });
+  } catch (e) {
+    sh.setName(name); // 실패하면 원래대로
+    throw e;
+  }
+  ss.deleteSheet(sh);
+  return { sheet: created.sheet, moved };
+}
+
+/** 달력 시트 꾸미기 (제목·안내·머리글·본문·서식·드롭다운) */
+function layoutCalendar_(sh, ctx) {
+  const { month, year, dim, sections, cells, catalog } = ctx;
+  const totalCols = CAL_COUNT_COL;
+  if (sh.getMaxColumns() < totalCols) sh.insertColumnsAfter(sh.getMaxColumns(), totalCols - sh.getMaxColumns());
+  else if (sh.getMaxColumns() > totalCols) sh.deleteColumns(totalCols + 1, sh.getMaxColumns() - totalCols);
+
+  const S = CAL_SLOTS;
+  const peopleRows = sections.reduce((a, s) => a + s.names.length, 0) * S;
+  const lastRow = CAL_FIRST_ROW + peopleRows - 1;
+  if (sh.getMaxRows() < lastRow + 5) sh.insertRowsAfter(sh.getMaxRows(), lastRow + 5 - sh.getMaxRows());
+
+  sh.getRange(1, 1, sh.getMaxRows(), totalCols).setFontFamily('Malgun Gothic').setFontSize(9);
+
+  // 제목·안내 ★ 병합은 고정 열(A·B)과 나머지(C~)를 넘나들지 않게 — 넘나들면 열 고정 오류
+  sh.getRange(1, 1, 2, CAL_NAME_COL).merge()
+    .setValue(`${month}월`).setFontSize(18).setFontWeight('bold')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle').setBackground('#e8eaed');
+  sh.getRange(1, CAL_DAY_COL, 1, CAL_STATUS_COL - CAL_DAY_COL).merge()
+    .setValue(`${year}년 ${month}월 교통비 특이사항 달력`).setFontSize(14).setFontWeight('bold').setVerticalAlignment('middle');
+  sh.getRange(1, CAL_STATUS_COL, 1, totalCols - CAL_STATUS_COL + 1).merge()
+    .setValue('아직 점검 안 함').setHorizontalAlignment('right').setVerticalAlignment('middle')
+    .setFontColor('#5f6368').setFontSize(10);
+  sh.getRange(2, CAL_DAY_COL, 1, totalCols - CAL_DAY_COL + 1).merge().setValue(CAL_GUIDE)
+    .setWrap(true).setVerticalAlignment('middle').setFontColor('#3c4043').setBackground('#f8f9fa');
+  sh.setRowHeight(1, 30);
+  sh.setRowHeight(2, 44);
+
+  // 머리글 (날짜·요일)
+  const head = ['구분', '이름'];
+  const week = ['', ''];
+  const WD = '일월화수목금토';
+  for (let d = 1; d <= 31; d++) {
+    head.push(d <= dim ? d : '');
+    week.push(d <= dim ? WD[new Date(year, month - 1, d).getDay()] : '');
+  }
+  head.push('건수');
+  week.push('');
+  sh.getRange(CAL_HEADER_ROW, 1, 1, totalCols).setValues([head]);
+  sh.getRange(CAL_WEEK_ROW, 1, 1, totalCols).setValues([week]);
+  const hdr = sh.getRange(CAL_HEADER_ROW, 1, 2, totalCols);
+  hdr.setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle').setBackground('#e8eaed');
+  sh.getRange(CAL_HEADER_ROW, 1, 2, 1).merge();
+  sh.getRange(CAL_HEADER_ROW, 2, 2, 1).merge();
+  sh.getRange(CAL_HEADER_ROW, CAL_COUNT_COL, 2, 1).merge();
+  for (let d = 1; d <= 31; d++) {
+    const c = CAL_DAY_COL + d - 1;
+    if (d > dim) { sh.getRange(CAL_HEADER_ROW, c, 2, 1).setBackground(CAL_COLORS.off); continue; }
+    const w = new Date(year, month - 1, d).getDay();
+    if (w === 0) sh.getRange(CAL_HEADER_ROW, c, 2, 1).setFontColor('#d93025');
+    if (w === 6) sh.getRange(CAL_HEADER_ROW, c, 2, 1).setFontColor('#1a73e8');
+  }
+  sh.getRange(CAL_HEADER_ROW, CAL_DAY_COL, 1, 31).setFontSize(10);
+
+  // 본문
+  const body = [];
+  const secRanges = [];
+  const personStarts = [];
+  let r = CAL_FIRST_ROW;
+  sections.forEach(sec => {
+    if (sec.names.length === 0) return;
+    const start = r;
+    sec.names.forEach((n, i) => {
+      personStarts.push(r);
+      for (let slot = 0; slot < S; slot++) {
+        const row = [i === 0 && slot === 0 ? SHEET_CFG[sec.key].sheetName : '', slot === 0 ? n : ''];
+        for (let d = 1; d <= 31; d++) {
+          const lines = cells[sec.key + '|' + n + '|' + d] || [];
+          // 한 칸에 한 건씩, 칸 수보다 많으면 마지막 칸에 줄바꿈으로 모음
+          row.push(slot < S - 1 ? (lines[slot] || '') : lines.slice(S - 1).join('\n'));
+        }
+        row.push(slot === 0 ? `=COUNTA(${colA1_(CAL_DAY_COL)}${r}:${colA1_(CAL_DAY_COL + 30)}${r + S - 1})` : '');
+        body.push(row);
+        r++;
+      }
+    });
+    secRanges.push({ key: sec.key, start, n: sec.names.length * S });
+  });
+
+  if (body.length > 0) {
+    sh.getRange(CAL_FIRST_ROW, CAL_DAY_COL, body.length, 31).setNumberFormat('@');
+    sh.getRange(CAL_FIRST_ROW, 1, body.length, totalCols).setValues(body);
+
+    const all = sh.getRange(CAL_FIRST_ROW, 1, body.length, totalCols);
+    all.setVerticalAlignment('middle').setWrap(true)
+      .setBorder(true, true, true, true, true, true, '#e0e0e0', SpreadsheetApp.BorderStyle.DOTTED);
+    all.setBorder(true, true, true, true, true, null, '#c0c0c0', SpreadsheetApp.BorderStyle.SOLID);
+    sh.getRange(CAL_FIRST_ROW, CAL_DAY_COL, body.length, 31).setHorizontalAlignment('center');
+    sh.getRange(CAL_FIRST_ROW, CAL_NAME_COL, body.length, 1).setFontWeight('bold').setHorizontalAlignment('center').setFontSize(10);
+    sh.getRange(CAL_FIRST_ROW, CAL_COUNT_COL, body.length, 1).setHorizontalAlignment('center').setFontColor('#5f6368');
+    sh.setRowHeights(CAL_FIRST_ROW, body.length, 22);
+
+    // 사람 한 명 = ${S}줄 묶음 (이름·건수 병합, 묶음 아래 진한 선)
+    personStarts.forEach(p => {
+      sh.getRange(p, CAL_NAME_COL, S, 1).merge().setVerticalAlignment('middle');
+      sh.getRange(p, CAL_COUNT_COL, S, 1).merge().setVerticalAlignment('middle');
+      sh.getRange(p + S - 1, 1, 1, totalCols)
+        .setBorder(null, null, true, null, null, null, '#9e9e9e', SpreadsheetApp.BorderStyle.SOLID);
+    });
+
+    // 주말·없는 날 바탕색
+    const bgs = body.map(() => {
+      const row = [];
+      for (let d = 1; d <= 31; d++) row.push(calBaseBg_(year, month, d, dim));
+      return row;
+    });
+    sh.getRange(CAL_FIRST_ROW, CAL_DAY_COL, body.length, 31).setBackgrounds(bgs);
+
+    secRanges.forEach(s => {
+      sh.getRange(s.start, CAL_SEC_COL, s.n, 2).setBackground(CAL_SECTION_BG[s.key] || '#ffffff');
+      sh.getRange(s.start, CAL_SEC_COL, s.n, 1).merge()
+        .setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle').setFontSize(10);
+      sh.getRange(s.start + s.n - 1, 1, 1, totalCols)
+        .setBorder(null, null, true, null, null, null, '#5f6368', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    });
+  }
+
+  sh.setColumnWidth(CAL_SEC_COL, 62);
+  sh.setColumnWidth(CAL_NAME_COL, 56);
+  sh.setColumnWidths(CAL_DAY_COL, 31, 76);
+  sh.setColumnWidth(CAL_COUNT_COL, 38);
+  sh.setFrozenRows(CAL_WEEK_ROW);
+  sh.setFrozenColumns(CAL_NAME_COL);
+
+  refreshCalValidation_(sh, catalog);
+}
+
+/**
+ * 달력 칸 하나 점검
+ *  • 사유를 사유표 표기로 맞춤 — 띄어쓰기만 다른 경우 ("18.9L 대외분석 의뢰" → 사유표의 "18.9L 대외분석의뢰")
+ *  • useRule: 드롭다운을 걸지 여부
+ *      - 빈 칸 / 사유 하나만 적은 칸 → 드롭다운 (목록에 없는 사유면 빨간 경고 표시 = 사유표에 없다는 뜻)
+ *      - 2건 이상·(30km)·@장소·?·BTL: 처럼 목록과 모양이 다른 칸 → 사유가 모두 사유표에 있으면 드롭다운을 떼어 경고 없앰
+ */
+function calCellCheck_(raw, secKey, catalog) {
+  const src = String(raw === null || raw === undefined ? '' : raw);
+  const lines = splitCalLines_(src);
+  if (!secKey) return { text: src, changed: false, useRule: false };
+  if (lines.length === 0) return { text: src, changed: false, useRule: true };
+
+  let allKnown = true, plain = lines.length === 1, lineChanged = false;
+  const out = lines.map(line => {
+    const p = parseCalLine_(line, secKey);
+    if (p.pending || p.km !== '' || p.route || p.sheetKey !== secKey) plain = false;
+    if (p.pending) return line;
+    const cat = catalog.map[catKey_(p.sheetKey, p.reason)];
+    if (!cat) { allKnown = false; return line; }
+    // 사유 부분만 사유표 표기로 (BTL:, @장소, (30km)는 그대로 붙임)
+    let t = (p.sheetKey !== secKey ? p.sheetKey + ': ' : '') + cat.reason;
+    if (p.route) t += ' @' + (p.route.indexOf('공장 ↔ ') === 0 ? p.route.slice('공장 ↔ '.length) : p.route);
+    if (p.km !== '') t += ` (${p.km}km)`;
+    if (t !== line) lineChanged = true;
+    return t;
+  });
+  const text = lineChanged ? out.join('\n') : src;
+  return { text, changed: lineChanged, useRule: plain || !allKnown };
+}
+
+function calRuleFor_(key, catalog, cache) {
+  if (!key) return null;
+  if (key in cache) return cache[key];
+  const list = catalog.bySheet[key] || [];
+  cache[key] = list.length === 0 ? null : SpreadsheetApp.newDataValidation()
+    .requireValueInList(list.slice(0, 500), true)
+    .setAllowInvalid(true)
+    .setHelpText('목록에서 고르거나 직접 입력. 2건 이상은 줄바꿈 또는 " + "  /  거리: (30km)  /  목적지: @성읍교  /  미정: ?')
+    .build();
+  return cache[key];
+}
+
+/** 달력 각 행의 구역(시트 키) — A열 병합 칸을 아래로 이어 읽음 */
+function calRowKeys_(sh, fromRow, toRow) {
+  const keyByName = sheetNameToKey_();
+  const secVals = sh.getRange(CAL_FIRST_ROW, CAL_SEC_COL, toRow - CAL_FIRST_ROW + 1, 1).getDisplayValues();
+  const keys = [];
+  let cur = '';
+  secVals.forEach((r, i) => {
+    if (String(r[0]).trim()) cur = String(r[0]).trim();
+    if (CAL_FIRST_ROW + i >= fromRow) keys.push(keyByName[normName_(cur)] || null);
+  });
+  return keys;
+}
+
+/** 지정 범위(달력 날짜 칸)의 표기 맞춤 + 드롭다운 다시 걸기 */
+function refreshCalCells_(sh, r0, c0, nR, nC, catalog) {
+  const rng = sh.getRange(r0, c0, nR, nC);
+  const vals = rng.getDisplayValues();
+  const keys = calRowKeys_(sh, r0, r0 + nR - 1);
+  const cache = {};
+  let anyChange = false;
+  const dvs = vals.map((row, i) => row.map((v, j) => {
+    const res = calCellCheck_(v, keys[i], catalog);
+    if (res.changed) { vals[i][j] = res.text; anyChange = true; }
+    return res.useRule ? calRuleFor_(keys[i], catalog, cache) : null;
+  }));
+  if (anyChange) rng.setValues(vals);
+  rng.setDataValidations(dvs);
+}
+
+/** 달력 전체 새로고침 (달력 만들 때·열 때·사유표를 고쳤을 때) */
+function refreshCalValidation_(sh, catalog) {
+  const last = sh.getLastRow();
+  if (last < CAL_FIRST_ROW) return;
+  refreshCalCells_(sh, CAL_FIRST_ROW, CAL_DAY_COL, last - CAL_FIRST_ROW + 1, 31, catalog);
+}
+
+function isCalSheet_(sh) {
+  return new RegExp('^(\\d{1,2})' + CAL_SHEET_SUFFIX + '$').test(sh.getName());
+}
+
+// onEdit(단순 트리거)
+//  • 달력 칸을 고치면: 점검 색·메모 지움 + 사유 표기를 사유표에 맞춤 + 드롭다운 경고 정리
+//  • 사유표를 고치면: 모든 달력의 드롭다운·표기를 새 사유표에 맞춤
+function onEdit(e) {
+  try {
+    if (!e || !e.range) return;
+    const sh = e.range.getSheet();
+
+    if (sh.getName() === CATALOG_SHEET_NAME) {
+      if (e.range.getLastRow() < CATALOG_FIRST_ROW || e.range.getColumn() > 2) return; // 시트·사유 열만
+      const catalog = readCatalog_();
+      sh.getParent().getSheets().filter(isCalSheet_).forEach(c => refreshCalValidation_(c, catalog));
+      return;
+    }
+
+    const m = sh.getName().match(new RegExp('^(\\d{1,2})' + CAL_SHEET_SUFFIX + '$'));
+    if (!m) return;
+    const r0 = Math.max(e.range.getRow(), CAL_FIRST_ROW);
+    const r1 = e.range.getLastRow();
+    const c0 = Math.max(e.range.getColumn(), CAL_DAY_COL);
+    const c1 = Math.min(e.range.getLastColumn(), CAL_DAY_COL + 30);
+    if (r0 > r1 || c0 > c1) return;
+    const nR = r1 - r0 + 1, nC = c1 - c0 + 1;
+    if (nR * nC > 3000) return;
+
+    const month = parseInt(m[1], 10);
+    const year = calYear_(month), dim = daysInMonth_(month);
+    const rng = sh.getRange(r0, c0, nR, nC);
+    const notes = rng.getNotes();
+    const bgs = [];
+    for (let i = 0; i < nR; i++) {
+      const row = [];
+      for (let j = 0; j < nC; j++) {
+        row.push(calBaseBg_(year, month, c0 + j - CAL_DAY_COL + 1, dim));
+        if (String(notes[i][j]).indexOf(CAL_NOTE_TAG) === 0) notes[i][j] = '';
+      }
+      bgs.push(row);
+    }
+    rng.setBackgrounds(bgs);
+    rng.setNotes(notes);
+
+    refreshCalCells_(sh, r0, c0, nR, nC, readCatalog_());
+  } catch (err) {
+    // 단순 트리거 오류는 무시 (입력은 그대로 됨)
+  }
+}
+
+// ═══════════════════════════════════════════
+// 📋 특이사항 사유표 — 사유별 기본 구간·거리 + 달력 드롭다운 목록
+// ═══════════════════════════════════════════
+function catKey_(key, reason) { return key + '|' + normReason_(reason); }
+
+let _catalogMemo = null;
+
+function readCatalog_() {
+  if (_catalogMemo) return _catalogMemo;
+  const sh = getOrCreateCatalog_();
+  const out = { map: {}, bySheet: {} };
+  Object.keys(SHEET_CFG).forEach(k => { out.bySheet[k] = []; });
+  const last = sh.getLastRow();
+  if (last >= CATALOG_FIRST_ROW) {
+    const keyByName = sheetNameToKey_();
+    sh.getRange(CATALOG_FIRST_ROW, 1, last - CATALOG_FIRST_ROW + 1, 4).getDisplayValues().forEach(r => {
+      const key = keyByName[normName_(r[0])];
+      const reason = String(r[1]).trim().replace(/\s+/g, ' ');
+      if (!key || !reason) return;
+      let route = String(r[2]).trim();
+      if (route && route.indexOf('↔') < 0) route = '공장 ↔ ' + route;
+      if (!out.map[catKey_(key, reason)]) out.map[catKey_(key, reason)] = { reason, route, km: parseKm_(r[3]) };
+      if (out.bySheet[key].indexOf(reason) < 0) out.bySheet[key].push(reason);
+    });
+  }
+  _catalogMemo = out;
+  return out;
+}
+
+function getOrCreateCatalog_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(CATALOG_SHEET_NAME);
+  if (sh) return sh;
+
+  // 초기 목록: 코드의 reasons + 옛 입력창 기록에 나온 사유
+  const seeds = [];
+  const seen = {};
+  const kms = {};
+  const addSeed = (key, reason, used) => {
+    reason = String(reason).trim().replace(/\s+/g, ' ');
+    if (!reason) return;
+    const k = catKey_(key, reason);
+    if (seen[k]) {
+      if (used && !seen[k].used) { seen[k].reason = reason; seen[k].used = true; } // 실제로 쓰던 띄어쓰기 우선
+      return;
+    }
+    seen[k] = { key, reason, used: !!used };
+    seeds.push(seen[k]);
+  };
+  ['CIP', 'SEJEUM', 'BTL'].forEach(key => SHEET_CFG[key].reasons.forEach(r => addSeed(key, r)));
+  readHiddenSpecials_().forEach(e => {
+    addSeed(e.sheetKey, e.reason, true);
+    const k = catKey_(e.sheetKey, e.reason);
+    (kms[k] = kms[k] || {})[String(e.km)] = true;
+  });
+
+  const rows = seeds.map(s => {
+    const k = catKey_(s.key, s.reason);
+    let km = '';
+    const ks = kms[k] ? Object.keys(kms[k]) : [];
+    if (ks.length === 1 && ks[0] !== '' && Number(ks[0]) !== SHEET_CFG[s.key].distance) km = Number(ks[0]);
+    let route = '';
+    const rule = CATALOG_SEED_ROUTES.find(x => s.reason.indexOf(x.kw) >= 0);
+    if (rule) { route = rule.route; if (km === '') km = rule.km; }
+    return [SHEET_CFG[s.key].sheetName, s.reason, route, km, ''];
+  });
+  rows.sort((a, b) => {
+    const order = { '품질 CIP': 0, '제품생산': 1, 'BTL 생산': 2 };
+    return (order[a[0]] - order[b[0]]);
+  });
+
+  sh = ss.insertSheet(CATALOG_SHEET_NAME, ss.getNumSheets());
+  sh.getRange(1, 1, 200, 5).setFontFamily('Malgun Gothic').setFontSize(10);
+  sh.getRange(1, 1, 1, 5).merge().setValue('특이사항 사유표 — 달력 칸에 적는 사유, 사유별 구간·주행거리')
+    .setFontWeight('bold').setFontSize(13);
+  sh.getRange(2, 1, 1, 5).merge().setValue(
+    '• 구간·거리 칸을 비우면 기본값 (공장 ↔ 제주시 / BTL·제품생산 50km, 품질 CIP 55km / 김은혁은 공장 ↔ 서귀포시)\n' +
+    '• 구간은 "제주민속촌"처럼 장소만 써도 됨 → "공장 ↔ 제주민속촌"  • 여기 있는 사유가 달력 드롭다운에 나옴 (행 추가·삭제 자유)\n' +
+    '• 달력 칸에 직접 적은 값 "(30km)", "@성읍교"가 이 표보다 우선')
+    .setWrap(true).setFontColor('#3c4043').setBackground('#f8f9fa').setVerticalAlignment('middle');
+  sh.setRowHeight(2, 58);
+  sh.getRange(3, 1, 1, 5).setValues([['시트', '사유', '구간 (비우면 기본)', '주행거리 km (비우면 기본)', '메모']])
+    .setFontWeight('bold').setBackground('#e8eaed').setHorizontalAlignment('center');
+  if (rows.length > 0) sh.getRange(CATALOG_FIRST_ROW, 1, rows.length, 5).setValues(rows);
+  const listRows = Math.max(rows.length + 30, 60);
+  sh.getRange(CATALOG_FIRST_ROW, 1, listRows, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation()
+      .requireValueInList(Object.keys(SHEET_CFG).map(k => SHEET_CFG[k].sheetName), true).build());
+  sh.getRange(3, 1, listRows + 1, 5).setBorder(true, true, true, true, true, true, '#c0c0c0', SpreadsheetApp.BorderStyle.SOLID);
+  sh.setColumnWidth(1, 80);
+  sh.setColumnWidth(2, 260);
+  sh.setColumnWidth(3, 170);
+  sh.setColumnWidth(4, 150);
+  sh.setColumnWidth(5, 220);
+  sh.setFrozenRows(3);
+  return sh;
+}
+
+function openCatalog() {
+  getOrCreateCatalog_().activate();
+}
+
+/** 메뉴: 📅 특이사항 달력 열기 (없으면 만들기) */
+function openCalendar() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  try {
+    const now = new Date().getMonth() + 1;
+    let z3 = null;
+    try { z3 = getMonthNumber(); } catch (e) {}
+    const res = ui.prompt('📅 특이사항 달력',
+      `몇 월 달력을 열까요? (숫자만)\n\n• 이번 달: ${now}월` +
+      (z3 && z3 !== now ? `\n• 정산 기준 월(근무현황표 Z3): ${z3}월` : '') +
+      `\n\n비워 두고 확인 → ${now}월`,
+      ui.ButtonSet.OK_CANCEL);
+    if (res.getSelectedButton() !== ui.Button.OK) return;
+    const t = res.getResponseText().replace(/[^\d]/g, '');
+    const month = t ? parseInt(t, 10) : now;
+    if (!(month >= 1 && month <= 12)) { ui.alert('1~12 사이 숫자를 입력하세요.'); return; }
+
+    let sh = ss.getSheetByName(calSheetName_(month));
+    if (sh && sh.getFrozenColumns() !== CAL_NAME_COL) {
+      // 예전 오류(열 고정 실패)로 덜 만들어진 달력
+      const fix = ui.alert('📅 달력 다시 만들기',
+        `"${sh.getName()}" 시트가 이전 오류로 덜 만들어져 있습니다.\n지우고 새로 만들까요?\n\n` +
+        '• 예전 입력창 기록은 다시 옮겨집니다\n• 이 시트에 직접 적은 내용이 있으면 사라집니다\n\n[예] 다시 만들기   [아니요] 그대로 열기',
+        ui.ButtonSet.YES_NO);
+      if (fix === ui.Button.YES) { ss.deleteSheet(sh); sh = null; }
+    }
+    if (sh && isOldCalLayout_(sh)) {
+      const conv = ui.alert('📅 달력 양식 바꾸기',
+        `"${sh.getName()}" 시트는 사람마다 하루 칸이 1개인 옛 양식입니다.\n` +
+        `하루 ${CAL_SLOTS}칸 양식으로 다시 만들까요?\n\n` +
+        '• 적어 둔 특이사항은 그대로 옮겨집니다 (한 칸에 여러 줄이던 것은 칸을 나눠서)\n' +
+        '• 점검 색은 지워지니 바꾼 뒤 [✅ 특이사항 반영 점검]을 다시 실행하세요\n\n[예] 바꾸기   [아니요] 옛 양식 그대로 열기',
+        ui.ButtonSet.YES_NO);
+      if (conv === ui.Button.YES) {
+        const c = convertCalendar_(sh, month);
+        c.sheet.activate();
+        ui.alert('📅 양식 바꾸기 완료', `"${c.sheet.getName()}" 시트를 하루 ${CAL_SLOTS}칸 양식으로 다시 만들었습니다.\n옮긴 특이사항: ${c.moved}건`, ui.ButtonSet.OK);
+        return;
+      }
+    }
+    if (sh) {
+      refreshCalValidation_(sh, readCatalog_()); // 사유표가 바뀌었을 수 있으니 드롭다운·표기 새로고침
+      sh.activate();
+      return;
+    }
+    const r = createCalendar_(month);
+    r.sheet.activate();
+    ui.alert('📅 ' + calSheetName_(month) + ' 시트를 만들었습니다',
+      (r.imported ? `예전 입력창(숨김 '특이사항' 시트)에 있던 ${month}월 기록 ${r.imported}건을 옮겨 두었습니다.\n\n` : '') +
+      '칸에 사유를 적어 두면 정산할 때 자동으로 들어갑니다.\n' +
+      '정산서와 맞는지는 메뉴 [✅ 특이사항 반영 점검]으로 언제든 확인할 수 있습니다.',
+      ui.ButtonSet.OK);
+  } catch (e) {
+    ui.alert('❌ 오류 발생\n\n' + e.message);
+  }
+}
+
+/** 메뉴: ✅ 특이사항 반영 점검 (정산 기준 월) */
+function checkCalendarMenu() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  try {
+    const month = getMonthNumber();
+    const cal = readCalendar_(month, false);
+    if (!cal.sheet) {
+      ui.alert(`"${calSheetName_(month)}" 시트가 없습니다.\n메뉴 [📅 특이사항 달력 열기]에서 ${month}을(를) 입력해 먼저 만드세요.`);
+      return;
+    }
+    ss.toast('근무계획·생산계획을 읽고 정산서와 대조하는 중… (10~30초)', '✅ 반영 점검', 60);
+    const data = loadData();
+    const chk = checkCalendar_(month, data, cal);
+    cal.sheet.activate();
+    ui.alert('✅ 특이사항 반영 점검', chk.text, ui.ButtonSet.OK);
+  } catch (e) {
+    ui.alert('❌ 오류 발생\n\n' + e.message);
+  }
+}
+
+// ═══════════════════════════════════════════
+// ✅ 반영 점검 — 달력(+근무계획) 기준 "있어야 할 행" ↔ 정산서 실제 행 대조
+// ═══════════════════════════════════════════
+
+/** 정산서 데이터 행 읽기 (5행 ~ 합계 직전) */
+function readSettlementRows_(sheet) {
+  const sumRow = findSumRow(sheet);
+  const n = sumRow - DATA_START_ROW;
+  if (n <= 0) return [];
+  const v = sheet.getRange(DATA_START_ROW, 1, n, DIST_COL).getDisplayValues();
+  const out = [];
+  v.forEach((r, i) => {
+    const name = normName_(r[0]);
+    if (!name) return;
+    const m = String(r[1]).match(/(\d+)\s*월\s*(\d+)\s*일/);
+    out.push({
+      row: DATA_START_ROW + i,
+      nameRaw: String(r[0]).trim(),
+      name,
+      month: m ? parseInt(m[1], 10) : null,
+      day: m ? parseInt(m[2], 10) : null,
+      route: String(r[2]).trim(),
+      reasonRaw: String(r[4]).trim(),
+      reason: normReason_(r[4]),
+      km: Number(String(r[DIST_COL - 1]).replace(/[^\d.]/g, '')) || 0
+    });
+  });
+  return out;
+}
+
+/**
+ * 대조 + 달력 색칠
+ * 반환: { text, counts }
+ */
+function checkCalendar_(month, data, cal) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const statusByCell = {};
+  const add = (it, level, text) => {
+    const k = it.row + '|' + it.col;
+    (statusByCell[k] = statusByCell[k] || []).push({ level, text, it });
+  };
+  const counts = { ok: 0, warn: 0, miss: 0, pending: cal.pending.length };
+  const extra = [];
+  const autoMiss = [];
+
+  cal.pending.forEach(p => add(p, 'pending', `🟨 ${p.reason || '(사유 없음)'} — 사유 미정이라 정산에서 뺌 (사유를 적으면 다음 정산 때 들어감)`));
+
+  Object.keys(SHEET_CFG).forEach(key => {
+    const cfg = SHEET_CFG[key];
+    const specials = cal.items.filter(s => s.sheetKey === key);
+    const sheet = ss.getSheetByName(cfg.sheetName);
+    if (!sheet) {
+      specials.forEach(s => { counts.miss++; add(s, 'miss', `🟥 ${s.reason} — "${cfg.sheetName}" 시트가 없음`); });
+      return;
+    }
+    const expected = buildRows_(key, data, specials).rows;
+    const actual = readSettlementRows_(sheet);
+    const used = actual.map(() => false);
+    const findRow = r => actual.findIndex((a, i) =>
+      !used[i] && a.name === normName_(r.name) && a.month === month && a.day === r.day && a.reason === normReason_(r.reason));
+
+    // ① 특이사항 먼저
+    expected.filter(r => r.special).forEach(r => {
+      const it = r.src;
+      const i = findRow(r);
+      if (i < 0) {
+        counts.miss++;
+        add(it, 'miss', `🟥 ${r.reason} — 정산서(${cfg.sheetName})에 없음 → 정산을 다시 실행하세요`);
+        return;
+      }
+      used[i] = true;
+      const a = actual[i];
+      const diffs = [];
+      if (normRoute_(a.route) !== normRoute_(r.route)) diffs.push(`구간 정산서 "${a.route}" / 달력 기준 "${r.route}"`);
+      if (Number(a.km) !== Number(r.distance)) diffs.push(`거리 정산서 ${a.km}km / 달력 기준 ${r.distance}km`);
+      const same = expected.filter(x => !x.special && x.name === r.name && x.day === r.day);
+      if (diffs.length > 0) {
+        counts.warn++;
+        add(it, 'warn', `🟧 ${r.reason} — 정산서 ${a.row}행에 있으나 값이 다름: ${diffs.join(', ')}\n   → 정산서를 손으로 고쳤다면 다시 돌릴 때 사라집니다. 사유표나 달력 칸("(60km)", "@장소")에 적어 두세요`);
+      } else {
+        counts.ok++;
+        add(it, 'ok', `✅ ${r.reason} — 반영됨 (${cfg.sheetName} ${a.row}행 / ${r.route} / ${r.distance}km)` +
+          (same.length > 0 ? `\n   ℹ 같은 날 근무계획 근무("${same[0].reason}")도 따로 1건` : ''));
+      }
+    });
+
+    // ② 근무계획 자동 행
+    let miss = 0;
+    expected.filter(r => !r.special).forEach(r => {
+      const i = findRow(r);
+      if (i < 0) miss++; else used[i] = true;
+    });
+    if (miss > 0) autoMiss.push(` - ${cfg.sheetName}: 근무계획 기준 자동 행 ${miss}건이 정산서에 없거나 업무내용이 다름 → 정산을 다시 실행하세요`);
+
+    // ③ 어디에도 없는 정산서 행 (손으로 넣은 행)
+    actual.forEach((a, i) => {
+      if (used[i]) return;
+      extra.push(` - ${cfg.sheetName} ${a.row}행: ${a.nameRaw} / ${a.month ? a.month + '월 ' : ''}${a.day || '?'}일 / ${a.reasonRaw}`);
+    });
+  });
+
+  // 달력 색칠 + 메모
+  const stamp = Utilities.formatDate(new Date(), 'Asia/Seoul', 'M/d HH:mm');
+  const summary = `마지막 점검 ${stamp} · ✅ ${counts.ok}  🟧 ${counts.warn}  🟥 ${counts.miss}  🟨 ${counts.pending}`;
+  paintCalendar_(cal, statusByCell, stamp, summary);
+
+  // 결과 글
+  const out = [`📅 ${month}월 특이사항 반영 점검 — ✅ 반영 ${counts.ok} / 🟧 확인 ${counts.warn} / 🟥 누락 ${counts.miss} / 🟨 사유 미정 ${counts.pending}`];
+  const detail = [];
+  Object.keys(statusByCell).forEach(k => statusByCell[k].forEach(s => {
+    if (s.level !== 'ok') detail.push({ day: s.it.day, text: ` - ${s.it.name} ${month}/${s.it.day} ${s.text.split('\n')[0]}` });
+  }));
+  detail.sort((a, b) => a.day - b.day);
+  if (detail.length > 0) {
+    detail.slice(0, 15).forEach(d => out.push(d.text));
+    if (detail.length > 15) out.push(`   … 외 ${detail.length - 15}건 (달력에서 색 칸에 마우스를 올려 확인)`);
+  }
+  if (autoMiss.length > 0) out.push('\n⚠ 근무계획 자동 행\n' + autoMiss.join('\n'));
+  if (extra.length > 0) {
+    out.push(`\n⚠ 달력·근무계획 어디에도 없는 정산서 행 ${extra.length}건 (손으로 넣은 행? 다시 정산하면 지워짐 → 달력에 적어 두세요)`);
+    extra.slice(0, 10).forEach(x => out.push(x));
+    if (extra.length > 10) out.push(`   … 외 ${extra.length - 10}건`);
+  }
+  if (cal.problems.length > 0) out.push('\n⚠ 달력에서 무시된 칸\n' + cal.problems.slice(0, 8).join('\n'));
+  if (detail.length === 0 && autoMiss.length === 0 && extra.length === 0) out.push('✅ 달력의 특이사항이 모두 정산서에 그대로 들어가 있습니다');
+  return { text: out.join('\n'), counts };
+}
+
+function paintCalendar_(cal, statusByCell, stamp, summary) {
+  const sh = cal.sheet;
+  const last = sh.getLastRow();
+  if (last < CAL_FIRST_ROW) return;
+  const n = last - CAL_FIRST_ROW + 1;
+  const rng = sh.getRange(CAL_FIRST_ROW, CAL_DAY_COL, n, 31);
+  const notes = rng.getNotes();
+  const year = calYear_(cal.month), dim = daysInMonth_(cal.month);
+  const ORDER = { ok: 0, pending: 1, warn: 2, miss: 3 };
+  const bgs = [];
+  for (let i = 0; i < n; i++) {
+    const row = [];
+    for (let j = 0; j < 31; j++) {
+      const st = statusByCell[(CAL_FIRST_ROW + i) + '|' + (CAL_DAY_COL + j)];
+      const mine = String(notes[i][j]).indexOf(CAL_NOTE_TAG) === 0;
+      if (mine) notes[i][j] = '';
+      if (st) {
+        const worst = st.reduce((a, b) => (ORDER[b.level] > ORDER[a] ? b.level : a), 'ok');
+        row.push(CAL_COLORS[worst]);
+        if (!notes[i][j]) notes[i][j] = CAL_NOTE_TAG + ' ' + stamp + '\n' + st.map(x => x.text).join('\n');
+      } else {
+        row.push(calBaseBg_(year, cal.month, j + 1, dim));
+      }
+    }
+    bgs.push(row);
+  }
+  rng.setBackgrounds(bgs);
+  rng.setNotes(notes);
+  sh.getRange(1, CAL_STATUS_COL).setValue(summary);
+}
+
+// ═══════════════════════════════════════════
 // 실행 후 점검 — 합계행 아래 "개인별 현황" 표
-//  ① 금액표(첫 번째 '성명' 표) 합 = K 합계
-//  ② 건수표(두 번째 '성명' 표) 합 = 입력 건수
-//  ③ 입력된 이름이 개인별 현황 표에 있는지
 // ═══════════════════════════════════════════
 function readPersonTables_(sheet, sumRow) {
   const nRows = Math.min(20, Math.max(0, sheet.getLastRow() - sumRow));
@@ -753,8 +1735,8 @@ function saveFuelStamp_(month, prices, how) {
 }
 
 /**
- * 정산 전 유류단가 확인 (메뉴 실행 흐름에서만 호출 — 대화상자 UI 사용)
- * @param standalone 메뉴 [⛽ 유류단가 확인]에서 직접 부른 경우 true (결과를 항상 보여줌)
+ * 정산 전 유류단가 확인
+ * @param standalone 메뉴 [⛽ 유류단가 확인]에서 직접 부른 경우 true
  * @return 계속 진행해도 되면 true
  */
 function confirmFuelPrices_(month, standalone) {
@@ -845,7 +1827,7 @@ function checkWorkPlanNames() {
     records.filter(r => r.name === n).forEach(r => { cnt[r.type] = (cnt[r.type] || 0) + 1; });
     const summary = Object.keys(cnt).map(t => `${t}${cnt[t]}`).join(' ');
     const p = PERSON_ROUTE[normName_(n)];
-    return `${rankMap[n] + WP_NAME_START_ROW}행 ${n}${summary ? '(' + summary + ')' : '(표기 없음)'}` +
+    return `${rankMap[n] + WP_NAME_START_ROW}행 ${n} ${summary ? '(' + summary + ')' : '(표기 없음)'}` +
       (p ? ` — 구간: ${p.route}` : '');
   });
 
@@ -854,7 +1836,6 @@ function checkWorkPlanNames() {
   const missing = cfgNames.filter(n => !(n in rankMap));
   const notInCfg = names.filter(n => cfgNames.indexOf(n) < 0);
 
-  // 개인별DATA(차종·연비)에 없는 이름 → 교통비가 #N/A
   const personData = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('개인별DATA');
   let noCar = [];
   if (personData && personData.getLastRow() >= 1) {
@@ -869,16 +1850,13 @@ function checkWorkPlanNames() {
     : `⚠ A열에서 "계" 행을 찾지 못해 시트 끝까지 읽었습니다.\n\n`;
   msg += lines.join('\n');
   if (missing.length > 0) msg += `\n\n⚠ 코드 이름 목록에는 있지만 근무계획에 없는 이름: ${missing.join(', ')}`;
-  if (notInCfg.length > 0) msg += `\n\nℹ 근무계획에는 있지만 특이사항 버튼 목록(PRODUCTION/QUALITY_NAMES)에 없는 이름: ${notInCfg.join(', ')}`;
+  if (notInCfg.length > 0) msg += `\n\nℹ 근무계획에는 있지만 달력 이름 목록(PRODUCTION/QUALITY_NAMES)에 없는 이름: ${notInCfg.join(', ')}`;
   if (noCar.length > 0) msg += `\n\n⚠ '개인별DATA'(차종·연비)에 없는 이름: ${noCar.join(', ')} → 이 사람 행은 교통비가 #N/A`;
   SpreadsheetApp.getUi().alert(msg);
 }
 
 // ═══════════════════════════════════════════
 // 🛠 개인별DATA 참조 범위 통일 (1회)
-//  • 5행~합계 직전 G(차종)·H(전용유류)·J(등록연비) VLOOKUP을 '개인별DATA'!$B:$E 전체 열로
-//    → 시트마다 $B$1:$E$18 / $B$6:$E$84 등 달랐던 범위를 통일, 개인별DATA에 행이 늘어도 안 깨짐
-//  • K열(교통비, 전기 76원/km 고정)과 개인별 현황 표는 건드리지 않음
 // ═══════════════════════════════════════════
 function unifyPersonDataRange() {
   const ui = SpreadsheetApp.getUi();
@@ -917,152 +1895,6 @@ function unifyPersonDataRange() {
 }
 
 // ═══════════════════════════════════════════
-// 특이사항 입력창 ↔ 서버 통신 함수
-// ═══════════════════════════════════════════
-
-/** 입력창 초기 데이터 */
-function getDialogInit() {
-  const month = getMonthNumber();
-  const rankMap = parseMonthlyWorkData(month).rankMap;
-
-  const unknownNames = [];
-  const sheets = UI_SHEET_ORDER.map(key => {
-    const cfg = SHEET_CFG[key];
-    cfg.names.forEach(n => {
-      if (!(n in rankMap) && unknownNames.indexOf(n) < 0) unknownNames.push(n);
-    });
-    return { key: key, sheetName: cfg.sheetName, names: cfg.names, reasons: cfg.reasons, distance: cfg.distance };
-  });
-
-  return {
-    month: month,
-    daysInMonth: daysInMonth_(month),
-    sheets: sheets,
-    unknownNames: unknownNames,
-    entries: readSpecials_(month)
-  };
-}
-
-/** 저장만 */
-function saveSpecials(month, entries) {
-  const clean = sanitizeEntries_(entries);
-  writeSpecials_(parseInt(month, 10), clean);
-  return clean.length;
-}
-
-/** 저장 후 정산 실행 */
-function saveSpecialsAndRun(month, entries, mode) {
-  const m = parseInt(month, 10);
-  if (mode !== 'ALL' && !SHEET_CFG[mode]) throw new Error('알 수 없는 실행 모드: ' + mode);
-  writeSpecials_(m, sanitizeEntries_(entries));
-  return runFill_(mode, m);
-}
-
-function daysInMonth_(month) {
-  const now = new Date();
-  let year = now.getFullYear();
-  if (month - (now.getMonth() + 1) > 6) year -= 1; // 1월에 작년 12월분 정산하는 경우
-  return new Date(year, month, 0).getDate();
-}
-
-function sanitizeEntries_(entries) {
-  const out = [];
-  const seen = {};
-  (entries || []).forEach(e => {
-    if (!e) return;
-    const sheetKey = String(e.sheetKey || '');
-    if (!SHEET_CFG[sheetKey]) return;
-    const name = String(e.name || '').trim();
-    const reason = String(e.reason || '').trim();
-    const day = parseInt(e.day, 10);
-    if (!name || !reason || isNaN(day) || day < 1 || day > 31) return;
-    const k = [sheetKey, name, day, reason].join('|');
-    if (seen[k]) return;
-    seen[k] = true;
-    out.push({ sheetKey: sheetKey, name: name, day: day, reason: reason, km: parseKm_(e.km) });
-  });
-  return out;
-}
-
-/** 주행거리 입력값 → 양수면 숫자, 아니면 '' (= 시트 기본 거리) */
-function parseKm_(v) {
-  const n = Number(String(v === null || v === undefined ? '' : v).replace(/[^\d.]/g, ''));
-  return (n > 0) ? n : '';
-}
-
-// ───────────────────────────────────────────
-// 특이사항 저장 시트 (숨김) — A:월 B:시트 C:일 D:이름 E:사유 F:등록일시 G:주행거리(km, 비우면 기본)
-// ───────────────────────────────────────────
-const SPECIAL_HEADERS = ['월', '시트', '일', '이름', '사유', '등록일시', '주행거리(km)'];
-
-function getOrCreateSpecialSheet_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sh = ss.getSheetByName(SPECIAL_SHEET_NAME);
-  if (sh) {
-    if (String(sh.getRange(1, 7).getValue()).trim() === '') sh.getRange(1, 7).setValue(SPECIAL_HEADERS[6]).setFontWeight('bold');
-    return sh;
-  }
-
-  const active = ss.getActiveSheet();
-  sh = ss.insertSheet(SPECIAL_SHEET_NAME, ss.getNumSheets());
-  sh.getRange('A:E').setNumberFormat('@');
-  sh.getRange('F:F').setNumberFormat('yyyy-mm-dd hh:mm');
-  sh.getRange(1, 1, 1, SPECIAL_HEADERS.length).setValues([SPECIAL_HEADERS]).setFontWeight('bold');
-  sh.setFrozenRows(1);
-  sh.hideSheet();
-  if (active) ss.setActiveSheet(active);
-  return sh;
-}
-
-function readSpecials_(month) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sh = ss.getSheetByName(SPECIAL_SHEET_NAME);
-  if (!sh || sh.getLastRow() < 2) return [];
-
-  const nameToKey = {};
-  Object.keys(SHEET_CFG).forEach(k => { nameToKey[SHEET_CFG[k].sheetName] = k; });
-
-  const limit = new Date().getTime() - SPECIAL_EXPIRE_DAYS * 24 * 60 * 60 * 1000;
-  const vals = sh.getRange(2, 1, sh.getLastRow() - 1, 7).getValues();
-  const out = [];
-
-  vals.forEach(r => {
-    if (parseInt(r[0], 10) !== month) return;
-    const sheetKey = nameToKey[String(r[1]).trim()];
-    const day = parseInt(r[2], 10);
-    const name = String(r[3]).trim();
-    const reason = String(r[4]).trim();
-    if (!sheetKey || isNaN(day) || !name || !reason) return;
-    if (r[5] instanceof Date && r[5].getTime() < limit) return; // 오래된 건(작년 같은 달) 무시
-    out.push({ sheetKey: sheetKey, name: name, day: day, reason: reason, km: parseKm_(r[6]) });
-  });
-  return out;
-}
-
-/** 해당 월의 특이사항을 entries로 통째 교체 (다른 달 기록은 유지) */
-function writeSpecials_(month, entries) {
-  const sh = getOrCreateSpecialSheet_();
-  const last = sh.getLastRow();
-
-  let keep = [];
-  if (last >= 2) {
-    keep = sh.getRange(2, 1, last - 1, 7).getValues()
-      .filter(r => String(r[0]).trim() !== '' && parseInt(r[0], 10) !== month);
-    sh.getRange(2, 1, last - 1, 7).clearContent();
-  }
-
-  const now = new Date();
-  const rows = keep.concat(entries.map(e =>
-    [String(month), SHEET_CFG[e.sheetKey].sheetName, String(e.day), e.name, e.reason, now, e.km === '' ? '' : e.km]
-  ));
-
-  if (rows.length > 0) {
-    sh.getRange(2, 1, rows.length, 5).setNumberFormat('@');
-    sh.getRange(2, 1, rows.length, 7).setValues(rows);
-  }
-}
-
-// ═══════════════════════════════════════════
 // ⚙ 합계 행을 100행으로 맞추기 (최초 1회)
 // ═══════════════════════════════════════════
 function setupSumRow100() {
@@ -1071,7 +1903,7 @@ function setupSumRow100() {
     '합계 행을 100행으로 맞추기',
     '"BTL 생산", "제품생산", "품질 CIP" 시트에 대해 다음 작업을 합니다.\n\n' +
     `1. 합계 행을 ${TARGET_SUM_ROW}행으로 이동 (부족한 행은 ${TEMPLATE_ROW}행 서식·수식을 복사해 추가)\n` +
-    `2. ${TEMPLATE_ROW + 1}행 ~ ${TARGET_SUM_ROW - 1}행의 G~K열 수식을 ${TEMPLATE_ROW}행 기준으로 다시 채움 (K61에 남은 SUM 수식 등 복구)\n` +
+    `2. ${TEMPLATE_ROW + 1}행 ~ ${TARGET_SUM_ROW - 1}행의 G~K열 수식을 ${TEMPLATE_ROW}행 기준으로 다시 채움\n` +
     `3. ${DATA_START_ROW}행 ~ ${TARGET_SUM_ROW - 1}행의 A~F열 내용을 비움 (수기 입력분 포함)\n\n` +
     `※ 실행 전 각 시트 ${TEMPLATE_ROW}행의 G~K열 수식이 정상인지 확인하세요.\n` +
     '※ 스프레드시트 사본을 먼저 만들어 두는 것을 권장합니다.\n\n계속할까요?',
@@ -1099,7 +1931,6 @@ function setupSumRow100() {
         sumRow = TARGET_SUM_ROW;
       }
 
-      // G~K 수식 복구 (TEMPLATE_ROW 기준)
       const fixCount = sumRow - 1 - TEMPLATE_ROW;
       if (fixCount > 0) {
         sheet.getRange(TEMPLATE_ROW, 7, 1, 5).copyTo(
@@ -1126,38 +1957,31 @@ function setupSumRow100() {
 function showHelp() {
   SpreadsheetApp.getUi().alert(
     '교통비 정산 자동화 사용법\n\n' +
-    '【데이터 소스】\n' +
-    '• 근무 데이터: 근무계획 스프레드시트 → "X월" 시트\n' +
-    ' (이름은 C5부터, A열에 "계"가 나오는 행 바로 위까지 자동 인식 — 인원이 늘어도 그대로 동작)\n' +
-    '• 생산 계획: 제품생산 계획 스프레드시트 → "X월 제품생산 계획..." 시트\n' +
-    '• 기준 월: "X월 근무현황표" 시트 Z3\n\n' +
+    '【📅 특이사항 달력】 (평소에 적어 두기)\n' +
+    '• 메뉴 → 📅 특이사항 달력 열기 → 월 입력 → "N월 특이사항" 시트 (없으면 자동 생성)\n' +
+    `• 사람마다 하루 칸이 ${CAL_SLOTS}줄 — 특이사항이 여러 번이면 위에서부터 한 칸에 한 건씩 (▼ 목록 또는 직접 입력)\n` +
+    `• ${CAL_SLOTS + 1}건 이상: 마지막 칸에 줄바꿈(Alt+Enter) / 거리: 자재 구매 (30km) / 목적지: 민속촌 채수 @제주민속촌\n` +
+    '• 옛 양식(하루 1칸) 달력은 [📅 특이사항 달력 열기]로 열면 새 양식으로 바꿀지 물어봄\n' +
+    '• 사유를 모르면 "?" → 정산에서 빠지고 노랑으로 표시\n' +
+    '• 제품생산 줄에 BTL 생산 시트 건을 넣을 땐 "BTL: 사유"\n\n' +
+    '【📋 특이사항 사유표】\n' +
+    '• 사유별 기본 구간·주행거리 (예: 민속촌 채수 → 공장 ↔ 제주민속촌 50km)\n' +
+    '• 여기 있는 사유가 달력 드롭다운 목록이 됨\n\n' +
+    '【✅ 반영 점검】\n' +
+    '• 정산 실행 끝에 자동으로, 또는 메뉴에서 언제든\n' +
+    '• 달력 칸 색: 초록 반영됨 / 주황 확인 필요(정산서 구간·거리가 달력과 다름) / 빨강 정산서에 없음 / 노랑 사유 미정\n' +
+    '• 칸에 마우스를 올리면 자세한 내용, 칸을 고치면 색이 지워짐\n' +
+    '• 달력·근무계획 어디에도 없는 정산서 행(손으로 넣은 행)도 알려 줌\n\n' +
+    '【구간·주행거리 순서】\n' +
+    '• 달력 칸에 직접 적은 값 > 사유표 > 사람별(김은혁 서귀포시) > 기본 (공장 ↔ 제주시 / 50km, 품질 CIP 55km)\n\n' +
     '【⛽ 유류단가】\n' +
-    '• 자동 채우기 전에 "X월 마감 자료 요청 및 유류단가 안내" 메일을 찾아 시트 C4~C6와 대조\n' +
-    '• 다르면 메일 값으로 바꿀지 물어봄 / 메일을 못 찾으면 확인 질문 (이번 달 한 번만)\n' +
-    '• 지난달과 값이 똑같으면 한 번 더 경고\n\n' +
-    '【구간·주행거리】\n' +
-    '• 기본: 공장 ↔ 제주시 / BTL·제품생산 50km, 품질 CIP 55km (코드 SHEET_CFG.distance)\n' +
-    '• 사람별 구간: 코드 상단 PERSON_ROUTE (김은혁 → 공장 ↔ 서귀포시, 거리는 기본값)\n' +
-    '• 특수 거리(예: 자재 구매 30km): 특이사항 입력창 "주행거리" 칸에 입력\n' +
-    '• I열(주행거리)은 매번 코드가 다시 씀 — 특수 거리는 특이사항에 적어야 다시 돌려도 유지됨\n\n' +
-    '【특이사항】\n' +
-    '• 메뉴 실행 시 입력창이 먼저 뜸 (이름·일자·사유 버튼 선택 또는 직접 입력, 주행거리는 선택)\n' +
-    '• 숨김 시트 "특이사항"에 월별로 저장 → 다시 돌려도 자동 반영\n' +
-    '• 이름/사유 버튼 목록은 코드 상단 SHEET_CFG에서 수정\n\n' +
-    '【근무 유형 표기】\n' +
-    '• 교육 병행 표기 자동 인식: P/교→P, B/교→B, L/교→L (야/교, 조/교, 연/교 동일)\n' +
-    '• "교" 단독 표기는 제외\n\n' +
+    '• 정산 전에 "X월 마감 … 유류단가" 메일을 찾아 시트 C4~C6와 대조\n\n' +
     '【정렬 규칙】\n' +
-    '• BTL/제품생산: 날짜 → 직급 순 (특이사항도 직급 순으로 섞임)\n' +
-    '• 품질 CIP: 날짜 → 조 → 연 → 특이사항 → 직급 순\n' +
-    '• 직급 순 = 근무계획 시트의 행 순서\n\n' +
-    '【자동 점검 (실행 결과 아래)】\n' +
-    '• 개인별 현황 금액·건수 합 = 합계/입력 건수인지\n' +
-    '• 개인별 현황 표에 없는 이름\n\n' +
+    '• BTL/제품생산: 날짜 → 직급 순 / 품질 CIP: 날짜 → 조 → 연 → 특이사항 → 직급 순\n\n' +
     '【실행 순서】\n' +
-    '1. Z3 월 확인\n' +
-    '2. (인원 변경 시) 메뉴 → 근무계획 이름 확인\n' +
-    '3. 메뉴 → 전체 시트 자동 채우기 → 유류단가 확인\n' +
-    '4. 특이사항 입력 → "저장 후 정산 실행" → 결과의 ⚠ 항목 확인'
+    '1. 평소: 달력에 특이사항 적기\n' +
+    '2. 정산일: 근무현황표 Z3 월 확인\n' +
+    '3. 메뉴 → 전체 시트 자동 채우기 → 유류단가 확인 → 달력 요약 확인 → 정산\n' +
+    '4. 결과창의 ⚠ 항목과 달력의 주황·빨강·노랑 칸 확인'
   );
 }

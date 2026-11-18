@@ -30,7 +30,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** 근무계획 스프레드시트 ID */
-const SOURCE_SS_ID = '12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY';
 
 /** 이름 → 사번 매핑 (신규 입사자는 여기에 한 줄만 추가하면 됨) */
 const NAME_TO_ID = {
@@ -141,8 +140,8 @@ function normalizeId(v) {
  *   dataGrid: Array.<Array.<*>>         // [행][열] 근태 값 (names 와 같은 행 순서)
  * }}
  */
-function loadWorkPlanData(month) {
-  const sourceSS = SpreadsheetApp.openById(SOURCE_SS_ID);
+function loadWorkPlanData(month, year) {
+  const sourceSS = linkOpen('근무계획', year);
   const sourceSheet = sourceSS.getSheetByName(`${month}월`);
   if (!sourceSheet) {
     throw new Error(
@@ -224,7 +223,7 @@ function importAndConvert() {
 
     // ── STEP 2. 근무계획 로드 ──────────────────────────────────────────
     const { names: srcNames, dateMap: srcDateMap, dataGrid: srcDataGrid }
-      = loadWorkPlanData(month);
+      = loadWorkPlanData(month, year);
 
     if (srcNames.length === 0) {
       throw new Error(`근무계획 "${month}월" 시트에서 작업자 데이터를 찾을 수 없습니다.`);

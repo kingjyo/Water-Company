@@ -3,6 +3,11 @@
  * 생수공장 근태관리 GAS - 통합본
  * =====================================================================
  *
+ * [2026-11 패치 ③] 근무계획 "검"(건강검진) 대응
+ *  - "검/P", "P/검", "검/B", "B/검", "검/L", "L/검" → P·B·L과 동일하게 연장으로 인식 (연장야근정산 "연", A24~A26)
+ *  - 기존에 빠져 있던 "교/P", "교/B", "교/L"(교가 앞에 오는 표기)도 같이 수정
+ *  - "검" 단독은 출근(1)으로 처리, "검/야"·"검/반"처럼 다른 코드와 같이 쓰면 그 코드로 처리
+ *
  * [2026-10 패치 ②] 월중 입·퇴사 / 1년 미만 월차 대응  (인원정보_월차.gs 와 함께 사용)
  *  - '인원정보' 시트의 근무 시작일·종료일 밖 날짜 → "-" + 회색 (1로 채워지지 않음)
  *  - 근무계획에 새 이름이 나타났는데 미등록이면 → 근무 시작일을 물어보고 등록해야 진행
@@ -975,8 +980,13 @@ function processFillOne(range, specialList, fillOne = true) {
         backgrounds[r][c] = MASK_BG;
         continue;
       }
+      // "검/야", "교/반" 같은 겸용 표기 → 보조 표기(교·검)를 떼고 판단
+      // ("검" 단독, "검/P", "P/교" 등은 특수코드가 아니므로 → 1 = 출근)
+      const code = normalizeAttendCode_(str);
       if (isYellowGyo) {
         values[r][c] = '교';
+      } else if (fillOne && special.has(code)) {
+        values[r][c] = code;
       } else if (fillOne && (str === '' || !special.has(str))) {
         values[r][c] = 1;
       }
@@ -999,19 +1009,45 @@ function convertPBLtoYeonAndClear() {
   const nightText = processPBLtoYeonAndClear(sheet, lastDay);
   applyEmploymentMask_(sheet, year, month);
   SpreadsheetApp.getUi().alert(
-    `완료\n• P, B, L (P/교, B/교, L/교 포함) → "연" 변환\n• "연", "야" 외 전부 공란 ("-" 근무기간 외 표시는 유지)\n• 배경색 하얀색\n` +
+    `완료\n• P, B, L (P/교·교/P·검/P·P/검 등 교육·검진 겸용 표기 포함) → "연" 변환\n• "연", "야" 외 전부 공란 ("-" 근무기간 외 표시는 유지)\n• 배경색 하얀색\n` +
     `• 야간 문구: ${nightText}\n(${year}년 ${month}월 기준, ${lastDay}일까지)`
   );
 }
 
-// "P/교", "B / 교", "L-교", "P교" 처럼 뒤에 붙은 "교"(사내교육) 표기를 제거하고
-// 앞쪽 근태코드만 반환. 그 외 값은 공백 제거 + 대문자화만 수행.
+// 근무와 "함께" 적히는 보조 표기 — 이 글자 자체는 근무로 보고, 같이 적힌 코드를 대표 코드로 씀
+//  • 교 : 사내교육  (노란 배경 "교" 단독 = 사외교육은 processFillOne에서 따로 처리)
+//  • 검 : 특수·일반 건강검진 (오전/오후만 비움 → 출근으로 처리)
+const AUX_CODES = ['교', '검'];
+// 붙여 쓴 표기("P검", "검P")를 쪼갤 때 상대편으로 인정할 코드
+const SPLITTABLE_CODES = ['P', 'B', 'L', '연'].concat(SPECIAL_CODES);
+
+/**
+ * 근무계획 셀 값 → 대표 근태코드
+ *  "P/교", "교/P", "B / 검", "검-L", "P검", "검(P)", "검/야" → "P", "P", "B", "L", "P", "P", "야"
+ *  "검" 단독 → "검" (출근), "교" 단독 → "교",  "-" → "-" (근무기간 외)
+ *  그 외 값은 공백 제거 + 대문자화만 수행 (예: "l11" → "L11")
+ */
 function normalizeAttendCode_(v) {
-  let s = (v == null ? '' : String(v)).trim();
+  const s = (v == null ? '' : String(v)).replace(/\s/g, '');
   if (!s) return '';
-  const m = s.match(/^([A-Za-z가-힣]{1,2})\s*[\/\\\-]?\s*교$/);
-  if (m && m[1]) s = m[1].trim();
-  return s.toUpperCase();
+  if (s === MASK_MARK) return s;
+
+  let parts = s.split(/[\/\\\-·,+()（）／]/).filter(Boolean);
+  if (!parts.length) return s;
+
+  // 구분자 없이 붙여 쓴 2글자: "P검", "검P", "P교", "교B"
+  if (parts.length === 1 && parts[0].length === 2) {
+    const a = parts[0][0], b = parts[0][1];
+    const known = c => SPLITTABLE_CODES.indexOf(c.toUpperCase()) >= 0;
+    if ((AUX_CODES.indexOf(a) >= 0 && known(b)) || (AUX_CODES.indexOf(b) >= 0 && known(a))) {
+      parts = [a, b];
+    }
+  }
+
+  const core = parts.filter(p => AUX_CODES.indexOf(p) < 0);
+  if (core.length === 0) return parts[0];               // "검", "교", "검/교"
+  if (core.length === 1) return core[0].toUpperCase();  // 보조 표기를 떼고 남은 코드
+  return s.toUpperCase();                               // 알 수 없는 조합은 그대로
 }
 
 function processPBLtoYeonAndClear(sheet, lastDay) {
@@ -1500,7 +1536,11 @@ function showHelp() {
     "【 교육(교) 처리 규칙 】\n" +
     "• 근무계획에서 노란색(#ffff00) 배경의 \"교\"는 사외교육 → 특수문자 외 1 채우기 시에도 \"교\" 값 유지\n" +
     "• 그 외 배경색의 \"교\"는 사내교육(출근) → 1로 변환\n" +
-    "• 연장 + 사내교육 병행 표기(P/교, B/교, L/교)는 각각 P, B, L과 동일하게 인식\n\n" +
+    "• 연장 + 사내교육 병행 표기(P/교, 교/P, B/교, 교/B, L/교, 교/L)는 각각 P, B, L과 동일하게 인식\n\n" +
+    "【 건강검진(검) 처리 규칙 】\n" +
+    "• \"검\" 단독 = 오전/오후 검진 후 출근 → 근무현황표·간식정산에서 1(출근)\n" +
+    "• 검진 + 연장 표기(검/P, P/검, 검/B, B/검, 검/L, L/검)는 P, B, L과 동일 → 연장야근정산 \"연\", A24~A26 집계 포함\n" +
+    "• 검진 + 다른 코드(검/야, 검/반 등)는 뒤의 코드(야, 반)로 처리\n\n" +
     "【 차월 근무계획 월 기준 】\n" +
     "• \"차월 근무계획\" 시트는 그 시트 자체의 Z3(월) 값을 기준으로 동작함\n\n" +
     "※ 년도: X월 근무현황표 X3 셀 / 월: Z3 셀 기준\n" +
