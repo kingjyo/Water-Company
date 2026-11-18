@@ -1,0 +1,1559 @@
+/*******************************************************************
+ * 생수공장 경조사·복지혜택 대상자 관리 (Google Apps Script)
+ *
+ *  ▶ 하는 일
+ *    - 직원명부 + 가족사항만 입력하면
+ *      장기근속포상여행 / 회갑·칠순 / 탈상(49재·100일·1주기) 대상과
+ *      사용 가능 기간을 자동 계산해서 [대상자현황] 시트에 정리
+ *    - 사용 시작 전·마감 전(D-60, 30, 14, 7, 3, 1, 0 등) 이메일 알림
+ *    - [사용이력]에 기록하면 해당 항목은 '사용완료'로 바뀜
+ *    - 정년퇴직일(만 60세 생일이 속한 달 말일)·남은 기간 표시 + 알림,
+ *      퇴직일 이후로 걸치는 복지 기간은 퇴직일까지로 정리
+ *    - 직급 '촉탁'(정년 후 계약직)은 계약만료일 기준으로 표시·알림
+ *    - 사번은 항상 텍스트로 통일 (숫자/텍스트 섞여서 이름 조회 실패하는 문제 방지)
+ *    - 항공권 복지(입사 6개월, 촉탁 제외), 영유아 보육비(취학하는 해 2월까지), 가족 생존여부
+ *    - 기존 시트에는 열·설정 줄을 '추가'만 함 (입력한 데이터는 지우거나 덮어쓰지 않음)
+ *
+ *  ▶ 처음 한 번
+ *    1) 새 구글 스프레드시트 → 확장 프로그램 → Apps Script
+ *    2) 이 코드 전체 붙여넣기 → 저장
+ *    3) 프로젝트 설정(톱니바퀴) → 시간대 "(GMT+09:00) 서울" 확인
+ *    4) 위쪽 함수 선택에서 setupTemplate 선택 → 실행 → 권한 허용
+ *    5) 스프레드시트 새로고침 → 상단 [🎁 경조·복지] 메뉴 사용
+ *
+ *  ▶ 시트 구성
+ *    설정 / 직원명부 / 가족사항 / 사용이력 / 대상자현황(자동) / 알림로그(자동)
+ *
+ *  ※ 각 시트의 열은 "머리글 이름"으로 찾습니다.
+ *    열 순서를 바꾸거나 열을 추가해도 되지만, 머리글 글자는 유지하세요.
+ *******************************************************************/
+
+/* ============================ 기본 상수 ============================ */
+
+const SH = {
+  CFG: '설정',
+  EMP: '직원명부',
+  FAM: '가족사항',
+  USE: '사용이력',
+  STATUS: '대상자현황',
+  LOG: '알림로그',
+};
+
+// 설정 시트 A열 항목명 (글자를 바꾸면 코드도 같이 바꿔야 함)
+const K = {
+  FOUND: '창립기념일(월-일)',
+  EMAILS: '알림 받을 이메일',
+  ALERT_DAYS: '알림 시점(D-일)',
+  URGENT_DAYS: '마감임박 표시 기준(일)',
+  ALERT_HOUR: '자동알림 시각(0~23시)',
+  WEEKLY: '월요일 주간요약 메일(Y/N)',
+  PAST_DAYS: '지난 항목 표시기간(일)',
+  FUTURE_DAYS: '앞으로 표시기간(일)',
+  PARENT_REL: '부모 관계값',
+  SPOUSE_PARENT_REL: '배우자부모 관계값',
+  REL_LIST: '관계 목록(드롭다운)',
+  RETIRE_AGE: '정년(만 나이)',
+  RETIRE_ALERT: '정년 알림 시점(D-일)',
+  RETIRE_CAP: '퇴직 이후 기간 제외(Y/N)',
+  CONTRACT_MONTHS: '촉탁 계약기간(개월)',
+  FLIGHT_MONTHS: '항공권 복지 근속(개월)',
+  FLIGHT_SHOW: '항공권 표시기간(개월)',
+  CHILD_ON: '영유아 보육비 표시(Y/N)',
+  CHILD_REL: '보육비 대상 관계값',
+};
+
+// 나중에 추가된 설정 항목 (기존 설정 시트에 없으면 새로고침 때 '관계 목록' 아래쪽에 자동 추가)
+const EXTRA_CFG_ROWS_2 = [
+  [K.FLIGHT_MONTHS, 6, '입사일부터 N개월 되는 날 항공권 복지 사용 가능 (촉탁 제외). 0이면 표시 안 함'],
+  [K.FLIGHT_SHOW, 12, '사용 마감 아님(항공권은 퇴직 시까지 사용 가능). 사용 가능해진 뒤 대상자현황에 알림용으로 몇 개월 보여줄지'],
+  [K.CHILD_ON, 'Y', '만0~5세 미취학 자녀: 출생일 ~ 만6세 되어 취학하는 해 2월 말까지 지급. 만0세는 직원 직접 지급 가능'],
+  [K.CHILD_REL, '자녀', '보육비 대상 관계값 (아들·딸 입력해도 자동 인식)'],
+];
+
+const ALIVE = { YES: '생존', NO: '사망', UNKNOWN: '미확인' };
+
+// 정년·촉탁 관련 설정 기본값 (기존 설정 시트에 없으면 새로고침 때 자동으로 추가됨)
+const RETIRE_CFG_ROWS = [
+  [K.RETIRE_AGE, 60, '만 N세가 되는 생일이 속한 달의 말일에 퇴직 (예: 1966-03-13생 → 2026-03-31)'],
+  [K.RETIRE_ALERT, '365,180,90,60,30,7,1,0', '정년퇴직·촉탁 계약만료 N일 전에 메일'],
+  [K.RETIRE_CAP, 'Y', 'Y면 퇴직(계약만료)일 이후 시작하는 복지는 빼고, 넘기는 기간은 그날까지로 줄임'],
+  [K.CONTRACT_MONTHS, 12, '직급에 "촉탁"이 들어가면 정년퇴직 다음 날부터 이 기간 계약. 직원명부 계약종료일(촉탁)에 날짜를 넣으면 그 날짜 우선(재계약 시 갱신)'],
+];
+const RETIRE_NAME = '정년나이';      // 직원명부 수식이 참조하는 이름 범위
+const CONTRACT_NAME = '촉탁계약개월'; // 〃
+const CONTRACT_KEY = '촉탁';         // 직급에 이 글자가 들어가면 촉탁(정년 후 계약직)
+
+// 설정 시트 표 제목 (A열)
+const T = {
+  LONG: '[장기근속포상여행]',
+  BDAY: '[회갑·칠순]',
+  TALSANG: '[탈상]',
+  ETC: '[기타 경조 기준(참고용·계산에 안 씀)]',
+};
+
+const STATUS_HEADER_ROW = 4; // 대상자현황 머리글 행
+const STATUS_HEADERS = ['상태', 'D-day', '구분', '부서', '사번', '직원', '관계', '대상 성명',
+  '기준일', '사용 시작', '사용 마감', '지원내용', '비고'];
+
+const ST = {
+  URGENT: '🔴 마감임박',
+  OPEN: '🟢 사용가능',
+  SOON: '🔵 예정',
+  RETIRE: '🟣 퇴직예정',
+  MISSED: '⚫ 기한만료',
+  DONE: '✅ 사용완료',
+  NA: '➖ 해당없음',
+};
+const ST_ORDER = [ST.URGENT, ST.OPEN, ST.SOON, ST.RETIRE, ST.MISSED, ST.DONE, ST.NA];
+const ST_COLOR = {};
+ST_COLOR[ST.URGENT] = '#f8d7da';
+ST_COLOR[ST.OPEN] = '#d9f2df';
+ST_COLOR[ST.SOON] = '#dde9f7';
+ST_COLOR[ST.RETIRE] = '#ece3f7';
+ST_COLOR[ST.MISSED] = '#d0d0d0';
+ST_COLOR[ST.DONE] = '#f1f1f1';
+ST_COLOR[ST.NA] = '#f7f7f7';
+
+// 관계 입력을 다양하게 해도 알아듣도록 (왼쪽 → 오른쪽으로 통일)
+const REL_ALIAS = {
+  '부친': '부', '아버지': '부', '아빠': '부', '父': '부',
+  '모친': '모', '어머니': '모', '엄마': '모', '母': '모',
+  '장인': '배우자부', '시부': '배우자부', '시아버지': '배우자부', '빙부': '배우자부',
+  '장모': '배우자모', '시모': '배우자모', '시어머니': '배우자모', '빙모': '배우자모',
+  '처': '배우자', '아내': '배우자', '남편': '배우자', '부인': '배우자',
+  '자': '자녀', '녀': '자녀', '아들': '자녀', '딸': '자녀',
+};
+
+const C_HEAD = '#1f4e78';   // 머리글 배경
+const C_TITLE = '#0b2545';  // 제목 글자
+
+
+/* ============================ 메뉴 ============================ */
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('🎁 경조·복지')
+    .addItem('🔄 대상자현황 새로고침', 'refreshStatus')
+    .addItem('✅ 선택한 항목 사용완료 처리', 'markSelectedAsUsed')
+    .addSeparator()
+    .addItem('📧 알림 메일 지금 보내기 (테스트)', 'sendAlertsNow')
+    .addItem('⏰ 매일 자동 알림 켜기', 'installDailyTrigger')
+    .addItem('⏹ 자동 알림 끄기', 'removeDailyTrigger')
+    .addSeparator()
+    .addItem('🧰 양식 점검·수식 복구', 'repairSheets')
+    .addItem('🛠 초기 양식 만들기 (최초 1회)', 'setupTemplate')
+    .addToUi();
+}
+
+
+/* ======================= 1. 대상자현황 새로고침 ======================= */
+
+/** 메뉴: 대상자현황 새로고침 */
+function refreshStatus() {
+  const res = refreshStatus_();
+  SpreadsheetApp.getActive().toast(
+    `대상자 ${res.events.length}건 정리 완료` + (res.warnings.length ? ` · 확인 필요 ${res.warnings.length}건` : ''),
+    '🔄 새로고침', 5);
+}
+
+/** 계산 + 시트 기록. {events, warnings, cfg, today} 반환 */
+function refreshStatus_() {
+  repairSheets_();   // 사번 텍스트 통일·자동 수식·정년/촉탁 열을 매번 점검 (예전 시트도 자동 업그레이드)
+  const cfg = readConfig_();
+  const today = today_();
+  const built = buildEvents_(cfg, today);
+  writeStatusSheet_(built.events, built.warnings, today);
+  return { events: built.events, warnings: built.warnings, cfg: cfg, today: today };
+}
+
+/** 모든 대상 항목 계산 */
+function buildEvents_(cfg, today) {
+  const warnings = [];
+  const emps = readEmployees_(warnings, cfg);
+  const fams = readFamilies_(warnings);
+  const usage = readUsage_();
+
+  const empMap = {};
+  emps.forEach(e => { empMap[e.id] = e; });
+
+  let events = [];
+
+  // ── 1) 장기근속포상여행 ──────────────────────────────
+  // 창립기념일(예: 2/20)에 근속 N년 이상이 되는 해 → 그날부터 1년간 사용 가능
+  emps.forEach(e => {
+    if (e.retired || !e.hire) return;
+    cfg.longService.forEach(t => {
+      const anniv = addMonths_(e.hire, t.years * 12);                 // 근속 N년 되는 날
+      let y = anniv.getFullYear();
+      if (anniv > new Date(y, cfg.foundM - 1, cfg.foundD)) y++;      // 그해 창립기념일 이후면 다음 해
+      const start = new Date(y, cfg.foundM - 1, cfg.foundD);
+      const end = addDays_(addMonths_(start, t.months), -1);
+      events.push({
+        kind: '장기근속', label: `장기근속 ${t.years}년`, emp: e, rel: '본인', target: '본인',
+        base: anniv, start: start, end: end,
+        benefit: longServiceBenefit_(t),
+        note: `근속 ${t.years}년 도달 ${fmt_(anniv)} → ${y}년 창립기념일부터`,
+      });
+    });
+  });
+
+  // ── 1-2) 항공권 복지 ───────────────────────────────
+  // 입사일부터 N개월 되는 날부터 사용 가능 (촉탁 제외). 마감 없음 → 일정 기간만 표시
+  if (cfg.flightMonths > 0) {
+    emps.forEach(e => {
+      if (e.retired || !e.hire || e.isContract) return;
+      const start = addMonths_(e.hire, cfg.flightMonths);
+      events.push({
+        kind: '항공권', label: '항공권 복지', emp: e, rel: '본인', target: '본인',
+        // end는 '대상자현황에 보여주는 기간'일 뿐 사용 마감이 아님 → 화면에는 '마감 없음'으로 표시
+        base: e.hire, start: start, end: addDays_(addMonths_(start, cfg.flightShow), -1),
+        endText: '없음 (퇴직 시까지)', benefit: '퇴직 시까지 사용 가능 (사용 마감 없음)', noEndAlert: true, noCap: true,
+        note: `입사 ${fmt_(e.hire)} → 근속 ${cfg.flightMonths}개월 되는 날부터 사용 가능 · 현황표에는 ${cfg.flightShow}개월간만 표시(알림용)`,
+      });
+    });
+  }
+
+  // ── 2) 가족 경조 (회갑·칠순 / 탈상 / 영유아 보육비) ──────
+  fams.forEach(f => {
+    const e = empMap[f.id];
+    if (!e) { warnings.push(`가족사항 ${f.row}행: 사번 '${f.id}'이(가) 직원명부에 없습니다.`); return; }
+    if (e.retired) return;
+    const prefix = relPrefix_(f.rel, cfg);
+    const unknownNote = f.alive === ALIVE.UNKNOWN ? '❓ 생존여부 미확인 — 안내할 때 함께 확인' : '';
+    if (f.alive === ALIVE.YES && f.death) {
+      warnings.push(`가족사항 ${f.row}행: ${f.name} 생존여부는 '생존'인데 사망일이 있음`);
+    }
+
+    // 회갑·칠순 : 출생일을 1세로 → 한국나이 N세 되는 해의 생일부터 1년
+    cfg.bdayItems.forEach(it => {
+      if (!it.on || it.rels.indexOf(f.rel) < 0) return;
+      if (!f.birth) {
+        if (f.alive !== ALIVE.NO) warnings.push(`가족사항 ${f.row}행: ${f.name}(${f.rel}) 생년월일이 없어 ${it.name} 계산 불가`);
+        return;
+      }
+      const start = addMonths_(f.birth, (it.age - 1) * 12);
+      const end = addDays_(addMonths_(start, it.months), -1);
+      if (f.alive === ALIVE.NO && (!f.death || f.death < start)) return; // 시작 전 별세(또는 사망일 모름) → 대상 아님
+      events.push({
+        kind: '회갑칠순', label: prefix + it.name, emp: e, rel: f.rel, target: f.name,
+        base: start, start: start, end: end, benefit: '',
+        note: joinNote_(unknownNote, `한국나이 ${it.age}세 생일부터 ${it.months}개월`,
+          f.death && f.death <= end ? `기간 중 별세(${fmt_(f.death)})` : '', f.note),
+      });
+    });
+
+    // 영유아 위탁보육비 : 출생일 ~ 만6세가 되어 취학하는 해(출생연도+7) 2월 말일
+    if (cfg.childOn && f.birth && f.alive !== ALIVE.NO && cfg.childRels.indexOf(f.rel) >= 0) {
+      const endAll = new Date(f.birth.getFullYear() + 7, 2, 0);       // 그해 2월 말일
+      const first = addMonths_(f.birth, 12);                           // 첫돌
+      const age = ageAt_(f.birth, today);
+      events.push({
+        kind: '보육', label: '자녀 영유아보육비', emp: e, rel: f.rel, target: f.name,
+        base: f.birth, start: f.birth, end: endAll, endWord: '지급종료', ongoing: true,
+        benefit: today < first ? '만0세: 직원 직접 지급 가능' : `만0~5세 미취학 지급 (현재 만 ${age}세)`,
+        note: joinNote_(unknownNote, `${f.birth.getFullYear() + 7}년 3월 취학 예정 → 2월까지 지급`, f.note),
+      });
+      events.push({
+        kind: '보육', label: '자녀 보육비(만0세 직접지급)', emp: e, rel: f.rel, target: f.name,
+        base: f.birth, start: f.birth, end: addDays_(first, -1), endWord: '만0세 종료', ongoing: true,
+        benefit: '만0세 구간: 직원에게 직접 지급 가능',
+        note: joinNote_(`첫돌 ${fmt_(first)}부터는 일반 보육비 지급 방식`, f.note),
+      });
+    }
+
+    // 탈상 : 사망일을 1일째로 셈 (사망일을 모르면 계산 안 함)
+    if (f.death) {
+      cfg.talsangItems.forEach(it => {
+        if (!it.on || it.rels.indexOf(f.rel) < 0) return;
+        const base = it.years ? addMonths_(f.death, it.years * 12) : addDays_(f.death, it.days - 1);
+        events.push({
+          kind: '탈상', label: prefix + it.name, emp: e, rel: f.rel, target: f.name,
+          base: base, start: addDays_(base, it.startOff), end: addDays_(base, it.endOff), benefit: '',
+          note: joinNote_(`사망일 ${fmt_(f.death)}`, f.note),
+        });
+      });
+    }
+  });
+
+  // ── 3) 정년퇴직 / 촉탁 계약만료 ─────────────────────
+  // 일반: 만 N세 생일이 속한 달의 말일 퇴직
+  // 촉탁: 정년 후 계약직 → 계약만료일(직접입력 또는 정년퇴직일 + 계약기간)
+  // 그날 이후 복지 기간은 잘라냄(설정)
+  if (cfg.retireCap) {
+    events = events.filter(ev => !(ev.emp.workEnd && ev.start > ev.emp.workEnd));
+    events.forEach(ev => {
+      if (ev.noCap) return;
+      if (ev.emp.workEnd && ev.end > ev.emp.workEnd) {
+        ev.end = ev.emp.workEnd;
+        ev.note = joinNote_(ev.emp.isContract ? '⚠ 촉탁 계약만료일까지만 사용 가능' : '⚠ 정년퇴직일까지만 사용 가능', ev.note);
+      }
+    });
+  }
+  emps.forEach(e => {
+    if (e.retired || !e.workEnd) return;
+    events.push(e.isContract ? {
+      kind: '정년퇴직', label: '촉탁 계약만료', emp: e, rel: '본인', target: '본인',
+      base: e.retireDate || e.workEnd, start: e.workEnd, end: e.workEnd, benefit: '',
+      note: e.contractManual
+        ? '계약종료일 직접입력'
+        : `정년퇴직 ${fmt_(e.retireDate)} 다음 날부터 ${cfg.contractMonths}개월 (자동 계산)`,
+    } : {
+      kind: '정년퇴직', label: '정년퇴직', emp: e, rel: '본인', target: '본인',
+      base: e.age60, start: e.retireDate, end: e.retireDate, benefit: '',
+      note: `만 ${cfg.retireAge}세 생일 ${fmt_(e.age60)} → 그달 말일 퇴직`,
+    });
+  });
+
+  // ── 4) 상태 판정 ──────────────────────────────────
+  events.forEach(ev => {
+    if (ev.kind === '정년퇴직') {
+      const d = diff_(today, ev.start);
+      const word = ev.emp.isContract ? '계약만료' : '퇴직';
+      if (d >= 0) {
+        ev.status = ST.RETIRE;
+        ev.dday = d === 0 ? `오늘 ${word}` : `${word} D-${d}`;
+        ev.note = joinNote_(d > 0 ? `남은 기간 ${ymText_(today, ev.start)}` : '', ev.note);
+      } else if (ev.emp.isContract) {
+        ev.status = ST.NA;
+        ev.dday = `계약만료 +${-d}일`;
+        ev.note = joinNote_('재계약했으면 직원명부 "계약종료일(촉탁)" 수정, 아니면 재직상태 "퇴사"', ev.note);
+        warnings.push(`직원명부 ${ev.emp.row}행: ${ev.emp.name} 촉탁 계약만료일(${fmt_(ev.start)}) 지남 → 재계약이면 계약종료일 수정, 아니면 퇴사 처리`);
+      } else {
+        ev.status = ST.NA;
+        ev.dday = `퇴직 +${-d}일`;
+        ev.note = joinNote_('촉탁 재고용이면 직급을 "촉탁"으로, 아니면 재직상태 "퇴사"', ev.note);
+        warnings.push(`직원명부 ${ev.emp.row}행: ${ev.emp.name} 정년퇴직일(${fmt_(ev.start)}) 지남 → 촉탁이면 직급 "촉탁", 아니면 퇴사 처리`);
+      }
+      return;
+    }
+    if (ev.kind === '보육') {
+      // 계속 지급되는 기간 → 사용이력과 무관, 종료일만 관리
+      if (today < ev.start) { ev.status = ST.SOON; ev.dday = `시작 D-${diff_(today, ev.start)}`; }
+      else if (today > ev.end) { ev.status = ST.NA; ev.dday = ev.endWord; }
+      else {
+        const d = diff_(today, ev.end);
+        ev.status = d <= cfg.urgentDays ? ST.URGENT : ST.OPEN;
+        ev.dday = d === 0 ? `${ev.endWord} D-DAY` : `${ev.endWord} D-${d}`;
+      }
+      return;
+    }
+    const key = ev.emp.id + '|' + normItem_(ev.label) + '|' + (ev.target === '본인' ? '본인' : norm_(ev.target));
+    const used = usage.byKey[key];
+    if (ev.kind === '항공권' && !used) {
+      // 마감 없음: 사용 가능해진 날부터 표시기간 동안 '사용가능'
+      if (today < ev.start) { ev.status = ST.SOON; ev.dday = `시작 D-${diff_(today, ev.start)}`; }
+      else if (today > ev.end) { ev.status = ST.NA; ev.dday = '-'; }   // 표시기간 지남 → 숨김 대상
+      else { ev.status = ST.OPEN; ev.dday = `가능 +${diff_(ev.start, today)}일`; }
+      return;
+    }
+    if (used) {
+      ev.status = ST.DONE;
+      ev.dday = '사용 ' + fmt_(used.start || used.done);
+      ev.usedRec = used;
+    } else if (today > ev.end) {
+      ev.status = ST.MISSED;
+      ev.dday = `만료 +${diff_(ev.end, today)}일`;
+    } else if (today < ev.start) {
+      ev.status = ST.SOON;
+      ev.dday = `시작 D-${diff_(today, ev.start)}`;
+    } else {
+      const d = diff_(today, ev.end);
+      ev.status = d <= cfg.urgentDays ? ST.URGENT : ST.OPEN;
+      ev.dday = d === 0 ? '마감 D-DAY' : `마감 D-${d}`;
+    }
+  });
+
+  // 탈상은 49재·100일·1주기 중 한 번만 사용 → 묶어서 정리
+  const groups = {};
+  events.filter(ev => ev.kind === '탈상').forEach(ev => {
+    const g = ev.emp.id + '|' + norm_(ev.target);
+    (groups[g] = groups[g] || []).push(ev);
+  });
+  Object.keys(groups).forEach(g => {
+    const list = groups[g];
+    const usedEv = list.find(ev => ev.status === ST.DONE);
+    const usedOther = usage.talsangByTarget[g];
+    if (usedEv || usedOther) {
+      const what = usedEv ? usedEv.label.replace(/^.*?(탈상)/, '$1') : usedOther.item;
+      list.forEach(ev => {
+        if (ev.status === ST.DONE) return;
+        ev.status = ST.NA; ev.dday = '-';
+        ev.note = joinNote_(`${what} 사용함`, ev.note);
+      });
+      return;
+    }
+    const alive = list.filter(ev => ev.status !== ST.MISSED);
+    const expired = list.filter(ev => ev.status === ST.MISSED);
+    if (alive.length) {
+      // 다음 탈상 시기가 남아 있으면 지나간 것은 '해당없음'
+      expired.forEach(ev => { ev.status = ST.NA; ev.note = joinNote_('다음 탈상 시기 남음', ev.note); });
+    } else if (expired.length) {
+      // 전부 지났으면 마지막(1주기)만 '기한만료'로 남김
+      expired.sort((a, b) => b.end - a.end);
+      expired.slice(1).forEach(ev => { ev.status = ST.NA; });
+    }
+  });
+
+  // 정년퇴직 행에 '퇴직 전에 써야 할 복지' 정리
+  events.filter(ev => ev.kind === '정년퇴직' && ev.status === ST.RETIRE).forEach(r => {
+    const left = [];
+    events.forEach(ev => {
+      if (ev.emp !== r.emp || ev.kind === '정년퇴직') return;
+      if ([ST.OPEN, ST.URGENT, ST.SOON].indexOf(ev.status) < 0) return;
+      const name = ev.kind === '탈상' ? ev.label.replace(/\(.*\)$/, '(택1)') : ev.label;
+      if (left.indexOf(name) < 0) left.push(name);
+    });
+    r.benefit = left.length ? `퇴직 전 미사용: ${left.join(', ')}` : '';
+  });
+
+  // ── 5) 표시 범위 거르기 + 정렬 ───────────────────────
+  const minEnd = addDays_(today, -cfg.pastDays);
+  const maxStart = addDays_(today, cfg.futureDays);
+  events = events.filter(ev => ev.start <= maxStart && ev.end >= minEnd &&
+    !((ev.ongoing || ev.kind === '항공권') && ev.status !== ST.DONE && ev.end < today));  // 보육·항공권은 기간 끝나면 숨김
+
+  // 장기근속은 직원별로 '가장 가까운 1건'만 남김 (사용완료·사용가능은 모두 표시)
+  const lsSeen = {};
+  events = events.filter(ev => {
+    if (ev.kind !== '장기근속' || ev.status !== ST.SOON) return true;
+    if (lsSeen[ev.emp.id]) return false;
+    lsSeen[ev.emp.id] = true; return true;
+  });
+
+  events.sort((a, b) => {
+    const s = ST_ORDER.indexOf(a.status) - ST_ORDER.indexOf(b.status);
+    if (s) return s;
+    if (a.status === ST.SOON || a.status === ST.RETIRE) return a.start - b.start;
+    if (a.status === ST.MISSED || a.status === ST.DONE || a.status === ST.NA) return b.end - a.end;
+    return a.end - b.end;
+  });
+
+  return { events: events, warnings: warnings };
+}
+
+function longServiceBenefit_(t) {
+  const money = (t.dom !== '' && t.dom === t.abr)
+    ? `국내·해외 ${t.dom}만원`
+    : `국내 ${t.dom}만원 / 해외 ${t.abr}만원`;
+  return `${t.trip} · ${money}`;
+}
+
+function relPrefix_(rel, cfg) {
+  if (cfg.parentRels.indexOf(rel) >= 0) return '부모 ';
+  if (cfg.spouseParentRels.indexOf(rel) >= 0) return '배우자부모 ';
+  return rel + ' ';
+}
+
+
+/* ======================= 2. 대상자현황 시트 쓰기 ======================= */
+
+function writeStatusSheet_(events, warnings, today) {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(SH.STATUS) || buildStatusSheet_(ss);
+  const nCol = STATUS_HEADERS.length;
+
+  // 기존 데이터 지우기
+  if (sh.getFilter()) sh.getFilter().remove();
+  const last = Math.max(sh.getMaxRows(), STATUS_HEADER_ROW + 1);
+  sh.getRange(STATUS_HEADER_ROW + 1, 1, last - STATUS_HEADER_ROW, nCol).clear();
+
+  // 2행: 기준일 / 경고
+  const now = new Date();
+  const info = `기준일 ${fmt_(today)}(${'일월화수목금토'[today.getDay()]}) · 갱신 ${fmt_(now)} ${pad_(now.getHours())}:${pad_(now.getMinutes())}`;
+  const c2 = sh.getRange(2, 1);
+  c2.setValue(warnings.length ? `${info}   ⚠ 확인 필요 ${warnings.length}건 (이 칸 메모 참고)` : info);
+  c2.setNote(warnings.length ? warnings.join('\n') : '');
+  c2.setFontColor(warnings.length ? '#b00020' : '#555555');
+
+  // 3행: 요약 칩
+  const cnt = s => events.filter(ev => ev.status === s).length;
+  const chips = [
+    [ST.URGENT, `${ST.URGENT} ${cnt(ST.URGENT)}건`],
+    [ST.OPEN, `${ST.OPEN} ${cnt(ST.OPEN)}건`],
+    [ST.SOON, `${ST.SOON} ${cnt(ST.SOON)}건`],
+    [ST.MISSED, `${ST.MISSED} ${cnt(ST.MISSED)}건`],
+    [ST.RETIRE, `${ST.RETIRE} ${cnt(ST.RETIRE)}명`],
+  ];
+  sh.getRange(3, 1, 1, nCol).clearContent().setBackground(null);
+  chips.forEach((c, i) => {
+    sh.getRange(3, 1 + i * 2, 1, 2).breakApart().merge()
+      .setValue(c[1]).setBackground(ST_COLOR[c[0]]).setFontWeight('bold')
+      .setHorizontalAlignment('center');
+  });
+
+  // 4행: 머리글
+  sh.getRange(STATUS_HEADER_ROW, 1, 1, nCol).setValues([STATUS_HEADERS])
+    .setBackground(C_HEAD).setFontColor('#ffffff').setFontWeight('bold').setHorizontalAlignment('center');
+
+  if (!events.length) {
+    sh.getRange(STATUS_HEADER_ROW + 1, 1).setValue('표시할 대상이 없습니다.');
+    return;
+  }
+
+  const rows = events.map(ev => [
+    ev.status, ev.dday, ev.label, ev.emp.dept, ev.emp.id, ev.emp.name, ev.rel, ev.target,
+    ev.base, ev.start, ev.endText || ev.end, ev.benefit, ev.note || '',
+  ]);
+  const rng = sh.getRange(STATUS_HEADER_ROW + 1, 1, rows.length, nCol);
+  rng.setValues(rows);
+  rng.setBackgrounds(events.map(ev => Array(nCol).fill(ST_COLOR[ev.status] || null)));
+  rng.setFontColors(events.map(ev => Array(nCol).fill(
+    (ev.status === ST.DONE || ev.status === ST.NA) ? '#888888' : '#000000')));
+  rng.setVerticalAlignment('middle');
+  sh.getRange(STATUS_HEADER_ROW + 1, 9, rows.length, 3).setNumberFormat('yyyy-mm-dd');
+  sh.getRange(STATUS_HEADER_ROW + 1, 1, rows.length, 2).setFontWeight('bold');
+  sh.getRange(STATUS_HEADER_ROW + 1, 5, rows.length, 1).setNumberFormat('@');
+  [1, 2, 5, 7, 9, 10, 11].forEach(c =>
+    sh.getRange(STATUS_HEADER_ROW + 1, c, rows.length, 1).setHorizontalAlignment('center'));
+  // 마감일 굵게(사용가능/임박)
+  events.forEach((ev, i) => {
+    if ((ev.status === ST.URGENT || ev.status === ST.OPEN) && !ev.endText) {
+      sh.getRange(STATUS_HEADER_ROW + 1 + i, 11).setFontWeight('bold').setFontColor('#b00020');
+    }
+  });
+
+  sh.getRange(STATUS_HEADER_ROW, 1, rows.length + 1, nCol).createFilter();
+}
+
+
+/* ======================= 3. 사용완료 처리 ======================= */
+
+/** 메뉴: 대상자현황에서 선택한 행을 사용이력에 기록 */
+function markSelectedAsUsed() {
+  const ss = SpreadsheetApp.getActive();
+  const ui = SpreadsheetApp.getUi();
+  const sh = ss.getActiveSheet();
+  if (sh.getName() !== SH.STATUS) {
+    ui.alert(`[${SH.STATUS}] 시트에서 처리할 행을 선택한 뒤 다시 실행하세요.`);
+    return;
+  }
+  const sel = sh.getActiveRange();
+  const r0 = Math.max(sel.getRow(), STATUS_HEADER_ROW + 1);
+  const r1 = sel.getRow() + sel.getNumRows() - 1;
+  if (r1 < r0) { ui.alert('표 안의 행(5행부터)을 선택하세요.'); return; }
+
+  const vals = sh.getRange(r0, 1, r1 - r0 + 1, STATUS_HEADERS.length).getValues()
+    .filter(r => r[4] !== '' && r[0] !== ST.DONE);
+  if (!vals.length) { ui.alert('처리할 항목이 없습니다. (이미 사용완료이거나 빈 행)'); return; }
+
+  const list = vals.map(r => `· ${r[5]} - ${r[2]} (${r[7]})`).join('\n');
+  const resp = ui.prompt('✅ 사용완료 처리',
+    `${list}\n\n사용 날짜를 입력하세요.\n예) 2026-10-20   또는   2026-10-20~2026-10-23\n(비워두면 오늘 날짜)`,
+    ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+
+  const txt = resp.getResponseText().trim();
+  const today = today_();
+  let s = today, e = today;
+  if (txt) {
+    const parts = txt.split(/\s*[~∼～]\s*/);
+    s = toDate_(parts[0]);
+    e = parts[1] ? toDate_(parts[1]) : s;
+    if (!s || !e) { ui.alert('날짜 형식을 확인하세요. 예) 2026-10-20'); return; }
+  }
+
+  const use = ss.getSheetByName(SH.USE);
+  const h = headerMap_(use);
+  vals.forEach(r => {
+    appendByHeader_(use, h, {
+      '처리일': today, '사번': String(r[4]), '구분': r[2],
+      '대상': r[7], '시작': s, '종료': e, '비고': '대상자현황에서 처리',
+    });
+  });
+  refreshStatus();
+}
+
+
+/* ======================= 4. 알림 메일 ======================= */
+
+/** 트리거가 매일 부르는 함수 */
+function dailyJob() {
+  const res = refreshStatus_();
+  const isMonday = res.today.getDay() === 1;
+  sendAlerts_(res, isMonday && res.cfg.weekly, false);
+}
+
+/** 메뉴: 지금 보내기 (요약 포함, 알림 대상이 없어도 발송) */
+function sendAlertsNow() {
+  const res = refreshStatus_();
+  const n = sendAlerts_(res, true, true);
+  SpreadsheetApp.getUi().alert(n === null ? '보낼 내용이 없습니다.' : `알림 메일을 보냈습니다. (오늘 알림 ${n}건)`);
+}
+
+/**
+ * @return 오늘 알림 건수, 발송 안 했으면 null
+ */
+function sendAlerts_(res, withSummary, force) {
+  const cfg = res.cfg, today = res.today;
+  const alerts = [];
+  res.events.forEach(ev => {
+    if (ev.status === ST.RETIRE) {
+      const d = diff_(today, ev.start);
+      if (d === 0) alerts.push([`오늘 ${ev.label}`, ev]);
+      else if (cfg.retireAlertDays.indexOf(d) >= 0) alerts.push([`${ev.label} ${d}일 전`, ev]);
+    } else if (ev.status === ST.SOON) {
+      const d = diff_(today, ev.start);
+      if (cfg.alertDays.indexOf(d) >= 0) alerts.push([`사용 시작 ${d}일 전`, ev]);
+    } else if (ev.status === ST.OPEN || ev.status === ST.URGENT) {
+      const d = diff_(today, ev.end);
+      const w = ev.endWord || '마감';
+      if (sameDay_(today, ev.start)) alerts.push(['오늘부터 사용 가능', ev]);
+      else if (ev.noEndAlert) { /* 항공권: 마감 없음 */ }
+      else if (d === 0) alerts.push([`⚠ 오늘 ${w}`, ev]);
+      else if (cfg.alertDays.indexOf(d) >= 0) alerts.push([`${w} ${d}일 전`, ev]);
+    }
+  });
+
+  // 주간 요약: 보육비처럼 계속되는 항목은 종료 임박일 때만
+  const summary = withSummary
+    ? res.events.filter(ev => ev.status === ST.URGENT || (ev.status === ST.OPEN && !ev.ongoing && !ev.noEndAlert) ||
+        (ev.status === ST.SOON && diff_(today, ev.start) <= 30) ||
+        (ev.status === ST.RETIRE && diff_(today, ev.start) <= 90))
+    : [];
+
+  if (!alerts.length && !summary.length && !force) return null;
+
+  const url = SpreadsheetApp.getActive().getUrl();
+  let html = `<div style="font-family:'Malgun Gothic',sans-serif;font-size:14px">`;
+  html += `<h3 style="margin:0 0 8px">🎁 경조·복지 알림 (${fmt_(today)})</h3>`;
+  if (!alerts.length && !summary.length) html += '<p>현재 알릴 항목이 없습니다. (테스트 발송)</p>';
+  if (alerts.length) {
+    html += `<p><b>오늘 확인할 항목 ${alerts.length}건</b></p>`;
+    html += mailTable_(alerts.map(a => [a[0]].concat(evCells_(a[1]))),
+      ['알림', '구분', '직원', '대상', '사용 기간', '상태']);
+  }
+  if (summary.length) {
+    html += `<p style="margin-top:16px"><b>현재 사용가능 · 30일 내 시작 예정 (${summary.length}건)</b></p>`;
+    html += mailTable_(summary.map(ev => [ev.dday].concat(evCells_(ev))),
+      ['D-day', '구분', '직원', '대상', '사용 기간', '상태']);
+  }
+  html += `<p style="margin-top:16px"><a href="${url}">▶ 스프레드시트 열기</a></p></div>`;
+
+  const subject = alerts.length
+    ? `[경조·복지] ${fmt_(today)} 알림 ${alerts.length}건` + (alerts.some(a => /오늘 마감|마감 [1-3]일/.test(a[0])) ? ' ⚠' : '')
+    : `[경조·복지] ${fmt_(today)} 주간 요약`;
+
+  MailApp.sendEmail({ to: cfg.emails.join(','), subject: subject, htmlBody: html });
+  logAlert_(cfg.emails.join(','), alerts.length, subject,
+    alerts.map(a => `${a[0]}: ${a[1].emp.name} ${a[1].label}`).join(' / '));
+  return alerts.length;
+}
+
+function evCells_(ev) {
+  if (ev.kind === '정년퇴직') {
+    return [ev.label, `${ev.emp.name}(${ev.emp.dept})`, ev.benefit || '본인',
+      `${ev.emp.isContract ? '계약만료' : '퇴직일'} ${fmt_(ev.start)}`, ev.status];
+  }
+  return [ev.label, `${ev.emp.name}(${ev.emp.dept})`,
+    ev.target === '본인' ? '본인' : `${ev.target}(${ev.rel})`,
+    ev.endText ? `${fmt_(ev.start)}부터 (마감 없음)` : `${fmt_(ev.start)} ~ ${fmt_(ev.end)}`, ev.status];
+}
+
+function mailTable_(rows, head) {
+  const td = 'style="border:1px solid #ccc;padding:4px 8px"';
+  let h = `<table style="border-collapse:collapse;font-size:13px"><tr>`;
+  head.forEach(x => { h += `<th style="border:1px solid #ccc;padding:4px 8px;background:#1f4e78;color:#fff">${x}</th>`; });
+  h += '</tr>';
+  rows.forEach(r => {
+    const bg = /오늘 마감|마감 [1-7]일|🔴/.test(r.join(' ')) ? ' style="background:#fde2e4"' : '';
+    h += `<tr${bg}>` + r.map(c => `<td ${td}>${c}</td>`).join('') + '</tr>';
+  });
+  return h + '</table>';
+}
+
+function logAlert_(to, n, subject, detail) {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(SH.LOG) || buildLogSheet_(ss);
+  sh.appendRow([new Date(), to, n, subject, detail]);
+}
+
+/** 메뉴: 매일 자동 알림 켜기 */
+function installDailyTrigger() {
+  removeDailyTrigger_(true);
+  const cfg = readConfig_();
+  ScriptApp.newTrigger('dailyJob').timeBased().everyDays(1).atHour(cfg.alertHour).create();
+  SpreadsheetApp.getUi().alert(
+    `매일 ${cfg.alertHour}시~${cfg.alertHour + 1}시 사이에 대상자현황을 새로고침하고 알림 메일을 보냅니다.\n` +
+    `받는 사람: ${cfg.emails.join(', ')}`);
+}
+
+/** 메뉴: 자동 알림 끄기 */
+function removeDailyTrigger() { removeDailyTrigger_(false); }
+
+function removeDailyTrigger_(silent) {
+  let n = 0;
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'dailyJob') { ScriptApp.deleteTrigger(t); n++; }
+  });
+  if (!silent) SpreadsheetApp.getUi().alert(n ? '자동 알림을 껐습니다.' : '켜져 있는 자동 알림이 없습니다.');
+}
+
+
+/* ======================= 5. 데이터 읽기 ======================= */
+
+function readConfig_() {
+  const v = getSheet_(SH.CFG).getDataRange().getValues();
+  const kv = {};
+  v.forEach(r => { const k = String(r[0]).trim(); if (k && !(k in kv)) kv[k] = r[1]; });
+
+  // 표 읽기: 제목 행 다음이 머리글, 그다음부터 A열이 빌 때까지 (열 순서 고정)
+  const table = title => {
+    const i = v.findIndex(r => String(r[0]).trim() === title);
+    if (i < 0) return [];
+    const out = [];
+    for (let j = i + 2; j < v.length && String(v[j][0]).trim() !== ''; j++) out.push(v[j]);
+    return out;
+  };
+  const num = (x, d) => (x === '' || x === null || isNaN(Number(x))) ? d : Number(x);
+  const on = x => String(x).trim().toUpperCase() !== 'N';
+  const rels = x => splitList_(x).map(normRel_);
+
+  // 창립기념일
+  let foundM = 2, foundD = 20;
+  const f = kv[K.FOUND];
+  if (f instanceof Date) { foundM = f.getMonth() + 1; foundD = f.getDate(); }
+  else { const m = String(f || '').match(/(\d{1,2})\D+(\d{1,2})/); if (m) { foundM = +m[1]; foundD = +m[2]; } }
+
+  let emails = splitList_(kv[K.EMAILS]).filter(x => x.indexOf('@') > 0);
+  if (!emails.length) emails = [Session.getEffectiveUser().getEmail()];
+
+  const alertDays = splitList_(kv[K.ALERT_DAYS]).map(Number).filter(n => !isNaN(n));
+
+  return {
+    foundM: foundM, foundD: foundD,
+    emails: emails,
+    alertDays: alertDays.length ? alertDays : [60, 30, 14, 7, 3, 1, 0],
+    urgentDays: num(kv[K.URGENT_DAYS], 30),
+    alertHour: Math.min(23, Math.max(0, num(kv[K.ALERT_HOUR], 8))),
+    weekly: on(kv[K.WEEKLY] === undefined ? 'Y' : kv[K.WEEKLY]),
+    pastDays: num(kv[K.PAST_DAYS], 365),
+    futureDays: num(kv[K.FUTURE_DAYS], 730),
+    parentRels: rels(kv[K.PARENT_REL] || '부,모'),
+    spouseParentRels: rels(kv[K.SPOUSE_PARENT_REL] || '배우자부,배우자모'),
+    relList: splitList_(kv[K.REL_LIST] || '부,모,배우자,자녀,배우자부,배우자모,조부,조모,형제자매,기타'),
+    retireAge: num(kv[K.RETIRE_AGE], 60),
+    retireAlertDays: splitList_(kv[K.RETIRE_ALERT] || '365,180,90,60,30,7,1,0').map(Number).filter(n => !isNaN(n)),
+    retireCap: on(kv[K.RETIRE_CAP] === undefined ? 'Y' : kv[K.RETIRE_CAP]),
+    contractMonths: num(kv[K.CONTRACT_MONTHS], 12),
+    flightMonths: num(kv[K.FLIGHT_MONTHS], 6),
+    flightShow: num(kv[K.FLIGHT_SHOW], 12),
+    childOn: on(kv[K.CHILD_ON] === undefined ? 'Y' : kv[K.CHILD_ON]),
+    childRels: rels(kv[K.CHILD_REL] || '자녀'),
+
+    // [장기근속포상여행] 근속연수 | 여행일정 | 국내지원(만원) | 해외지원(만원) | 사용기간(개월)
+    longService: table(T.LONG).map(r => ({
+      years: num(r[0], 0), trip: String(r[1] || ''), dom: num(r[2], ''), abr: num(r[3], ''), months: num(r[4], 12),
+    })).filter(t => t.years > 0).sort((a, b) => a.years - b.years),
+
+    // [회갑·칠순] 구분 | 한국나이 | 사용기간(개월) | 대상 관계 | 사용(Y/N)
+    bdayItems: table(T.BDAY).map(r => ({
+      name: String(r[0]).trim(), age: num(r[1], 0), months: num(r[2], 12), rels: rels(r[3]), on: on(r[4]),
+    })).filter(x => x.age > 0),
+
+    // [탈상] 구분 | 기준일(사망일=1일째) | 사용 시작(기준일±일) | 사용 마감(기준일±일) | 대상 관계 | 사용(Y/N)
+    talsangItems: table(T.TALSANG).map(r => {
+      const b = String(r[1]).trim();
+      const y = b.match(/(\d+)\s*년/);
+      return {
+        name: String(r[0]).trim(),
+        years: y ? +y[1] : 0, days: y ? 0 : num(b.replace(/[^\d]/g, ''), 0),
+        startOff: num(r[2], -1), endOff: num(r[3], 0), rels: rels(r[4]), on: on(r[5]),
+      };
+    }).filter(x => x.years || x.days),
+  };
+}
+
+function readEmployees_(warnings, cfg) {
+  cfg = cfg || readConfig_();
+  const retireAge = cfg.retireAge;
+  const sh = getSheet_(SH.EMP);
+  const v = sh.getDataRange().getValues();
+  const h = findCols_(v[0], {
+    id: '사번', name: '이름', dept: '부서', pos: '직급', hire: '입사일', birth: '생년월일',
+    state: '재직상태', contract: '계약종료일',
+  });
+  const eom = d => new Date(d.getFullYear(), d.getMonth() + 1, 0);
+  const out = [];
+  for (let i = 1; i < v.length; i++) {
+    const r = v[i];
+    const id = norm_(r[h.id]);
+    if (!id) continue;
+    const hire = toDate_(r[h.hire]);
+    if (!hire) warnings.push(`직원명부 ${i + 1}행: ${r[h.name]} 입사일이 비었거나 날짜 형식이 아님`);
+    const birth = h.birth >= 0 ? toDate_(r[h.birth]) : null;
+    const age60 = birth ? addMonths_(birth, retireAge * 12) : null;   // 만 N세 생일
+    const retireDate = age60 ? eom(age60) : null;                     // 그달 말일
+    const isContract = h.pos >= 0 && String(r[h.pos]).indexOf(CONTRACT_KEY) >= 0;
+    const contractManual = h.contract >= 0 ? toDate_(r[h.contract]) : null;
+    let contractEnd = null;
+    if (isContract) {
+      contractEnd = contractManual || (retireDate ? eom(addMonths_(retireDate, cfg.contractMonths)) : null);
+      if (!contractEnd) warnings.push(`직원명부 ${i + 1}행: ${r[h.name]} 촉탁인데 생년월일·계약종료일이 없어 계약만료일 계산 불가`);
+    }
+    out.push({
+      row: i + 1, id: id, name: String(r[h.name]).trim(), dept: h.dept >= 0 ? String(r[h.dept]).trim() : '',
+      hire: hire, retired: h.state >= 0 && String(r[h.state]).indexOf('퇴사') >= 0,
+      birth: birth, age60: age60, retireDate: retireDate,
+      isContract: isContract, contractManual: !!contractManual, contractEnd: contractEnd,
+      workEnd: isContract ? contractEnd : retireDate,   // 실제로 근무가 끝나는 날
+    });
+  }
+  return out;
+}
+
+function readFamilies_(warnings) {
+  const sh = getSheet_(SH.FAM);
+  const v = sh.getDataRange().getValues();
+  const h = findCols_(v[0], { id: '사번', rel: '관계', name: '성명', birth: '생년월일', alive: '생존', death: '사망일', note: '비고' });
+  const out = [];
+  for (let i = 1; i < v.length; i++) {
+    const r = v[i];
+    const id = norm_(r[h.id]);
+    if (!id) continue;
+    const birth = toDate_(r[h.birth]);
+    const death = toDate_(r[h.death]);
+    if (r[h.birth] !== '' && !birth) warnings.push(`가족사항 ${i + 1}행: 생년월일 '${r[h.birth]}' 날짜 형식 확인`);
+    if (r[h.death] !== '' && !death) warnings.push(`가족사항 ${i + 1}행: 사망일 '${r[h.death]}' 날짜 형식 확인`);
+    out.push({
+      row: i + 1, id: id, rel: normRel_(r[h.rel]), name: String(r[h.name]).trim(),
+      birth: birth, death: death, alive: parseAlive_(h.alive >= 0 ? r[h.alive] : '', death),
+      note: h.note >= 0 ? String(r[h.note]).trim() : '',
+    });
+  }
+  return out;
+}
+
+/** 생존여부 칸 → 생존/사망/미확인. 비어 있으면 사망일 유무로 판단 */
+function parseAlive_(v, death) {
+  const s = norm_(v);
+  if (/사망|별세|고인|작고/.test(s)) return ALIVE.NO;
+  if (/미확인|확인|모름|불명|\?/.test(s)) return death ? ALIVE.NO : ALIVE.UNKNOWN;
+  if (/생존|생/.test(s)) return ALIVE.YES;
+  return death ? ALIVE.NO : ALIVE.YES;
+}
+
+/** 사용이력 → 사용 여부 조회용 */
+function readUsage_() {
+  const sh = getSheet_(SH.USE);
+  const v = sh.getDataRange().getValues();
+  const h = findCols_(v[0], { done: '처리일', id: '사번', item: '구분', target: '대상', start: '시작' });
+  const byKey = {}, talsangByTarget = {};
+  for (let i = 1; i < v.length; i++) {
+    const r = v[i];
+    const id = norm_(r[h.id]);
+    const item = normItem_(r[h.item]);
+    if (!id || !item) continue;
+    const target = norm_(r[h.target]) || '본인';
+    const rec = { item: String(r[h.item]).trim(), done: toDate_(r[h.done]), start: toDate_(r[h.start]) };
+    byKey[id + '|' + item + '|' + (item.indexOf('장기근속') === 0 ? '본인' : target)] = rec;
+    if (item.indexOf('탈상') === 0) talsangByTarget[id + '|' + target] = rec;
+  }
+  return { byKey: byKey, talsangByTarget: talsangByTarget };
+}
+
+
+/* ======================= 6. 초기 양식 만들기 ======================= */
+
+/** 최초 1회: 시트·서식·예시 데이터 생성 (이미 있는 시트는 건드리지 않음) */
+function setupTemplate() {
+  const ss = SpreadsheetApp.getActive();
+  const ui = SpreadsheetApp.getUi();
+  const ok = ui.alert('🛠 초기 양식 만들기',
+    '설정 / 직원명부 / 가족사항 / 사용이력 / 대상자현황 / 알림로그 시트를 만들고 예시 데이터를 넣습니다.\n' +
+    '이미 같은 이름의 시트가 있으면 그 시트는 건드리지 않습니다.\n\n진행할까요?', ui.ButtonSet.YES_NO);
+  if (ok !== ui.Button.YES) return;
+
+  const made = [], skipped = [];
+  const steps = [
+    [SH.CFG, buildConfigSheet_], [SH.EMP, buildEmployeeSheet_], [SH.FAM, buildFamilySheet_],
+    [SH.USE, buildUsageSheet_], [SH.STATUS, buildStatusSheet_], [SH.LOG, buildLogSheet_],
+  ];
+  steps.forEach(s => {
+    if (ss.getSheetByName(s[0])) { skipped.push(s[0]); return; }
+    s[1](ss); made.push(s[0]);
+  });
+
+  // 기본 빈 시트 정리
+  ['시트1', 'Sheet1'].forEach(n => {
+    const s = ss.getSheetByName(n);
+    if (s && ss.getSheets().length > 1 && s.getLastRow() === 0) ss.deleteSheet(s);
+  });
+
+  // 시트 순서
+  [SH.STATUS, SH.EMP, SH.FAM, SH.USE, SH.CFG, SH.LOG].forEach((n, i) => {
+    const s = ss.getSheetByName(n);
+    if (s) { ss.setActiveSheet(s); ss.moveActiveSheet(i + 1); }
+  });
+
+  refreshStatus_();
+  ss.setActiveSheet(ss.getSheetByName(SH.STATUS));
+
+  let msg = `만든 시트: ${made.join(', ') || '없음'}`;
+  if (skipped.length) msg += `\n건너뛴 시트(이미 있음): ${skipped.join(', ')}`;
+  const sTz = Session.getScriptTimeZone(), xTz = ss.getSpreadsheetTimeZone();
+  if (sTz !== xTz) {
+    msg += `\n\n⚠ 시간대가 다릅니다 (스크립트: ${sTz} / 시트: ${xTz}).\n` +
+      `날짜가 하루씩 밀릴 수 있으니 Apps Script 프로젝트 설정과 파일 > 설정의 시간대를 모두 서울로 맞추세요.`;
+  }
+  msg += '\n\n예시 데이터(직원명부·가족사항·사용이력)를 지우고 실제 데이터를 넣은 뒤\n[🎁 경조·복지] > 대상자현황 새로고침 을 누르세요.';
+  ui.alert('완료', msg, ui.ButtonSet.OK);
+  onOpen();
+}
+
+function buildConfigSheet_(ss) {
+  const sh = ss.insertSheet(SH.CFG);
+  sh.getRange('A1').setValue('⚙️ 설정  —  B열 값만 바꾸세요. A열 항목명과 [표 제목]은 그대로 두세요.')
+    .setFontSize(13).setFontWeight('bold').setFontColor(C_TITLE);
+
+  const kv = [
+    [K.FOUND, '02-20', '장기근속 기준일. 이날 근속 15·20·25·30년 이상이면 그날부터 1년간 사용 가능'],
+    [K.EMAILS, '', '쉼표로 여러 명 가능. 비워두면 스크립트 실행한 계정으로 발송'],
+    [K.ALERT_DAYS, '60,30,14,7,3,1,0', '사용 시작 N일 전 / 마감 N일 전에 메일 (0 = 당일)'],
+    [K.URGENT_DAYS, 30, '마감까지 이 일수 이하로 남으면 🔴 마감임박'],
+    [K.ALERT_HOUR, 8, '매일 자동 알림이 도는 시각 (자동 알림 다시 켜야 반영)'],
+    [K.WEEKLY, 'Y', '월요일 메일에 "현재 사용가능·30일 내 예정" 전체 목록을 붙임'],
+    [K.PAST_DAYS, 365, '마감이 지난 항목을 며칠까지 보여줄지 (사용완료·기한만료 확인용)'],
+    [K.FUTURE_DAYS, 730, '시작일이 며칠 이내인 항목까지 미리 보여줄지'],
+    [K.PARENT_REL, '부,모', '구분 앞에 "부모"로 표시할 관계값'],
+    [K.SPOUSE_PARENT_REL, '배우자부,배우자모', '구분 앞에 "배우자부모"로 표시할 관계값 (장인·장모·시부·시모 입력해도 자동 인식)'],
+    [K.REL_LIST, '부,모,배우자,자녀,배우자부,배우자모,조부,조모,형제자매,기타', '가족사항 관계 드롭다운 목록'],
+  ].concat(RETIRE_CFG_ROWS, EXTRA_CFG_ROWS_2);
+  sh.getRange(3, 1, 1, 3).setValues([['항목', '값', '설명']]);
+  styleHeader_(sh.getRange(3, 1, 1, 3));
+  sh.getRange(4, 2, kv.length, 1).setNumberFormat('@');
+  sh.getRange(4, 1, kv.length, 3).setValues(kv);
+  sh.getRange(4, 1, kv.length, 1).setFontWeight('bold').setBackground('#f3f6fa');
+  sh.getRange(4, 2, kv.length, 1).setBackground('#fffbe6');
+  let r = 4 + kv.length + 1;
+
+  // 장기근속
+  r = writeCfgTable_(sh, r, T.LONG,
+    ['근속연수', '여행일정', '국내지원(만원)', '해외지원(만원)', '사용기간(개월)'],
+    [[15, '3박 4일', 80, 80, 60], [20, '6박 7일', 120, 228, 60],
+     [25, '7박 8일', 180, 358, 60], [30, '9박 10일', 290, 618, 60]],
+    '창립기념일에 근속연수 이상이 되면 그날부터 사용기간(60개월=5년) 안에 1회 사용. 행 추가/삭제 가능');
+
+  // 회갑·칠순
+  r = writeCfgTable_(sh, r, T.BDAY,
+    ['구분', '한국나이', '사용기간(개월)', '대상 관계', '사용(Y/N)'],
+    [['회갑', 61, 12, '부,모,배우자부,배우자모', 'Y'],
+     ['칠순', 70, 12, '부,모,배우자부,배우자모', 'Y']],
+    '출생일=1세. 한국나이 N세가 되는 해의 생일부터 사용기간 동안 사용 가능 (예: 1956-06-25생 칠순 → 2025-06-25 ~ 2026-06-24)');
+
+  // 탈상
+  r = writeCfgTable_(sh, r, T.TALSANG,
+    ['구분', '기준일(사망일=1일째)', '사용 시작(기준일±일)', '사용 마감(기준일±일)', '대상 관계', '사용(Y/N)'],
+    [['탈상(49재)', 49, -1, 0, '부,모,배우자부,배우자모,배우자', 'Y'],
+     ['탈상(100일)', 100, -1, 0, '부,모,배우자부,배우자모,배우자', 'Y'],
+     ['탈상(1주기)', '1년', -1, 0, '부,모,배우자부,배우자모,배우자', 'Y']],
+    '기준일: 숫자=사망일을 1일째로 센 날, "1년"=사망일 1년 뒤 같은 날. 시작/마감은 기준일 기준 앞뒤 일수 (예: 2025-11-01 사망 1주기 → 2026-10-31 ~ 2026-11-01). 셋 중 1회만 사용');
+
+  // 기타(참고)
+  r = writeCfgTable_(sh, r, T.ETC,
+    ['구분', '대상', '휴가일수', '경조금', '비고'],
+    [['결혼', '본인', '', '', ''], ['결혼', '자녀', '', '', ''], ['출산', '배우자', '', '', ''],
+     ['사망', '부모·배우자', '', '', ''], ['사망', '배우자부모', '', '', ''], ['사망', '조부모·형제자매', '', '', '']],
+    '결혼·출산·장례처럼 미리 정할 수 없는 경조사. 회사 규정대로 채워서 참고용으로 쓰세요');
+
+  sh.setColumnWidth(1, 190); sh.setColumnWidth(2, 260); sh.setColumnWidth(3, 130);
+  sh.setColumnWidth(4, 130); sh.setColumnWidth(5, 230); sh.setColumnWidth(6, 90);
+  sh.getRange(4, 3, kv.length, 1).setFontColor('#666666');
+  sh.setFrozenRows(1);
+  return sh;
+}
+
+function writeCfgTable_(sh, r, title, head, rows, desc) {
+  sh.getRange(r, 1).setValue(title).setFontWeight('bold').setFontColor(C_TITLE).setFontSize(11);
+  sh.getRange(r, 2).setValue(desc).setFontColor('#666666').setWrap(false);
+  sh.getRange(r + 1, 1, 1, head.length).setValues([head]);
+  styleHeader_(sh.getRange(r + 1, 1, 1, head.length));
+  const body = sh.getRange(r + 2, 1, rows.length, head.length);
+  body.setNumberFormat('@').setValues(rows.map(x => x.map(String))).setBackground('#fffbe6')
+    .setHorizontalAlignment('center');
+  return r + 2 + rows.length + 1;
+}
+
+function buildEmployeeSheet_(ss) {
+  const sh = ss.insertSheet(SH.EMP);
+  const head = ['부서', '사번', '이름', '직급', '입사일', '생년월일', '연락처', '주소', '재직상태', '퇴사일', '계약종료일(촉탁)', '비고'];
+  sh.getRange(1, 1, 1, head.length).setValues([head]);
+  // 예시 데이터 (가상 인물) — 지우고 실제 데이터 입력
+  const sample = [
+    ['생산팀', '1001001', '홍길동', '반장', d_(2010, 9, 1), d_(1975, 3, 12), '010-0000-0001', '제주시 예시로 1', '재직', '', '', '예시'],
+    ['품질팀', '1001002', '김철수', '대리', d_(2006, 11, 10), d_(1978, 8, 2), '010-0000-0002', '제주시 예시로 2', '재직', '', '', '예시'],
+    ['관리팀', '1001003', '이영희', '과장', d_(2001, 2, 15), d_(1966, 12, 20), '010-0000-0003', '서귀포시 예시로 3', '재직', '', '', '예시: 올해 정년'],
+    ['생산팀', '1001004', '박민준', '사원', d_(2019, 4, 1), d_(1994, 6, 9), '010-0000-0004', '제주시 예시로 4', '재직', '', '', '예시'],
+    ['생산팀', '1001005', '최서연', '사원', d_(2022, 7, 4), d_(1996, 10, 21), '010-0000-0005', '제주시 예시로 5', '재직', '', '', '예시'],
+    ['품질팀', '1001007', '정신입', '사원', d_(2026, 5, 10), d_(2000, 1, 15), '010-0000-0007', '제주시 예시로 7', '재직', '', '', '예시: 항공권 복지 곧 가능'],
+    ['생산팀', '1001006', '강감독', '촉탁', d_(1995, 3, 2), d_(1966, 3, 13), '010-0000-0006', '제주시 예시로 6', '재직', '', '', '예시: 정년(2026-03-31) 후 촉탁'],
+  ];
+  sh.getRange(2, 2, 499, 1).setNumberFormat('@');
+  sh.getRange(2, 1, sample.length, head.length).setValues(sample);
+  // 자동 열(근속기간·만나이·정년퇴직일·퇴직까지)은 repairSheets_()가 오른쪽에 만듦
+
+  styleHeader_(sh.getRange(1, 1, 1, head.length));
+  sh.getRange(2, 5, 499, 2).setNumberFormat('yyyy-mm-dd');
+  sh.getRange(2, 10, 499, 2).setNumberFormat('yyyy-mm-dd');
+  sh.getRange(1, 11).setNote('직급이 "촉탁"인 경우만. 비우면 정년퇴직일 + 촉탁 계약기간(설정)으로 자동 계산. 재계약하면 새 종료일 입력');
+
+  sh.getRange(2, 9, 499, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(['재직', '휴직', '퇴사'], true).setAllowInvalid(true).build());
+  dateValidation_(sh.getRange(2, 5, 499, 2));
+  dateValidation_(sh.getRange(2, 10, 499, 2));
+
+  [90, 90, 80, 70, 100, 100, 120, 260, 80, 100, 110, 200].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  sh.getRange(1, 1, 500, 16).setVerticalAlignment('middle');
+  [1, 2, 3, 4, 5, 6, 9, 10, 11].forEach(c => sh.getRange(2, c, 499, 1).setHorizontalAlignment('center'));
+  sh.setFrozenRows(1); sh.setFrozenColumns(3);
+  return sh;
+}
+
+function buildFamilySheet_(ss) {
+  const sh = ss.insertSheet(SH.FAM);
+  const cfgRel = (function () { try { return readConfig_().relList; } catch (e) { return ['부', '모', '배우자', '자녀', '배우자부', '배우자모', '기타']; } })();
+  const head = ['사번', '직원이름(자동)', '관계', '가족 성명', '생년월일', '생존여부', '사망일', '비고'];
+  sh.getRange(1, 1, 1, head.length).setValues([head]);
+  // 예시 데이터 (가상 인물)
+  const sample = [
+    ['1001001', '', '부', '홍판서', d_(1956, 6, 25), '사망', d_(2025, 11, 1), '예시: 칠순 사용 후 별세 → 1주기 탈상 대기'],
+    ['1001001', '', '모', '성춘향', d_(1957, 11, 30), '생존', '', '예시: 칠순 예정'],
+    ['1001002', '', '배우자부', '김장인', d_(1966, 5, 3), '생존', '', '예시: 회갑 사용가능'],
+    ['1001002', '', '배우자모', '박장모', d_(1968, 1, 10), '미확인', '', '예시: 생존여부 모름 → 표시는 하되 확인 필요'],
+    ['1001002', '', '배우자', '정아내', d_(1980, 4, 4), '생존', '', ''],
+    ['1001003', '', '모', '이모친', d_(1945, 3, 3), '사망', d_(2026, 9, 5), '예시: 49재 곧 도래'],
+    ['1001004', '', '자녀', '박아기', d_(2024, 3, 1), '생존', '', '예시: 영유아 보육비'],
+    ['1001005', '', '부', '최부친', d_(1965, 10, 28), '생존', '', '예시: 회갑 마감 임박'],
+    ['1001005', '', '자녀', '최아기', d_(2026, 2, 14), '생존', '', '예시: 만0세 → 직원 직접 지급'],
+    ['1001001', '', '조부', '홍조부', d_(1930, 1, 1), '사망', '', '예시: 사망(날짜 모름) → 아무것도 표시 안 함'],
+  ];
+  sh.getRange(2, 1, 499, 1).setNumberFormat('@');
+  sh.getRange(2, 1, sample.length, head.length).setValues(sample);
+
+  styleHeader_(sh.getRange(1, 1, 1, head.length));
+  sh.getRange(1, 2).setBackground('#5b7fa6');
+  sh.getRange(2, 2, 499, 1).setBackground('#f3f6fa').setFontColor('#555555');
+  sh.getRange(2, 5, 499, 1).setNumberFormat('yyyy-mm-dd');
+  sh.getRange(2, 7, 499, 1).setNumberFormat('yyyy-mm-dd');
+
+  sh.getRange(2, 1, 499, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInRange(ss.getSheetByName(SH.EMP).getRange('B2:B500'), true).setAllowInvalid(true).build());
+  sh.getRange(2, 3, 499, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(cfgRel, true).setAllowInvalid(true).build());
+  dateValidation_(sh.getRange(2, 5, 499, 1));
+  dateValidation_(sh.getRange(2, 7, 499, 1));
+  // 생존여부 드롭다운·색은 repairFamily_()가 설정
+
+  [90, 110, 80, 100, 100, 80, 100, 300].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  [1, 2, 3, 4, 5, 6, 7].forEach(c => sh.getRange(2, c, 499, 1).setHorizontalAlignment('center'));
+  sh.getRange(1, 9).setValue('※ 한 행 = 가족 1명. 사망일 입력 시 탈상 자동 계산. 음력 생일이면 회사 기준(양력 환산일 등)으로 생년월일 입력')
+    .setFontColor('#888888').setFontSize(9);
+  sh.setFrozenRows(1); sh.setFrozenColumns(2);
+  return sh;
+}
+
+function buildUsageSheet_(ss) {
+  const sh = ss.insertSheet(SH.USE);
+  const head = ['처리일', '사번', '이름(자동)', '구분', '대상(가족성명/본인)', '사용 시작일', '사용 종료일', '지원금액', '비고'];
+  sh.getRange(1, 1, 1, head.length).setValues([head]);
+  const sample = [
+    [d_(2025, 8, 1), '1001001', '', '부모 칠순', '홍판서', d_(2025, 8, 14), d_(2025, 8, 15), '', '예시'],
+    [d_(2026, 3, 2), '1001003', '', '장기근속 25년', '본인', d_(2026, 5, 10), d_(2026, 5, 17), 1800000, '예시(국내)'],
+  ];
+  sh.getRange(2, 2, 499, 1).setNumberFormat('@');
+  sh.getRange(2, 1, sample.length, head.length).setValues(sample);
+
+  styleHeader_(sh.getRange(1, 1, 1, head.length));
+  sh.getRange(1, 3).setBackground('#5b7fa6');
+  sh.getRange(2, 3, 499, 1).setBackground('#f3f6fa').setFontColor('#555555');
+  sh.getRange(2, 1, 499, 1).setNumberFormat('yyyy-mm-dd');
+  sh.getRange(2, 6, 499, 2).setNumberFormat('yyyy-mm-dd');
+  sh.getRange(2, 8, 499, 1).setNumberFormat('#,##0');
+
+  let items = ['장기근속 15년', '장기근속 20년', '장기근속 25년', '장기근속 30년',
+    '부모 회갑', '부모 칠순', '배우자부모 회갑', '배우자부모 칠순',
+    '부모 탈상(49재)', '부모 탈상(100일)', '부모 탈상(1주기)',
+    '배우자부모 탈상(49재)', '배우자부모 탈상(100일)', '배우자부모 탈상(1주기)',
+    '배우자 탈상(49재)', '배우자 탈상(100일)', '배우자 탈상(1주기)',
+    '항공권', '결혼', '출산', '조의', '기타'];
+  sh.getRange(2, 4, 499, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(items, true).setAllowInvalid(true).build());
+  sh.getRange(2, 2, 499, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInRange(ss.getSheetByName(SH.EMP).getRange('B2:B500'), true).setAllowInvalid(true).build());
+  dateValidation_(sh.getRange(2, 6, 499, 2));
+
+  [100, 90, 90, 160, 140, 100, 100, 100, 260].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  [1, 2, 3, 5, 6, 7].forEach(c => sh.getRange(2, c, 499, 1).setHorizontalAlignment('center'));
+  sh.getRange(1, 10).setValue('※ 사번+구분+대상이 대상자현황과 맞으면 사용완료로 바뀝니다. 대상자현황에서 행 선택 → 메뉴 "사용완료 처리"로 자동 입력 가능')
+    .setFontColor('#888888').setFontSize(9);
+  sh.setFrozenRows(1);
+  return sh;
+}
+
+function buildStatusSheet_(ss) {
+  const sh = ss.insertSheet(SH.STATUS);
+  sh.getRange('A1').setValue('📋 경조·복지 대상자 현황  (자동 생성 — 직접 수정하지 마세요)')
+    .setFontSize(14).setFontWeight('bold').setFontColor(C_TITLE);
+  [110, 105, 170, 80, 80, 75, 75, 85, 95, 95, 95, 260, 330].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  sh.setRowHeight(3, 26);
+  sh.setFrozenRows(STATUS_HEADER_ROW);
+  sh.setFrozenColumns(2);
+  return sh;
+}
+
+function buildLogSheet_(ss) {
+  const sh = ss.insertSheet(SH.LOG);
+  sh.getRange(1, 1, 1, 5).setValues([['발송일시', '받는 사람', '알림 건수', '제목', '내용']]);
+  styleHeader_(sh.getRange(1, 1, 1, 5));
+  sh.getRange(2, 1, 999, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+  [140, 200, 70, 280, 500].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  sh.setFrozenRows(1);
+  return sh;
+}
+
+/* ======================= 6-1. 양식 점검·복구 ======================= */
+
+/** 메뉴: 양식 점검·수식 복구 */
+function repairSheets() {
+  repairSheets_();
+  SpreadsheetApp.getActive().toast('사번 형식·자동 수식·드롭다운을 점검했습니다.', '🧰 점검 완료', 5);
+}
+
+/**
+ * 매 새로고침마다 실행 (여러 번 실행해도 결과 같음)
+ *  - 설정 시트에 정년·촉탁 항목이 없으면 추가 + 이름 범위 연결
+ *  - 사번 열을 전부 '텍스트'로 통일 (숫자/텍스트가 섞이면 드롭다운 경고·이름 조회 실패)
+ *  - 직원명부: 계약종료일(촉탁) 입력 열, 자동 열(근속기간·만나이·정년퇴직일·퇴직까지) 준비
+ *  - 가족사항·사용이력: 이름(자동) 수식과 사번 드롭다운을 현재 직원명부 위치에 맞춰 다시 설정
+ */
+function repairSheets_() {
+  const ss = SpreadsheetApp.getActive();
+  repairConfig_(ss);
+  const emp = ss.getSheetByName(SH.EMP);
+  if (!emp) return;
+  normalizeIds_(emp);
+  const ec = repairEmployee_(emp);
+  if (!ec) return;
+  [SH.FAM, SH.USE].forEach(n => {
+    const sh = ss.getSheetByName(n);
+    if (!sh) return;
+    normalizeIds_(sh);
+    repairLookup_(sh, emp, ec);
+  });
+  const fam = ss.getSheetByName(SH.FAM);
+  if (fam) repairFamily_(fam);
+  const use = ss.getSheetByName(SH.USE);
+  if (use) repairUsageItems_(use);
+}
+
+/**
+ * 가족사항: '생존여부' 열이 없으면 생년월일 오른쪽에 끼워 넣고(기존 데이터는 오른쪽으로 한 칸 이동할 뿐 그대로)
+ * 사망일 있으면 '사망', 없으면 '생존'으로 미리 채움. 드롭다운·색은 매번 다시 설정
+ */
+function repairFamily_(sh) {
+  let head = headerMap_(sh);
+  let cAlive = head.findIndex(h => h.indexOf('생존') >= 0) + 1;
+  if (!cAlive) {
+    const cBirth = head.indexOf('생년월일') + 1;
+    const cDeath0 = head.findIndex(h => h.indexOf('사망일') >= 0) + 1;
+    const after = cBirth || (cDeath0 ? cDeath0 - 1 : head.length);
+    sh.insertColumnAfter(after);
+    cAlive = after + 1;
+    sh.getRange(1, cAlive).setValue('생존여부');
+    styleHeader_(sh.getRange(1, cAlive));
+    sh.setColumnWidth(cAlive, 80);
+    head = headerMap_(sh);
+    const cId = head.findIndex(h => h.indexOf('사번') >= 0) + 1;
+    const cDeath = head.findIndex(h => h.indexOf('사망일') >= 0) + 1;
+    const n = sh.getLastRow() - 1;
+    if (n > 0 && cId) {
+      const ids = sh.getRange(2, cId, n, 1).getValues();
+      const deaths = cDeath ? sh.getRange(2, cDeath, n, 1).getValues() : ids.map(() => ['']);
+      sh.getRange(2, cAlive, n, 1).setValues(ids.map((r, i) =>
+        [String(r[0]).trim() === '' ? '' : (deaths[i][0] !== '' ? ALIVE.NO : ALIVE.YES)]));
+    }
+  }
+  const body = sh.getRange(2, cAlive, 499, 1);
+  body.setNumberFormat('@').setHorizontalAlignment('center').setBackground(null).setFontColor('#000000');
+  body.setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList([ALIVE.YES, ALIVE.NO, ALIVE.UNKNOWN], true).setAllowInvalid(true)
+    .setHelpText('생존 / 사망 / 미확인. 사망이면 회갑·칠순·보육비는 표시 안 함 (사망일 있으면 탈상만 계산)').build());
+  sh.getRange(1, cAlive).setNote('생존 / 사망 / 미확인\n· 사망: 회갑·칠순·보육비 표시 안 함. 사망일을 넣으면 탈상 계산\n· 미확인: 계산은 하되 "확인 필요" 표시\n· 비우면 사망일 유무로 판단');
+
+  // 색: 사망 = 회색, 미확인 = 노랑 (이 열의 기존 규칙만 지우고 다시)
+  const nameC = head.findIndex(h => h.indexOf('성명') >= 0) + 1;
+  const cols = [cAlive, nameC].filter(Boolean);
+  const areas = cols.map(c => sh.getRange(2, c, 499, 1));
+  const A = '$' + colLetter_(cAlive) + '2';
+  const keep = sh.getConditionalFormatRules().filter(r => !r.getRanges().some(x => cols.indexOf(x.getColumn()) >= 0));
+  sh.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=${A}="${ALIVE.NO}"`)
+      .setBackground('#e6e6e6').setFontColor('#888888').setRanges(areas).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=${A}="${ALIVE.UNKNOWN}"`)
+      .setBackground('#fff4c2').setFontColor('#7a5b00').setRanges(areas).build(),
+  ].concat(keep));
+}
+
+/** 사용이력 '구분' 드롭다운 목록 (항목이 늘어도 자동 반영, 목록 밖 값도 경고만) */
+function repairUsageItems_(sh) {
+  const c = headerMap_(sh).findIndex(h => h === '구분') + 1;
+  if (!c) return;
+  let ls = [15, 20, 25, 30];
+  try { ls = readConfig_().longService.map(t => t.years); } catch (e) { }
+  const items = ls.map(y => `장기근속 ${y}년`).concat([
+    '항공권', '부모 회갑', '부모 칠순', '배우자부모 회갑', '배우자부모 칠순',
+    '부모 탈상(49재)', '부모 탈상(100일)', '부모 탈상(1주기)',
+    '배우자부모 탈상(49재)', '배우자부모 탈상(100일)', '배우자부모 탈상(1주기)',
+    '배우자 탈상(49재)', '배우자 탈상(100일)', '배우자 탈상(1주기)',
+    '결혼', '출산', '조의', '기타']);
+  sh.getRange(2, c, 499, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(items, true).setAllowInvalid(true).build());
+}
+
+function repairConfig_(ss) {
+  const cfg = ss.getSheetByName(SH.CFG);
+  if (!cfg) return;
+  let colA = cfg.getRange(1, 1, Math.max(1, cfg.getLastRow()), 1).getValues().map(r => String(r[0]).trim());
+  const extra = RETIRE_CFG_ROWS.concat(EXTRA_CFG_ROWS_2);
+  const add = extra.filter(x => colA.indexOf(x[0]) < 0);
+  if (add.length) {
+    // 이미 있는 추가 항목 중 마지막 줄 → 없으면 '관계 목록' 줄 아래에 끼워 넣기 (아래 표는 밀려 내려갈 뿐 그대로)
+    let at = 0;
+    extra.forEach(x => { const i = colA.indexOf(x[0]) + 1; if (i > at) at = i; });
+    if (!at) at = colA.indexOf(K.REL_LIST) + 1;
+    if (!at) at = colA.indexOf(K.FOUND) + 1;
+    if (!at) at = cfg.getLastRow();
+    cfg.insertRowsAfter(at, add.length);
+    const rng = cfg.getRange(at + 1, 1, add.length, 3);
+    cfg.getRange(at + 1, 2, add.length, 1).setNumberFormat('@');
+    rng.setValues(add).setFontWeight('normal').setFontColor('#000000').setBackground(null).setHorizontalAlignment('left');
+    cfg.getRange(at + 1, 1, add.length, 1).setFontWeight('bold').setBackground('#f3f6fa');
+    cfg.getRange(at + 1, 2, add.length, 1).setBackground('#fffbe6');
+    cfg.getRange(at + 1, 3, add.length, 1).setFontColor('#666666');
+    colA = cfg.getRange(1, 1, cfg.getLastRow(), 1).getValues().map(r => String(r[0]).trim());
+  }
+  // 설명 문구만 최신으로 (B열 값은 건드리지 않음)
+  const fsRow = colA.indexOf(K.FLIGHT_SHOW) + 1;
+  if (fsRow) {
+    const d = cfg.getRange(fsRow, 3);
+    if (String(d.getValues()[0][0]).indexOf('사용 마감 아님') < 0) d.setValue(EXTRA_CFG_ROWS_2[1][2]);
+  }
+
+  // 장기근속 사용기간: 처음 만든 기본값(12개월)이면 5년(60개월)으로 한 번만 바꿈
+  const props = PropertiesService.getDocumentProperties();
+  if (!props.getProperty('mig_longservice_60')) {
+    const t = colA.indexOf(T.LONG);
+    if (t >= 0) {
+      for (let r = t + 3; r <= colA.length && colA[r - 1] !== ''; r++) {
+        const cell = cfg.getRange(r, 5);
+        if (String(cell.getValues()[0][0]).trim() === '12') cell.setValue('60');
+      }
+      const descCell = cfg.getRange(t + 1, 2);
+      if (String(descCell.getValues()[0][0]).indexOf('1회 지급') >= 0) {
+        descCell.setValue('창립기념일에 근속연수 이상이 되면 그날부터 사용기간(60개월=5년) 안에 1회 사용. 행 추가/삭제 가능');
+      }
+    }
+    props.setProperty('mig_longservice_60', '1');
+  }
+
+  [[RETIRE_NAME, K.RETIRE_AGE], [CONTRACT_NAME, K.CONTRACT_MONTHS]].forEach(x => {
+    const row = colA.indexOf(x[1]) + 1;
+    if (!row) return;
+    const named = ss.getRangeByName(x[0]);
+    if (!named || named.getSheet().getName() !== SH.CFG || named.getRow() !== row) {
+      ss.setNamedRange(x[0], cfg.getRange(row, 2));
+    }
+  });
+}
+
+/** 사번 열을 텍스트로 통일 */
+function normalizeIds_(sh) {
+  const c = headerMap_(sh).findIndex(h => h.indexOf('사번') >= 0) + 1;
+  if (!c) return;
+  sh.getRange(2, c, Math.max(1, sh.getMaxRows() - 1), 1).setNumberFormat('@');
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return;
+  const rng = sh.getRange(2, c, n, 1);
+  const v = rng.getValues();
+  let changed = false;
+  const out = v.map(r => {
+    const x = r[0];
+    if (typeof x === 'number') { changed = true; return [String(x)]; }
+    if (typeof x === 'string' && x !== x.trim()) { changed = true; return [x.trim()]; }
+    return [x];
+  });
+  if (changed) rng.setValues(out);
+}
+
+/** 사번을 입력·붙여넣기 하는 즉시 텍스트로 바꿈 (단순 트리거) */
+function onEdit(e) {
+  try {
+    if (!e || !e.range) return;
+    const sh = e.range.getSheet();
+    if ([SH.EMP, SH.FAM, SH.USE].indexOf(sh.getName()) < 0 || e.range.getRow() < 2) return;
+    const head = headerMap_(sh);
+    const c0 = e.range.getColumn(), c1 = c0 + e.range.getNumColumns() - 1;
+    // 가족사항: 사망일을 넣으면 생존여부를 '사망'으로
+    if (sh.getName() === SH.FAM) {
+      const cD = head.findIndex(h => h.indexOf('사망일') >= 0) + 1;
+      const cA = head.findIndex(h => h.indexOf('생존') >= 0) + 1;
+      if (cD && cA && cD >= c0 && cD <= c1) {
+        const n = e.range.getNumRows(), r0 = e.range.getRow();
+        const d = sh.getRange(r0, cD, n, 1).getValues();
+        const a = sh.getRange(r0, cA, n, 1).getValues();
+        let ch = false;
+        const out = a.map((x, i) => {
+          if (d[i][0] !== '' && x[0] !== ALIVE.NO) { ch = true; return [ALIVE.NO]; }
+          return x;
+        });
+        if (ch) sh.getRange(r0, cA, n, 1).setValues(out);
+      }
+    }
+    const c = head.findIndex(h => h.indexOf('사번') >= 0) + 1;
+    if (!c || c < c0 || c > c1) return;
+    const rng = sh.getRange(e.range.getRow(), c, e.range.getNumRows(), 1);
+    const v = rng.getValues();
+    if (!v.some(r => typeof r[0] === 'number')) return;
+    rng.setNumberFormat('@').setValues(v.map(r => [typeof r[0] === 'number' ? String(r[0]) : r[0]]));
+  } catch (err) { /* 입력 방해하지 않음 */ }
+}
+
+/** 직원명부 입력 열·자동 열 준비. {id, name} 열 문자 반환 */
+function repairEmployee_(emp) {
+  let head = headerMap_(emp);
+  const col = key => head.findIndex(h => h.indexOf(key) >= 0) + 1;
+
+  // 계약종료일(촉탁) 입력 열 — 없으면 '퇴사일' 오른쪽에 끼워 넣기
+  if (!col('계약종료일')) {
+    const after = col('퇴사일') || col('재직상태') || head.length;
+    emp.insertColumnAfter(after);
+    const c = after + 1;
+    emp.getRange(1, c).setValue('계약종료일(촉탁)');
+    styleHeader_(emp.getRange(1, c));
+    emp.getRange(2, c, 499, 1).setNumberFormat('yyyy-mm-dd').setBackground(null)
+      .setFontColor('#000000').setHorizontalAlignment('center');
+    dateValidation_(emp.getRange(2, c, 499, 1));
+    emp.getRange(1, c).setNote('직급이 "촉탁"인 경우만. 비우면 정년퇴직일 + 촉탁 계약기간(설정)으로 자동 계산. 재계약하면 새 종료일 입력');
+    emp.setColumnWidth(c, 110);
+    head = headerMap_(emp);
+  }
+
+  const cId = col('사번'), cName = head.indexOf('이름') + 1 || col('이름');
+  if (!cId || !cName) return null;
+  const L = c => colLetter_(c);
+
+  // 자동 열 위치 (없으면 맨 끝에 추가)
+  const autoKeys = ['근속기간', '만나이', '정년퇴직일', '퇴직까지'];
+  const pos = {};
+  let next = head.length + 1;
+  autoKeys.forEach(k => { pos[k] = col(k) || next++; });
+
+  const cHire = col('입사일'), cBirth = head.indexOf('생년월일') + 1 || col('생년월일');
+  const cPos = col('직급'), cState = col('재직상태'), cCt = col('계약종료일');
+  const rg = c => `${L(c)}2:${L(c)}`;
+
+  // 근속기간
+  if (cHire) emp.getRange(1, pos['근속기간']).setFormula(
+    `={"근속기간(자동)"; ARRAYFORMULA(IF(${rg(cHire)}="", "", IFERROR(DATEDIF(${rg(cHire)}, TODAY(), "Y")&"년 "&DATEDIF(${rg(cHire)}, TODAY(), "YM")&"개월", "")))}`);
+  if (cBirth) {
+    // 만나이
+    emp.getRange(1, pos['만나이']).setFormula(
+      `={"만나이(자동)"; ARRAYFORMULA(IF(${rg(cBirth)}="", "", IFERROR(DATEDIF(${rg(cBirth)}, TODAY(), "Y"), "")))}`);
+    // 정년퇴직일 = 만 N세 생일이 속한 달 말일
+    emp.getRange(1, pos['정년퇴직일']).setFormula(
+      `={"정년퇴직일(자동)"; ARRAYFORMULA(IF(${rg(cBirth)}="", "", IFERROR(EOMONTH(${rg(cBirth)}, ${RETIRE_NAME}*12), "")))}`);
+    // 퇴직까지
+    const N = rg(pos['정년퇴직일']);
+    const remain = `DATEDIF(TODAY(), ${N}, "Y")&"년 "&DATEDIF(TODAY(), ${N}, "YM")&"개월 (D-"&(${N}-TODAY())&")"`;
+    let body = `IF(${N}<TODAY(), "정년 경과", IF(${N}=TODAY(), "오늘 퇴직", ${remain}))`;
+    if (cPos) {
+      const CE = cCt ? `IF(${rg(cCt)}<>"", ${rg(cCt)}, EOMONTH(${N}, ${CONTRACT_NAME}))` : `EOMONTH(${N}, ${CONTRACT_NAME})`;
+      const ct = `"촉탁 · 계약만료 "&TEXT(${CE}, "yyyy-mm-dd")&IF(${CE}<TODAY(), " (지남)", " (D-"&(${CE}-TODAY())&")")`;
+      body = `IF(REGEXMATCH(${rg(cPos)}&"", "${CONTRACT_KEY}"), ${ct}, ${body})`;
+    }
+    if (cState) body = `IF(${rg(cState)}="퇴사", "퇴사", ${body})`;
+    emp.getRange(1, pos['퇴직까지']).setFormula(`={"퇴직까지(자동)"; ARRAYFORMULA(IF(${N}="", "", ${body}))}`);
+  }
+
+  // 자동 열 서식
+  const widths = { '근속기간': 110, '만나이': 80, '정년퇴직일': 105, '퇴직까지': 210 };
+  autoKeys.forEach(k => {
+    const c = pos[k];
+    emp.getRange(1, c).setBackground('#5b7fa6').setFontColor('#ffffff').setFontWeight('bold')
+      .setHorizontalAlignment('center').setVerticalAlignment('middle');
+    emp.getRange(2, c, 499, 1).setBackground('#f3f6fa').setFontColor('#555555').setHorizontalAlignment('center');
+    if (c >= head.length + 1) emp.setColumnWidth(c, widths[k]);
+  });
+  emp.getRange(2, pos['정년퇴직일'], 499, 1).setNumberFormat('yyyy-mm-dd');
+
+  // 조건부 서식: 촉탁 = 보라, 1년 이내 퇴직 = 빨강, 정년 경과 = 회색 (이 두 열의 기존 규칙은 지우고 다시)
+  const cols = [pos['정년퇴직일'], pos['퇴직까지']];
+  const NN = '$' + L(pos['정년퇴직일']) + '2';
+  const areas = cols.map(c => emp.getRange(2, c, 499, 1));
+  const keep = emp.getConditionalFormatRules().filter(r =>
+    !r.getRanges().some(x => cols.indexOf(x.getColumn()) >= 0));
+  const isCt = cPos ? `REGEXMATCH($${L(cPos)}2&"", "${CONTRACT_KEY}")` : 'FALSE';
+  const rules = [];
+  if (cPos) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=${isCt}`)
+    .setBackground('#ece3f7').setFontColor('#5b2c83').setRanges(areas).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(`=AND(ISNUMBER(${NN}), ${NN}>=TODAY(), ${NN}<=EDATE(TODAY(), 12))`)
+    .setBackground('#fde2e4').setFontColor('#b00020').setBold(true).setRanges(areas).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(`=AND(ISNUMBER(${NN}), ${NN}<TODAY())`)
+    .setBackground('#e0e0e0').setFontColor('#777777').setRanges(areas).build());
+  emp.setConditionalFormatRules(rules.concat(keep));
+
+  return { id: L(cId), name: L(cName) };
+}
+
+/** 가족사항·사용이력: 이름(자동) 수식 + 사번 드롭다운 */
+function repairLookup_(sh, emp, ec) {
+  const head = headerMap_(sh);
+  const cId = head.findIndex(h => h.indexOf('사번') >= 0) + 1;
+  const cNm = head.findIndex(h => h.indexOf('이름') >= 0 && h.indexOf('자동') >= 0) + 1;
+  if (!cId) return;
+  const A = colLetter_(cId);
+  if (cNm) {
+    const label = sh.getName() === SH.FAM ? '직원이름(자동)' : '이름(자동)';
+    // TO_TEXT로 양쪽을 글자로 맞춰서 비교 → 숫자/텍스트가 섞여도 찾음
+    sh.getRange(1, cNm).setFormula(
+      `={"${label}"; ARRAYFORMULA(IF(${A}2:${A}="", "", IFERROR(VLOOKUP(TRIM(TO_TEXT(${A}2:${A})), ` +
+      `{TRIM(TO_TEXT('${SH.EMP}'!${ec.id}2:${ec.id})), '${SH.EMP}'!${ec.name}2:${ec.name}}, 2, FALSE), "⚠ 사번 확인")))}`);
+  }
+  sh.getRange(2, cId, 499, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInRange(emp.getRange(`${ec.id}2:${ec.id}`), true).setAllowInvalid(true)
+    .setHelpText('직원명부에 있는 사번을 고르세요').build());
+}
+
+/** 만 나이 */
+function ageAt_(birth, d) {
+  let a = d.getFullYear() - birth.getFullYear();
+  if (d.getMonth() < birth.getMonth() || (d.getMonth() === birth.getMonth() && d.getDate() < birth.getDate())) a--;
+  return a;
+}
+
+function colLetter_(n) {
+  let s = '';
+  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+
+/** a → b 남은 기간을 'n년 m개월' 로 */
+function ymText_(a, b) {
+  let m = (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth());
+  if (b.getDate() < a.getDate()) m--;
+  const y = Math.floor(m / 12); m = m % 12;
+  return (y ? `${y}년 ` : '') + `${m}개월`;
+}
+
+function styleHeader_(rng) {
+  rng.setBackground(C_HEAD).setFontColor('#ffffff').setFontWeight('bold')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true);
+}
+
+function dateValidation_(rng) {
+  rng.setDataValidation(SpreadsheetApp.newDataValidation().requireDate().setAllowInvalid(true)
+    .setHelpText('날짜로 입력하세요. 예) 1956-06-25').build());
+}
+
+
+/* ======================= 7. 공통 도우미 ======================= */
+
+function getSheet_(name) {
+  const sh = SpreadsheetApp.getActive().getSheetByName(name);
+  if (!sh) throw new Error(`[${name}] 시트가 없습니다. 메뉴 > 초기 양식 만들기를 먼저 실행하세요.`);
+  return sh;
+}
+
+/** 머리글 행에서 키워드가 들어간 첫 열 위치 (없으면 -1, 필수 열 없으면 오류) */
+function findCols_(headRow, spec) {
+  const head = headRow.map(x => String(x).replace(/\s/g, ''));
+  const out = {};
+  Object.keys(spec).forEach(k => {
+    out[k] = head.findIndex(h => h.indexOf(spec[k]) >= 0);
+  });
+  ['id'].forEach(k => {
+    if (k in out && out[k] < 0) throw new Error(`머리글에 '${spec[k]}' 열이 없습니다.`);
+  });
+  return out;
+}
+
+function headerMap_(sh) {
+  return sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(x => String(x).replace(/\s/g, ''));
+}
+
+/** 머리글 키워드 기준으로 다음 빈 행에 기록 (자동 열은 건드리지 않음) */
+function appendByHeader_(sh, head, data) {
+  const idCol = head.findIndex(h => h.indexOf('사번') >= 0) + 1;
+  const colVals = sh.getRange(1, idCol, sh.getMaxRows(), 1).getValues();
+  let row = 1;
+  colVals.forEach((r, i) => { if (String(r[0]).trim() !== '') row = i + 1; });
+  row += 1;
+  Object.keys(data).forEach(key => {
+    const c = head.findIndex(h => h.indexOf(key) >= 0 && h.indexOf('자동') < 0);
+    if (c >= 0) sh.getRange(row, c + 1).setValue(data[key]);
+  });
+}
+
+/** 공백 제거 문자열 */
+function norm_(v) { return String(v === null || v === undefined ? '' : v).replace(/\s/g, ''); }
+
+/** 구분 비교용: 공백·'부모/배우자부모/배우자' 접두어·'포상/여행' 제거, 49제→49재 */
+function normItem_(v) {
+  return norm_(v).replace(/^(배우자부모|부모|배우자)/, '').replace(/포상|여행/g, '')
+    .replace('49제', '49재').replace('탈상(백일)', '탈상(100일)').replace('탈상(1년)', '탈상(1주기)')
+    .replace(/^항공권(복지)?.*$/, '항공권');
+}
+
+function normRel_(v) {
+  const s = norm_(v);
+  return REL_ALIAS[s] || s;
+}
+
+function splitList_(v) {
+  return String(v === null || v === undefined ? '' : v).split(/[,，;\n]+/).map(x => x.trim()).filter(Boolean);
+}
+
+function joinNote_() {
+  return Array.prototype.slice.call(arguments).filter(Boolean).join(' · ');
+}
+
+/** 여러 형태의 날짜 입력 → 자정 기준 Date (실패 시 null) */
+function toDate_(v) {
+  if (v === '' || v === null || v === undefined) return null;
+  if (Object.prototype.toString.call(v) === '[object Date]') {
+    return isNaN(v.getTime()) ? null : new Date(v.getFullYear(), v.getMonth(), v.getDate());
+  }
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);        // 1956-06-25, 1956.6.25, 1956/06/25
+  if (!m) m = s.match(/^(\d{4})(\d{2})(\d{2})$/);              // 19560625
+  if (!m) return null;
+  return d_(+m[1], +m[2], +m[3]);
+}
+
+/** 년,월,일 → Date (잘못된 날짜면 null) */
+function d_(y, m, d) {
+  const dt = new Date(y, m - 1, d);
+  return dt.getMonth() === m - 1 ? dt : null;
+}
+
+function today_() { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate()); }
+
+function addDays_(d, n) { return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n); }
+
+/** 월 더하기 (2/29 + 12개월 → 2/28 처럼 말일 넘침 방지) */
+function addMonths_(d, n) {
+  const y = d.getFullYear(), m = d.getMonth() + n;
+  const last = new Date(y, m + 1, 0).getDate();
+  return new Date(y, m, Math.min(d.getDate(), last));
+}
+
+function diff_(a, b) { return Math.round((b - a) / 86400000); }
+
+function sameDay_(a, b) { return diff_(a, b) === 0; }
+
+function pad_(n) { return (n < 10 ? '0' : '') + n; }
+
+function fmt_(d) {
+  if (!d) return '';
+  return `${d.getFullYear()}-${pad_(d.getMonth() + 1)}-${pad_(d.getDate())}`;
+}

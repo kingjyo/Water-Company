@@ -2,10 +2,10 @@
 // 생수공장 식수·근무 인원 파악표
 // ※ "식수인원파악" 스프레드시트의 Apps Script 편집기에 붙여넣기
 // ※ 2026-10 수정: 김은혁(품질) 추가, getWorkData 범위 자동화
+// ※ 2026-11 수정: "검/P"·"P/교" 같은 겸용 코드도 연장·조출·야간에 포함
+// ※ 2026-11 수정: 특이 근태사항 표(H14:L15) 추가 — 첫 항목: "검"(반일 건강검진)
+//                 11:20·12:20 교대 식사 = 현장 2 + 품질 1 (3명 고정, 삼익 제외)
 // ============================================================
-
-const ID_PROD = "1ibZaOX0NKni6vRTVE0i2Wb5AXNHn9D72F5CFWSxH3qQ";
-const ID_WORK = "12yP7AxfC_27B6LhSEJ4lFH5ZYnymyQIlcbPXXhpDUBY";
 
 const OFF_CODES = ["휴", "무", "사", "퇴", "상", "년", "공", "청", "출"];
 
@@ -23,6 +23,24 @@ const OFF_REASON = {
   "무": "무급휴무", "사": "사직", "퇴": "철야휴무", "상": "상조휴가", "청": "청원휴가", "출": "출장"
 };
 
+// ── 특이 근태사항 목록 (출근으로 집계하되, 따로 알려야 하는 근무계획 코드) ──
+// 새 특이사항이 생기면 아래 목록에 한 줄만 추가하면 표(H14:L15~)에 자동 반영
+//   match : 근무계획 셀에 이 글자가 들어 있으면 해당
+//   label : 표 '구분'(H열)에 나올 이름
+//   mark  : 출근 인원 명단에서 이름 뒤에 붙일 표시 → 예) 박수형(검진)
+//   note  : 표 '비고'(L열)에 인원수 뒤에 붙일 설명
+// ※ 그날 해당자가 있는 항목만 한 줄씩 나오고, 아무도 없으면 "특이 근태사항 없음"
+// ※ 하루 통째로 쉬는 경우는 휴무 코드로 적으면 비근무 현황으로 잡힘
+const ATT_NOTE_RULES = [
+  { match: "검", label: "특수건강검진", mark: "검진", note: "반일 외출 (출근 인원에 포함)" }
+  // 예) { match: "반", label: "반차", mark: "반차", note: "반일 근무 (출근 인원에 포함)" },
+];
+
+// ── 교대 식사(11:20 / 12:20) 자사 인원 ─────────────────────
+// BTL·CAP·0.19L 캔 중 하나라도 생산하면 각 시간대 3명 고정
+// 삼익(협력사)은 P6:S12 식수 계산에 넣지 않음 (P1:R2 '12:20 식사(삼익 포함)' 칸에만 표시)
+const SHIFT_MEAL = { 현장: 2, 품질: 1 };
+
 const PROD_ITEMS = [
   { name: "18.9L", idx: 0, type: "제품" },
   { name: "1.5L", idx: 1, type: "제품" },
@@ -39,18 +57,6 @@ const PROD_ITEMS = [
 // ============================================================
 // 메뉴
 // ============================================================
-function onOpen() {
-  const me = "youngjoonkim@kas.co.kr"; // ← 본인 이메일로 변경
-  const user = Session.getActiveUser().getEmail();
-  if (user !== me) return; // 다른 사람에게는 메뉴 안 보임
-
-  SpreadsheetApp.getUi()
-    .createMenu("🏭 인원파악")
-    .addItem("📋 오늘 파악표 생성", "runDailyReport")
-    .addItem("🔍 날짜 지정 테스트", "runTestByDate")
-    .addToUi();
-}
-
 function runTestByDate() {
   const ui = SpreadsheetApp.getUi();
   const res = ui.prompt("🔍 날짜 지정 테스트", "날짜 입력 (예: 2025-03-05)", ui.ButtonSet.OK_CANCEL);
@@ -229,8 +235,8 @@ function getLCData(sheet, day, currentMonth) {
 
   function findLC(line) {
     const lcItem = line.find(item => {
-      const v = String(prodVal[ri][item.idx] || "");
-      return v.toUpperCase().includes("L/C");
+        const v = String(prodVal[ri][item.idx] || "");
+        return v.toUpperCase().includes("L/C");
     });
     if (!lcItem) return null;
 
@@ -355,9 +361,9 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
   const nProd = prodData.length;
   if (nProd > 0) {
     prodData.forEach((item, i) => {
-      const charLen = item.name.length;
-      const w = Math.max(80, Math.min(130, charLen * 14 + 25));
-      ws.setColumnWidth(2 + i, w);
+        const charLen = item.name.length;
+        const w = Math.max(80, Math.min(130, charLen * 14 + 25));
+        ws.setColumnWidth(2 + i, w);
     });
   } else {
     ws.setColumnWidth(2, 90);
@@ -386,7 +392,7 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
     const lines = specialData.split("\n");
     let maxLen = 0;
     lines.forEach(line => {
-      maxLen = Math.max(maxLen, line.length);
+        maxLen = Math.max(maxLen, line.length);
     });
     specialTotalWidth = Math.max(210, Math.min(420, maxLen * 13 + 70));
   }
@@ -443,29 +449,29 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
   } else {
     let startCol = 2;
     prodData.forEach((item, i) => {
-      const w = Math.max(slotWidths[i], 1);
+        const w = Math.max(slotWidths[i], 1);
 
-      for (let ci = 0; ci < w; ci++) {
-        ws.getRange(2, startCol + ci, 1, 1).setBackground(BG.PROD_H);
-      }
-      const nameRange = ws.getRange(2, startCol, 1, w);
-      if (w > 1) nameRange.merge();
-      nameRange.setValue(item.name);
-      nameRange.setFontColor(FG.DARK);
-      nameRange.setFontWeight("bold");
-      nameRange.setFontSize(10);
-      nameRange.setHorizontalAlignment("center");
-      nameRange.setVerticalAlignment("middle");
-      nameRange.setFontFamily("맑은 고딕");
-      nameRange.setWrap(true);
+        for (let ci = 0; ci < w; ci++) {
+          ws.getRange(2, startCol + ci, 1, 1).setBackground(BG.PROD_H);
+        }
+        const nameRange = ws.getRange(2, startCol, 1, w);
+        if (w > 1) nameRange.merge();
+        nameRange.setValue(item.name);
+        nameRange.setFontColor(FG.DARK);
+        nameRange.setFontWeight("bold");
+        nameRange.setFontSize(10);
+        nameRange.setHorizontalAlignment("center");
+        nameRange.setVerticalAlignment("middle");
+        nameRange.setFontFamily("맑은 고딕");
+        nameRange.setWrap(true);
 
-      const qtyRange = ws.getRange(3, startCol, 1, w);
-      if (w > 1) qtyRange.merge();
-      qtyRange.setValue(item.qty)
-        .setBackground(BG.WHITE).setHorizontalAlignment("center")
-        .setVerticalAlignment("middle").setFontFamily("맑은 고딕")
-        .setFontSize(10).setNumberFormat("#,##0");
-      startCol += w;
+        const qtyRange = ws.getRange(3, startCol, 1, w);
+        if (w > 1) qtyRange.merge();
+        qtyRange.setValue(item.qty)
+          .setBackground(BG.WHITE).setHorizontalAlignment("center")
+          .setVerticalAlignment("middle").setFontFamily("맑은 고딕")
+          .setFontSize(10).setNumberFormat("#,##0");
+        startCol += w;
     });
   }
 
@@ -525,9 +531,9 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
   lcContentRange.merge();
   if (lcData && lcData.length > 0) {
     const lcText = lcData.map(lc => {
-      const prev = lc.prev || "?";
-      const next = lc.next || "?";
-      return prev + " → " + next + " LINE CHANGE";
+        const prev = lc.prev || "?";
+        const next = lc.next || "?";
+        return prev + " → " + next + " LINE CHANGE";
     }).join("\n");
     lcContentRange.setValue(lcText)
       .setBackground(BG.WHITE).setFontColor("#4B0082")
@@ -665,10 +671,12 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
   // 외부교육 인원 (전 그룹, 노란배경 "교")
   const eduAbsent = [...GROUP.생산, ...GROUP.품질, ...GROUP.현장].filter(n => isExtEdu(n));
 
-  const jo = GROUP.품질.filter(n => getCode(n) === "조");
-  const yeon = GROUP.품질.filter(n => getCode(n) === "연");
-  const ext = GROUP.현장.filter(n => ["B", "P", "L"].includes(getCode(n)));
-  const night = GROUP.현장.filter(n => getCode(n) === "야");
+  // ※ "검/P", "P/교", "교/연"처럼 '/'로 이어 쓴 코드도 각각 따로 인정
+  //   (오전·오후엔 검진·교육, 저녁엔 연장 → 특이 근태사항 + 연장 둘 다에 잡힘)
+  const jo = GROUP.품질.filter(n => hasCode(getCode(n), "조"));
+  const yeon = GROUP.품질.filter(n => hasCode(getCode(n), "연"));
+  const ext = GROUP.현장.filter(n => ["B", "P", "L"].some(c => hasCode(getCode(n), c)));
+  const night = GROUP.현장.filter(n => hasCode(getCode(n), "야"));
 
   const totalPresent = present.생산.length + present.품질.length + present.현장.length;
 
@@ -676,20 +684,42 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
   const hasCAP = prodData.some(p => p.type === "CAP");
   const hasTan = prodData.some(p => p.type === "탄산");
 
-  let shiftCnt = 0;
+  // ── 근태 특이사항 ("검" 등): 출근자 중 해당 글자가 들어 있는 사람 ──
+  const allPresent = [...present.생산, ...present.품질, ...present.현장];
+  const attRuleOf = (name) => ATT_NOTE_RULES.find(rule => getCode(name).includes(rule.match)) || null;
+  const markName = (name) => {
+    const rule = attRuleOf(name);
+    if (!rule) return name;
+    const half = halfDayLabel(getCode(name));
+    return name + "(" + rule.mark + (half ? "·" + half : "") + ")";
+  };
+  // 그날 해당자가 있는 항목만 남김
+  const attNotes = ATT_NOTE_RULES
+    .map(rule => {
+      const ppl = allPresent
+        .filter(n => getCode(n).includes(rule.match))
+        .map(n => {
+          const half = halfDayLabel(getCode(n));
+          return half ? n + "(" + half + ")" : n;
+        });
+      return { label: rule.label, note: rule.note || "", ppl: ppl };
+    })
+    .filter(item => item.ppl.length > 0);
+
+  // ── 교대 식사(11:20 / 12:20): BTL·CAP·0.19L 캔 생산일 → 각 3명 고정 ──
+  const hasShiftMeal = hasBTL || hasCAP || hasTan;
+  const shiftMealCnt = hasShiftMeal ? SHIFT_MEAL.현장 + SHIFT_MEAL.품질 : 0;
+  const shiftMealNote = "현장 " + SHIFT_MEAL.현장 + " + 품질 " + SHIFT_MEAL.품질;
   const shiftReasons = [];
   if (hasBTL || hasCAP) {
-    shiftCnt += 2;
     const btlNames = prodData.filter(p => p.type === "BTL").map(p => p.name.replace(" BTL", ""));
     const parts = [];
     if (btlNames.length) parts.push(btlNames.join(", ") + " BTL");
     if (hasCAP) parts.push("CAP");
     shiftReasons.push(parts.join("/") + " 생산");
   }
-  if (hasTan) {
-    shiftCnt += 1;
-    shiftReasons.push("0.19L 캔 생산");
-  }
+  if (hasTan) shiftReasons.push("0.19L 캔 생산");
+  const shiftReason = shiftReasons.length ? shiftReasons.join(", ") : "—";
 
   // ════════════════════════════════════════════════════════
   // 행 8~11: 데이터
@@ -697,12 +727,12 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
   const groups = ["생산", "품질", "현장"];
 
   groups.forEach((g, i) => {
-    const r = 8 + i;
-    const bg = (i % 2 === 0) ? BG.WORK_R : BG.WHITE;
-    sc(ws, r, 1, g + "그룹", BG.WORK_H, FG.WHITE, true);
-    ws.getRange(r, 2, 1, 2).merge();
-    dataCell(ws, r, 2, present[g].length ? present[g].join(", ") : "—", bg);
-    dataCell(ws, r, 4, present[g].length || 0, bg, true, 12);
+      const r = 8 + i;
+      const bg = (i % 2 === 0) ? BG.WORK_R : BG.WHITE;
+      sc(ws, r, 1, g + "그룹", BG.WORK_H, FG.WHITE, true);
+      ws.getRange(r, 2, 1, 2).merge();
+      dataCell(ws, r, 2, present[g].length ? present[g].map(markName).join(", ") : "—", bg);
+      dataCell(ws, r, 4, present[g].length || 0, bg, true, 12);
   });
   sc(ws, 11, 1, "—", BG.WORK_R, FG.DARK, false);
   ws.getRange(11, 2, 1, 2).merge();
@@ -712,46 +742,42 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
   [
     { lbl: "조출 (품질)", ppl: jo, note: jo.length ? cipNote(prodData) : "—", bg: BG.SHFT_R },
     { lbl: "연장 (품질)", ppl: yeon, note: yeon.length ? cipNote(prodData) : "—", bg: BG.WHITE },
-    { lbl: "연장 (현장)", ppl: ext, note: ext.length ? shiftNote(workData, prodData) : "—", bg: BG.SHFT_R },
+    { lbl: "연장 (현장)", ppl: ext, note: ext.length ? shiftNote(ext.map(getCode), prodData) : "—", bg: BG.SHFT_R },
     { lbl: "야간 (현장)", ppl: night, note: night.length ? nightNote(prodData) : "—", bg: BG.WHITE }
   ].forEach((s, i) => {
-    const r = 8 + i;
-    sc(ws, r, 6, s.lbl, BG.SHFT_H, FG.WHITE, true);
-    dataCell(ws, r, 7, s.ppl.length ? s.ppl.join(", ") : "—", s.bg);
-    dataCell(ws, r, 8, s.ppl.length || "", s.bg, true, 12);
-    dataCell(ws, r, 9, s.note, s.bg);
+      const r = 8 + i;
+      sc(ws, r, 6, s.lbl, BG.SHFT_H, FG.WHITE, true);
+      dataCell(ws, r, 7, s.ppl.length ? s.ppl.join(", ") : "—", s.bg);
+      dataCell(ws, r, 8, s.ppl.length || "", s.bg, true, 12);
+      dataCell(ws, r, 9, s.note, s.bg);
   });
 
   groups.forEach((g, i) => {
-    const r = 8 + i;
-    const bg = (i % 2 === 0) ? BG.OFF_R : BG.WHITE;
-    sc(ws, r, 11, g + "그룹", BG.OFF_H, FG.WHITE, true);
-    const names = absent[g].map(n => n).join(", ");
-    const reason = absent[g].map(n => {
-      if (isExtEdu(n)) return n + " 외부교육";
-      if (isChulJang(n)) return n + " 출장";
-      return n + " " + (OFF_REASON[getCode(n)] || getCode(n));
-    }).join(", ");
-    dataCell(ws, r, 12, names || "—", bg);
-    dataCell(ws, r, 13, absent[g].length || "", bg, true, 12);
-    dataCell(ws, r, 14, reason || "—", bg);
+      const r = 8 + i;
+      const bg = (i % 2 === 0) ? BG.OFF_R : BG.WHITE;
+      sc(ws, r, 11, g + "그룹", BG.OFF_H, FG.WHITE, true);
+      const names = absent[g].map(n => n).join(", ");
+      const reason = absent[g].map(n => {
+          if (isExtEdu(n)) return n + " 외부교육";
+          if (isChulJang(n)) return n + " 출장";
+          return n + " " + (OFF_REASON[getCode(n)] || getCode(n));
+      }).join(", ");
+      dataCell(ws, r, 12, names || "—", bg);
+      dataCell(ws, r, 13, absent[g].length || "", bg, true, 12);
+      dataCell(ws, r, 14, reason || "—", bg);
   });
 
   sc(ws, 11, 11, "—", BG.OFF_R, FG.DARK, false);
   [12, 13, 14].forEach(c => ws.getRange(11, c).setBackground(BG.WHITE));
 
-  // ── SAM(12:20 식사) 블록 전용 인원 계산 ──────────────────
-  // 자사: BTL/CAP 생산일 → 현장 2 + 품질 1 (고정)
-  // 0.19L만 생산하는 날 → 자사 1
-  // 삼익: 0.19L 캔 생산일 → 2명 추가
+  // ── SAM(12:20 식사, 삼익 포함) 블록 전용 인원 계산 ──────────
+  // 자사: BTL·CAP·0.19L 캔 생산일 → 현장 2 + 품질 1 (고정)
+  // 삼익: 0.19L 캔 생산일 → 2명 추가 (협력사라 P6:S12 계산에는 안 들어감)
   const samParts = [];
   let samCount = 0;
-  if (hasBTL || hasCAP) {
-    samParts.push("현장 2", "품질 1");
-    samCount += 3;
-  } else if (hasTan) {
-    samParts.push("자사 1");
-    samCount += 1;
+  if (hasShiftMeal) {
+    samParts.push("현장 " + SHIFT_MEAL.현장, "품질 " + SHIFT_MEAL.품질);
+    samCount += shiftMealCnt;
   }
   if (hasTan) {
     samParts.push("삼익 2");
@@ -773,7 +799,7 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
   samContentRange.merge();
   if (samCount > 0) {
     const samText = samCount + "명"
-      + (samParts.length ? " (" + samParts.join(" + ") + ")" : "");
+    + (samParts.length ? " (" + samParts.join(" + ") + ")" : "");
     samContentRange.setValue(samText)
       .setBackground(samBG).setFontColor("#1A1A1A")
       .setFontWeight("bold").setFontSize(10)
@@ -791,22 +817,6 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
     .setBackground(BG.WHITE)
     .setBorder(false, false, false, false, false, false);
 
-  let meal1120Count = 0;
-  const meal1120Reasons = [];
-  if (hasBTL || hasCAP) {
-    meal1120Count += 2;
-    const btlN = prodData.filter(p => p.type === "BTL").map(p => p.name.replace(" BTL", ""));
-    const parts1120 = [];
-    if (btlN.length) parts1120.push(btlN.join(", ") + " BTL");
-    if (hasCAP) parts1120.push("CAP");
-    meal1120Reasons.push(parts1120.join("/") + " 생산");
-  }
-  if (hasTan) {
-    meal1120Count += 1;
-    meal1120Reasons.push("0.19L 캔 생산");
-  }
-  const meal1120Reason = meal1120Count > 0 ? meal1120Reasons.join(", ") : "—";
-
   const nightCnt = night.length;
   const notiCount = totalPresent - nightCnt;
   ws.getRange(2, NOTI_COL)
@@ -823,10 +833,13 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
     true, true, true, true, null, null,
     "#375623", SpreadsheetApp.BorderStyle.SOLID_MEDIUM
   );
-  const totalShiftMeal = meal1120Count + shiftCnt + nightCnt;
-  const meal1200actual = totalPresent - totalShiftMeal;
-  const meal1200reason = totalShiftMeal > 0
-    ? "교대·야간 " + totalShiftMeal + "명 제외"
+  const totalShiftMeal = shiftMealCnt * 2 + nightCnt; // 11:20 + 12:20 + 야간
+  const meal1200actual = Math.max(totalPresent - totalShiftMeal, 0);
+  const exclParts = [];
+  if (shiftMealCnt > 0) exclParts.push("교대 " + (shiftMealCnt * 2) + "명");
+  if (nightCnt > 0) exclParts.push("야간 " + nightCnt + "명");
+  const meal1200reason = exclParts.length
+    ? exclParts.join(" · ") + " 제외"
     : "전원 12:00 식사";
 
   const noWorkers = totalPresent === 0;
@@ -842,9 +855,9 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
     },
     {
       lbl: "11:20 식사",
-      val: (!noWorkers && meal1120Count > 0) ? meal1120Count : "—",
-      reason: (!noWorkers && meal1120Count > 0) ? meal1120Reason : "—",
-      note: (!noWorkers && meal1120Count > 0) ? "11:20 교대 식사" : "—",
+      val: (!noWorkers && shiftMealCnt > 0) ? shiftMealCnt : "—",
+      reason: (!noWorkers && shiftMealCnt > 0) ? shiftReason : "—",
+      note: (!noWorkers && shiftMealCnt > 0) ? shiftMealNote : "—",
       bg: BG.WHITE
     },
     {
@@ -856,17 +869,17 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
     },
     {
       lbl: "12:20 식사",
-      val: (!noWorkers && shiftCnt > 0) ? shiftCnt : "—",
-      reason: (!noWorkers && shiftCnt > 0) ? shiftReasons.join(", ") : "—",
-      note: (!noWorkers && shiftCnt > 0) ? "12:20 교대 식사" : "—",
+      val: (!noWorkers && shiftMealCnt > 0) ? shiftMealCnt : "—",
+      reason: (!noWorkers && shiftMealCnt > 0) ? shiftReason : "—",
+      note: (!noWorkers && shiftMealCnt > 0) ? shiftMealNote : "—",
       bg: BG.WHITE
     }
   ].forEach((m, i) => {
-    const r = 8 + i;
-    sc(ws, r, 16, m.lbl, BG.MEAL_H, FG.DARK, true);
-    dataCell(ws, r, 17, m.val, m.bg, true, 12);
-    dataCell(ws, r, 18, m.reason, m.bg);
-    dataCell(ws, r, 19, m.note, m.bg);
+      const r = 8 + i;
+      sc(ws, r, 16, m.lbl, BG.MEAL_H, FG.DARK, true);
+      dataCell(ws, r, 17, m.val, m.bg, true, 12);
+      dataCell(ws, r, 18, m.reason, m.bg);
+      dataCell(ws, r, 19, m.note, m.bg);
   });
 
   // ════════════════════════════════════════════════════════
@@ -942,7 +955,7 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
         true, true, true, true, null, null,
         "#555555", SpreadsheetApp.BorderStyle.SOLID_MEDIUM
       );
-    });
+  });
   ws.getRange("A1:" + colLetter(titleEndCol) + "4").setBorder(
     true, true, true, true, null, null,
     "#555555", SpreadsheetApp.BorderStyle.SOLID_MEDIUM
@@ -960,6 +973,9 @@ function buildLayout(ws, today, prodData, workData, lcData, specialData) {
 
   // ★ 오늘의 안전포인트 (행14~15)
   buildSafetyPoint(ws, BG, FG);
+
+  // ★ 특이 근태사항 (H14:L15~)
+  buildAttendanceNotes(ws, attNotes, FG);
 }
 
 // ============================================================
@@ -994,6 +1010,68 @@ function buildSafetyPoint(ws, BG, FG) {
 }
 
 // ============================================================
+// 특이 근태사항 (H14:L15, 해당 항목이 여러 개면 아래로 한 줄씩)
+//   H: 구분  /  I~K: 해당 인원  /  L: 비고
+//   출근 집계에는 포함되지만 따로 알아야 하는 근태 (반일 건강검진 등)
+// ============================================================
+function buildAttendanceNotes(ws, attNotes, FG) {
+  const ATT_H = "#45818E"; // 머리글 (청록)
+  const ATT_R = "#D0E0E3"; // 구분 칸 배경
+  const ATT_B = "#134F5C"; // 바깥 테두리
+
+  const START_ROW = 14;
+  const lastRow = START_ROW + Math.max(attNotes.length, 1);
+
+  // 머리글 (행14) — 안전포인트 머리글과 같은 줄
+  sc(ws, START_ROW, 8, "📝 특이 근태사항", ATT_H, FG.WHITE, true, 10);
+  mc(ws, "I" + START_ROW + ":K" + START_ROW, "해당 인원", ATT_H, FG.WHITE, true, 10);
+  sc(ws, START_ROW, 12, "비고", ATT_H, FG.WHITE, true, 10);
+
+  if (attNotes.length === 0) {
+    // 해당자 없음 → 한 줄로 안내
+    mc(ws, "H15:L15", "특이 근태사항 없음", "#FFFFFF", "#888888", false, 10);
+  } else {
+    attNotes.forEach((item, i) => {
+      const r = START_ROW + 1 + i;
+      if (r > 15) ws.setRowHeight(r, 41);
+      sc(ws, r, 8, item.label, ATT_R, FG.DARK, true, 10);
+      mc(ws, "I" + r + ":K" + r, item.ppl.join(", "), "#FFFFFF", FG.DARK, true, 10);
+      sc(ws, r, 12, item.ppl.length + "명" + (item.note ? "\n" + item.note : ""),
+        "#FFFFFF", FG.DARK, false, 9);
+    });
+  }
+
+  const box = ws.getRange(START_ROW, 8, lastRow - START_ROW + 1, 5);
+  box.setBorder(true, true, true, true, true, true, "#AAAAAA", SpreadsheetApp.BorderStyle.SOLID);
+  box.setBorder(true, true, true, true, null, null, ATT_B, SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+}
+
+/**
+ * 근무계획 코드를 '/' 기준으로 나눠 조각 목록으로 만듦
+ *   "검/P" → ["검", "P"],  "P / 교" → ["P", "교"],  "B" → ["B"]
+ * (쉼표·가운뎃점·띄어쓰기로 이어 써도 같이 나눔, 영문은 대문자로 통일)
+ */
+function codeTokens(code) {
+  return String(code || "")
+    .split(/[\/,·\s]+/)
+    .map(s => s.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+/** 코드 조각 중에 c 가 정확히 들어 있는지 ("검/P" 에 "P" → true) */
+function hasCode(code, c) {
+  return codeTokens(code).includes(c);
+}
+
+/** 근무계획 셀 글자에 오전/오후가 적혀 있으면 꺼내기 (없으면 "") */
+function halfDayLabel(code) {
+  const s = String(code || "");
+  if (s.includes("오전")) return "오전";
+  if (s.includes("오후")) return "오후";
+  return "";
+}
+
+// ============================================================
 // 비고 문자열 헬퍼
 // ============================================================
 function cipNote(prodData) {
@@ -1003,21 +1081,22 @@ function cipNote(prodData) {
   return items.length ? items.join(", ") + " CIP" : "해당 없음";
 }
 
-function shiftNote(workData, prodData) {
-  const codes = Object.values(workData).map(v => (v && typeof v === "object") ? v.code : v);
+/** extCodes: 연장(현장) 인원들의 근무계획 코드 목록 (예: ["P", "검/P", "B"]) */
+function shiftNote(extCodes, prodData) {
+  const has = (c) => extCodes.some(code => hasCode(code, c));
   const reasons = [];
-  if (codes.includes("P")) {
+  if (has("P")) {
     const EXCLUDE = ["18.9L", "0.12L"];
     const items = prodData
       .filter(p => p.type === "제품" && !EXCLUDE.includes(p.name))
       .map(p => p.name);
     if (items.length) reasons.push(items.join(", ") + " 제품 생산");
   }
-  if (codes.includes("B")) {
+  if (has("B")) {
     const items = prodData.filter(p => p.type === "BTL").map(p => p.name.replace(" BTL", ""));
     if (items.length) reasons.push(items.join(", ") + " BTL 생산");
   }
-  if (codes.includes("L")) reasons.push("L/C 및 정비 연장");
+  if (has("L")) reasons.push("L/C 및 정비 연장");
   return reasons.length ? reasons.join(", ") : "해당 없음";
 }
 
